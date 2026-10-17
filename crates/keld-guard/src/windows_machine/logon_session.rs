@@ -541,7 +541,36 @@ mod tests {
                     detail: "its logon time is zero or negative",
                 })
             );
-            assert_eq!(session_ended(SESSION, recorded(), state), Ok(()));
+            assert_eq!(
+                session_ended(SESSION, recorded(), state),
+                Err(WindowsLogonSessionError::Malformed {
+                    session: SESSION,
+                    detail: "a present logon session returned a nonpositive logon time",
+                }),
+                "a nonpositive success timestamp must not authorize owner retirement",
+            );
+        }
+    }
+
+    #[test]
+    fn same_luid_nonpositive_live_logon_time_cannot_authorize_retirement() {
+        // This is a successful LsaGetLogonSessionData reply with an actual
+        // copied same-LUID payload, not the unreachable failure+Some seam.
+        // Positive recorded logon time is already guaranteed at bootstrap.
+        for logon_time in [0, -1, i64::MIN] {
+            let state = observe(
+                SESSION,
+                Ok(reply(STATUS_SUCCESS, Some((SESSION, logon_time)))),
+            )
+            .expect("successful same-LUID LSA reply is copied");
+            assert_eq!(
+                session_ended(SESSION, recorded(), state),
+                Err(WindowsLogonSessionError::Malformed {
+                    session: SESSION,
+                    detail: "a present logon session returned a nonpositive logon time",
+                }),
+                "nonpositive {logon_time} cannot establish an unrelated logon generation",
+            );
         }
     }
 
