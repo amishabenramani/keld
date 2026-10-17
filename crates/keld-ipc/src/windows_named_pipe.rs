@@ -152,6 +152,10 @@ struct ServerInner {
     /// owned pipe HANDLE under `io_issue`, before native `ReadFile` submission.
     #[cfg(test)]
     after_raw_pipe_borrow: Mutex<Option<TestConsumeGate>>,
+    /// Test-only pause after accept_until obtains a raw HANDLE but before
+    /// ConnectNamedPipe submits its OVERLAPPED on the exact kernel object.
+    #[cfg(test)]
+    after_accept_pipe_borrow: Mutex<Option<TestConsumeGate>>,
     /// Test witness: reported once by a thread that finds the lifecycle lock
     /// held and is about to wait for it.
     #[cfg(test)]
@@ -381,6 +385,8 @@ impl WindowsNamedPipeServer {
                 #[cfg(test)]
                 after_raw_pipe_borrow: Mutex::new(None),
                 #[cfg(test)]
+                after_accept_pipe_borrow: Mutex::new(None),
+                #[cfg(test)]
                 lifecycle_waiter: Mutex::new(None),
             }),
         })
@@ -398,7 +404,10 @@ impl WindowsNamedPipeServer {
         let mut overlapped = operation_event.overlapped();
         // SAFETY: the pipe was created for overlapped I/O; `overlapped` and
         // its event remain live until completion is observed below.
-        let connected_now = unsafe { ConnectNamedPipe(self.raw_pipe()?, &raw mut overlapped) } != 0;
+        let pipe = self.raw_pipe()?;
+        #[cfg(test)]
+        wait_at_test_consume_gate(&self.inner.after_accept_pipe_borrow);
+        let connected_now = unsafe { ConnectNamedPipe(pipe, &raw mut overlapped) } != 0;
         if connected_now {
             self.inner.connected.store(true, Ordering::Release);
             return Ok(WaitOutcome::Ready);
@@ -654,6 +663,8 @@ impl WindowsNamedPipeServer {
                 after_stream_cancel_check: Mutex::new(None),
                 #[cfg(test)]
                 after_raw_pipe_borrow: Mutex::new(None),
+                #[cfg(test)]
+                after_accept_pipe_borrow: Mutex::new(None),
                 #[cfg(test)]
                 lifecycle_waiter: Mutex::new(None),
             }),
@@ -2045,6 +2056,98 @@ mod cancellation_tests {
             process_handle_count().expect("final native handle count"),
             baseline,
             "terminal close and a racing read must not leak any pipe/event handle"
+        );
+    }
+
+    /// Fail-first native kernel HANDLE oracle: a terminal close must not
+    /// invalidate an acceptor's already borrowed HANDLE before ConnectNamedPipe.
+    #[test]
+    fn terminal_close_cannot_invalidate_a_borrowed_accept_handle() {
+        use std::os::windows::io::AsRawHandle as _;
+        use std::sync::{PoisonError, mpsc};
+        use std::thread;
+
+        use super::{WaitOutcome, WindowsNamedPipeServer, process_handle_count};
+        use crate::bootstrap::{TestConsumeGate, random_test_locator};
+        use windows_sys::Win32::Foundation::GetHandleInformation;
+
+        // Prime the native pipe/ACL path before counting possible leaked OS handles.
+        let warm = WindowsNamedPipeServer::bind(&format!(
+            r"\\.\pipe\keld-gh920-warm-{}",
+            random_test_locator().unwrap()
+        ))
+        .expect("create warm native pipe");
+        warm.close_terminal().expect("warm terminal close");
+        drop(warm);
+        let baseline = process_handle_count().expect("warm baseline");
+
+        let server = WindowsNamedPipeServer::bind(&format!(
+            r"\\.\pipe\keld-gh920-accept-{}",
+            random_test_locator().unwrap()
+        ))
+        .expect("create real Windows named pipe");
+        let (entered_tx, entered_rx) = mpsc::sync_channel(1);
+        let (release_tx, release_rx) = mpsc::channel();
+        *server
+            .inner
+            .after_accept_pipe_borrow
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = Some(TestConsumeGate {
+            entered: entered_tx,
+            release: release_rx,
+        });
+        let (result_tx, result_rx) = mpsc::sync_channel(1);
+        let acceptor_server = server.clone();
+        let acceptor = thread::spawn(move || {
+            result_tx
+                .send(acceptor_server.accept_until(Some(Instant::now() + Duration::from_secs(2))))
+                .expect("report exact kernel accept outcome");
+        });
+        entered_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("acceptor borrowed raw HANDLE before native ConnectNamedPipe");
+
+        let raw = server
+            .inspect_owned_pipe(|owned| Ok(owned.as_raw_handle()))
+            .expect("read original kernel HANDLE identity");
+        let mut flags = 0_u32;
+        // SAFETY: the server still owns this live pipe HANDLE; flags is writable.
+        let valid_before = unsafe { GetHandleInformation(raw.cast(), &raw mut flags) } != 0;
+
+        // Real terminal close proceeds while ConnectNamedPipe is not submitted.
+        // This needs no peer connection and does not rely on scheduling sleeps.
+        let close = server.close_terminal();
+        // SAFETY: GetHandleInformation only queries validity of the exact
+        // captured HANDLE value; no ownership transfer or dereference occurs.
+        let valid_after = unsafe { GetHandleInformation(raw.cast(), &raw mut flags) } != 0;
+        release_tx.send(()).expect("release native acceptor");
+        let observed = result_rx
+            .recv_timeout(Duration::from_secs(3))
+            .expect("accept must report and not hang");
+        acceptor.join().expect("join native acceptor");
+        drop(server);
+        close.expect("terminal close succeeds");
+        assert!(valid_before, "original named pipe HANDLE was never live");
+        assert!(
+            valid_after,
+            "terminal close invalidated a HANDLE already borrowed by accept_until"
+        );
+        let safely_stopped = match &observed {
+            Ok(WaitOutcome::Cancelled | WaitOutcome::DeadlineElapsed) => true,
+            Err(error) => {
+                error.kind() == std::io::ErrorKind::NotConnected
+                    || error.raw_os_error() == Some(995)
+            }
+            _ => false,
+        };
+        assert!(
+            safely_stopped,
+            "accept must stop without using a stale native HANDLE: {observed:?}"
+        );
+        assert_eq!(
+            process_handle_count().expect("final process HANDLE count"),
+            baseline,
+            "no kernel HANDLE/event may leak after close versus accept"
         );
     }
 
