@@ -1,5 +1,7 @@
 //! Fresh-generation child preparation and the exact revocation lease.
-use super::process_group::{LocalGroupWitness, terminate_attested_group};
+use super::process_group::{
+    LocalGroupWitness, reconcile_denied_signal_after_reap, terminate_attested_group,
+};
 #[cfg(test)]
 use super::validate_group_leader;
 use super::{
@@ -145,8 +147,10 @@ pub(super) struct GuardedPrimaryLease {
 // turn into an unverified host CLEAR. Reap this exact Child before asking the
 // host to independently prove the group gone. Do not wait before revoking
 // role/IPC authority or issuing the original birth-attested group signal.
-fn reap_guarded_child_before_clear(child: &mut Child) -> Result<(), RuntimeError> {
-    let deadline = Instant::now() + GUARDIAN_SHUTDOWN_DEADLINE;
+fn reap_guarded_child_before_clear(
+    child: &mut Child,
+    deadline: Instant,
+) -> Result<(), RuntimeError> {
     loop {
         match child.try_wait() {
             Ok(Some(_)) => return Ok(()),
@@ -220,7 +224,7 @@ impl GenerationLease for GuardedPrimaryLease {
     fn revoke(self, cause: RevocationCause) -> Result<(), RuntimeError> {
         // A synthetic wire-only fixture may not own a direct Child. Shipping
         // supervisor callers use revoke_with_child below for its OS custody.
-        self.revoke_with_post_signal(cause, || Ok(()))
+        self.revoke_with_post_signal(cause, None, || Ok(()))
     }
 
     fn revoke_with_child(
@@ -228,7 +232,12 @@ impl GenerationLease for GuardedPrimaryLease {
         cause: RevocationCause,
         child: &mut Child,
     ) -> Result<(), RuntimeError> {
-        self.revoke_with_post_signal(cause, || reap_guarded_child_before_clear(child))
+        // One revocation budget covers the signal, exact direct-Child reap and
+        // read-only post-reap absence proof; do not start a fresh timeout.
+        let deadline = Instant::now() + GUARDIAN_SHUTDOWN_DEADLINE;
+        self.revoke_with_post_signal(cause, Some(deadline), || {
+            reap_guarded_child_before_clear(child, deadline)
+        })
     }
 }
 
@@ -236,6 +245,7 @@ impl GuardedPrimaryLease {
     fn revoke_with_post_signal(
         mut self,
         cause: RevocationCause,
+        direct_child_deadline: Option<Instant>,
         reap_after_group_signal: impl FnOnce() -> Result<(), RuntimeError>,
     ) -> Result<(), RuntimeError> {
         if let Some(admission) = self.admission.take() {
@@ -262,11 +272,8 @@ impl GuardedPrimaryLease {
         // birth before host registration. Never grant raw-PGID kill authority
         // to a stale lease after its leader has been recycled.
         let verified_group = self.group_witness.take();
-        if let Some(identity) = verified_group
-            && let Err(error) = terminate_attested_group(identity)
-        {
-            failures.push(error);
-        }
+        let signal_failure =
+            verified_group.and_then(|identity| terminate_attested_group(identity).err());
         #[cfg(not(test))]
         if verified_group.is_none() && group_pid.is_some() {
             failures.push(lifecycle_error(
@@ -291,7 +298,22 @@ impl GuardedPrimaryLease {
                 failures.push(error);
             }
         }
-        if let Err(error) = reap_after_group_signal() {
+        let reap_result = reap_after_group_signal();
+        if let Some(error) = signal_failure {
+            // Only a real retained direct Child that finished reaping can
+            // reconcile the exact signal-phase EPERM. An ACK-only fixture or
+            // failed reap never gains this authorization.
+            let result = match (verified_group, direct_child_deadline) {
+                (Some(identity), Some(deadline)) if reap_result.is_ok() => {
+                    reconcile_denied_signal_after_reap(identity, error, deadline)
+                }
+                _ => Err(error),
+            };
+            if let Err(error) = result {
+                failures.push(error);
+            }
+        }
+        if let Err(error) = reap_result {
             // The retained supervisor Child has not proved retirement. Do
             // not send CLEAR and let the host forget a potentially live group.
             failures.push(error);

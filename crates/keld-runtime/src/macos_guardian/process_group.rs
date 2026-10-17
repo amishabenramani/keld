@@ -322,6 +322,51 @@ pub(super) fn finish_group_termination(
     }
 }
 
+// The Guardian may receive EPERM for a group signal while a killed direct
+// child or same-group descendant is still a zombie. Its original direct
+// Child is reaped *after* the signal; only then can a failed signal be
+// reconsidered. Neither a stale PID nor EPERM grants new kill authority.
+// Reconcile the exact signal-phase EPERM only when the kernel reports that
+// BOTH the original leader PID and the entire group are absent. An ambiguous
+// zombie-only group may become absent within the original revocation budget;
+// a newly signallable/reused group is an immediate failure, never a target.
+pub(super) fn reconcile_denied_signal_after_reap(
+    group: GroupIdentity,
+    denied: RuntimeError,
+    deadline: Instant,
+) -> Result<(), RuntimeError> {
+    if !matches!(
+        &denied,
+        RuntimeError::Lifecycle {
+            phase: "macOS guardian process-group signal",
+            source,
+        } if source.raw_os_error() == Some(libc::EPERM)
+    ) {
+        return Err(denied);
+    }
+    let Ok(raw) = validate_group_pid(group.pid) else {
+        return Err(denied);
+    };
+    loop {
+        let leader = getpgid(Some(Pid::from_raw(raw)));
+        let group_live = kill(Pid::from_raw(-raw), None);
+        #[cfg(test)]
+        if matches!(
+            (&leader, &group_live),
+            (Err(Errno::ESRCH), Err(Errno::EPERM))
+        ) {
+            report_test_ambiguous_probe(group.pid);
+        }
+        match (leader, group_live) {
+            (Err(Errno::ESRCH), Err(Errno::ESRCH)) => return Ok(()),
+            (Err(Errno::ESRCH), Err(Errno::EPERM)) if Instant::now() < deadline => {
+                std::thread::sleep(GENERATION_CONTROL_POLL);
+            }
+            _ => return Err(denied),
+        }
+    }
+}
+
 // Registration has not yet transferred ownership. A rejected or dropped
 // bootstrap must not block the host forever waiting for uncooperative EOF.
 pub(super) fn reap_pending_guardian(child: &mut Child) -> Result<ExitStatus, RuntimeError> {
