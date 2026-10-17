@@ -11,9 +11,9 @@ use nix::unistd::Pid;
 
 use super::super::GUARDIAN_SHUTDOWN_DEADLINE;
 use super::super::process_group::{
-    finish_group_termination, install_test_ambiguous_probe_receipt, observe_group_identity,
-    reconcile_denied_signal_after_reap, terminate_attested_group, terminate_registered_group,
-    validate_guardian_child_group,
+    GroupIdentity, finish_group_termination, install_test_ambiguous_probe_receipt,
+    observe_group_identity, reconcile_denied_signal_after_reap, terminate_attested_group,
+    terminate_registered_group, validate_guardian_child_group,
 };
 
 mod cleanup_authority;
@@ -199,30 +199,30 @@ fn guardian_signal_eperm_reconciles_only_after_native_group_absence() {
         Err(Errno::ESRCH),
         "the native group was absent before any fixture rescue"
     );
-    assert!(
-        reconcile_denied_signal_after_reap(
-            original,
-            super::super::lifecycle_error(
-                "macOS guardian process-group signal",
-                std::io::Error::from_raw_os_error(nix::libc::EIO),
-            ),
-            std::time::Instant::now()
-        )
-        .is_err(),
-        "a non-EPERM signal failure is never erased"
-    );
-    assert!(
-        reconcile_denied_signal_after_reap(
-            original,
-            super::super::lifecycle_error(
-                "macOS guardian registered group identity changed",
-                std::io::Error::from_raw_os_error(nix::libc::EPERM),
-            ),
-            std::time::Instant::now()
-        )
-        .is_err(),
-        "a birth/identity refusal cannot be mistaken for a signal-phase EPERM"
-    );
+    assert_other_native_failures_remain_denied(original);
+}
+
+// This separate error-class oracle runs *after* the real two-member native
+// group above has been proved absent. Replacing the EPERM-only classifier
+// with unconditional success must fail both assertions.
+fn assert_other_native_failures_remain_denied(original: GroupIdentity) {
+    for (phase, errno) in [
+        ("macOS guardian process-group signal", nix::libc::EIO),
+        (
+            "macOS guardian registered group identity changed",
+            nix::libc::EPERM,
+        ),
+    ] {
+        assert!(
+            reconcile_denied_signal_after_reap(
+                original,
+                super::super::lifecycle_error(phase, std::io::Error::from_raw_os_error(errno)),
+                std::time::Instant::now()
+            )
+            .is_err(),
+            "unrelated native failure {phase} ({errno}) must not be reconciled"
+        );
+    }
 }
 
 #[test]
