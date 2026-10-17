@@ -224,7 +224,7 @@ impl GenerationLease for GuardedPrimaryLease {
     fn revoke(self, cause: RevocationCause) -> Result<(), RuntimeError> {
         // A synthetic wire-only fixture may not own a direct Child. Shipping
         // supervisor callers use revoke_with_child below for its OS custody.
-        self.revoke_with_post_signal(cause, None, || Ok(()), terminate_attested_group)
+        self.revoke_with_post_signal(cause, false, |_| Ok(()), terminate_attested_group)
     }
 
     fn revoke_with_child(
@@ -232,13 +232,13 @@ impl GenerationLease for GuardedPrimaryLease {
         cause: RevocationCause,
         child: &mut Child,
     ) -> Result<(), RuntimeError> {
-        // One revocation budget covers the signal, exact direct-Child reap and
-        // read-only post-reap absence proof; do not start a fresh timeout.
-        let deadline = Instant::now() + GUARDIAN_SHUTDOWN_DEADLINE;
+        // The Child's original five-second budget begins after the group
+        // signal, not before an independently bounded host REVOKED exchange.
+        // Post-reap absence proof consumes only the remainder of that budget.
         self.revoke_with_post_signal(
             cause,
-            Some(deadline),
-            || reap_guarded_child_before_clear(child, deadline),
+            true,
+            |deadline| reap_guarded_child_before_clear(child, deadline),
             terminate_attested_group,
         )
     }
@@ -248,8 +248,8 @@ impl GuardedPrimaryLease {
     fn revoke_with_post_signal(
         mut self,
         cause: RevocationCause,
-        direct_child_deadline: Option<Instant>,
-        reap_after_group_signal: impl FnOnce() -> Result<(), RuntimeError>,
+        retained_direct_child: bool,
+        reap_after_group_signal: impl FnOnce(Instant) -> Result<(), RuntimeError>,
         signal_original_group: impl FnOnce(
             super::process_group::GroupIdentity,
         ) -> Result<(), RuntimeError>,
@@ -304,14 +304,18 @@ impl GuardedPrimaryLease {
                 failures.push(error);
             }
         }
-        let reap_result = reap_after_group_signal();
+        // Preserve the previous native direct-Child reap budget exactly:
+        // CONTROL_REVOKED and the birth-attested signal have already finished.
+        // Never extend it with a new timeout after the exact Child wait.
+        let reap_deadline = Instant::now() + GUARDIAN_SHUTDOWN_DEADLINE;
+        let reap_result = reap_after_group_signal(reap_deadline);
         if let Some(error) = signal_failure {
             // Only a real retained direct Child that finished reaping can
             // reconcile the exact signal-phase EPERM. An ACK-only fixture or
             // failed reap never gains this authorization.
-            let result = match (verified_group, direct_child_deadline) {
-                (Some(identity), Some(deadline)) if reap_result.is_ok() => {
-                    reconcile_denied_signal_after_reap(identity, error, deadline)
+            let result = match (verified_group, retained_direct_child) {
+                (Some(identity), true) if reap_result.is_ok() => {
+                    reconcile_denied_signal_after_reap(identity, error, reap_deadline)
                 }
                 _ => Err(error),
             };

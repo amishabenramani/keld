@@ -446,12 +446,25 @@ fn real_guardian_lease_reconciles_eperm_only_after_original_child_reap() {
         .register_child(pid)
         .expect("kernel validates exact original leader and direct parent");
     let lease = locally_enrolled_lease(pid, witness);
-    let shutdown_deadline = Instant::now() + super::super::GUARDIAN_SHUTDOWN_DEADLINE;
+    // Independent monotonic ordering witness: if the Child-reap deadline
+    // starts before the signal callback (including the bounded REVOKED
+    // exchange), this expected lower bound necessarily exceeds it. No sleep
+    // or host scheduling assumption is needed for the deadline falsifier.
+    let signal_entered_deadline = std::cell::Cell::new(None::<Instant>);
     let outcome = lease.revoke_with_post_signal(
         RevocationCause::Shutdown,
-        Some(shutdown_deadline),
-        || super::reap_guarded_child_before_clear(&mut leader.0, shutdown_deadline),
+        true,
+        |deadline| {
+            assert!(
+                deadline >= signal_entered_deadline.get().expect("original signal ran"),
+                "native Child-reap budget began before the original group signal"
+            );
+            super::reap_guarded_child_before_clear(&mut leader.0, deadline)
+        },
         |identity| {
+            signal_entered_deadline.set(Some(
+                Instant::now() + super::super::GUARDIAN_SHUTDOWN_DEADLINE,
+            ));
             // Inject ONLY the old signal-result error AFTER the real native
             // signal succeeds. No mock group, fake PID, or unsafe test kill.
             super::super::process_group::terminate_attested_group(identity)?;
