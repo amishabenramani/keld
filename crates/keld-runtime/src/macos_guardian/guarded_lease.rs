@@ -311,7 +311,15 @@ impl GuardedPrimaryLease {
             // failed reap never gains this authorization.
             let result = match (verified_group, direct_child_deadline) {
                 (Some(identity), Some(deadline)) if reap_result.is_ok() => {
-                    reconcile_denied_signal_after_reap(identity, error, deadline)
+                    // INTENTIONAL FAIL-CLOSED MUTANT: even kernel-confirmed
+                    // absence must raise a false fault. Only the isolated
+                    // red-control PR contains this branch; never integrate.
+                    reconcile_denied_signal_after_reap(identity, error, deadline).and(Err(
+                        lifecycle_error(
+                            "test-only negative-control Guardian EPERM",
+                            io::Error::other("intentional post-reap refusal"),
+                        ),
+                    ))
                 }
                 _ => Err(error),
             };
