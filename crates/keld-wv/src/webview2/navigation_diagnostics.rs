@@ -10,6 +10,7 @@ pub(super) struct FirstNavigationDiagnostic {
     created: Instant,
     dispatch_attempted: Option<Instant>,
     loop_setup_started: Option<Instant>,
+    first_loop_turn: Option<Instant>,
     phase: &'static str,
     phase_at: Instant,
     detail: Option<String>,
@@ -22,6 +23,7 @@ impl FirstNavigationDiagnostic {
             created: now,
             dispatch_attempted: None,
             loop_setup_started: None,
+            first_loop_turn: None,
             phase: "window-creation",
             phase_at: now,
             detail: None,
@@ -36,6 +38,14 @@ impl FirstNavigationDiagnostic {
     pub(super) fn loop_setup_started(&mut self) {
         self.loop_setup_started = Some(Instant::now());
         self.record("message-loop-setup-started");
+    }
+
+    // Record exactly the first Tao callback; the loop can be constructed long
+    // before Windows actually enters its first message-pump turn.
+    pub(super) fn first_loop_turn(&mut self) {
+        if self.first_loop_turn.is_none() {
+            self.first_loop_turn = Some(Instant::now());
+        }
     }
 
     pub(super) fn deadline_elapsed(&mut self) {
@@ -89,14 +99,23 @@ impl FirstNavigationDiagnostic {
         let loop_ms = self
             .loop_setup_started
             .map(|at| at.saturating_duration_since(self.created).as_millis());
+        let first_loop_turn_ms = self
+            .first_loop_turn
+            .map(|at| at.saturating_duration_since(self.created).as_millis());
         let phase_ms = self
             .phase_at
             .saturating_duration_since(self.created)
             .as_millis();
         let detail = self.detail.as_deref().unwrap_or("none");
         format!(
-            "first-navigation phase={} phase_at_ms={} total_ms={} dispatch_attempt_at_ms={:?} loop_setup_at_ms={:?} detail={}",
-            self.phase, phase_ms, since_created, dispatch_attempt_ms, loop_ms, detail
+            "first-navigation phase={} phase_at_ms={} total_ms={} dispatch_attempt_at_ms={:?} loop_setup_at_ms={:?} first_loop_turn_at_ms={:?} detail={}",
+            self.phase,
+            phase_ms,
+            since_created,
+            dispatch_attempt_ms,
+            loop_ms,
+            first_loop_turn_ms,
+            detail
         )
     }
 }
@@ -105,6 +124,27 @@ impl FirstNavigationDiagnostic {
 mod tests {
     use super::FirstNavigationDiagnostic;
     use std::sync::atomic::{AtomicBool, Ordering};
+
+    #[test]
+    fn first_tao_turn_is_a_distinct_observation_from_loop_setup() {
+        let mut diag = FirstNavigationDiagnostic::new();
+        diag.dispatch_attempted();
+        diag.loop_setup_started();
+        let before = diag.snapshot();
+        assert!(
+            before.contains("first_loop_turn_at_ms=None"),
+            "the first Tao callback must be distinguishable from merely creating its loop: {before}"
+        );
+        diag.first_loop_turn();
+        let first = diag.first_loop_turn;
+        let after = diag.snapshot();
+        assert!(after.contains("first_loop_turn_at_ms=Some("), "{after}");
+        diag.first_loop_turn();
+        assert_eq!(
+            diag.first_loop_turn, first,
+            "later callbacks cannot rewrite the first-turn clock"
+        );
+    }
 
     #[test]
     fn phase_names_distinguish_dispatch_attempt_from_loop_setup() {
