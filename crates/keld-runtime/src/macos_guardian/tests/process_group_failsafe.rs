@@ -172,6 +172,25 @@ fn guardian_signal_eperm_reconciles_only_after_native_group_absence() {
         reconcile_denied_signal_after_reap(original, denied(), std::time::Instant::now()).is_err(),
         "reaping only the original leader cannot prove a whole group is gone"
     );
+    // A zero-remaining-budget check alone cannot catch a false-positive
+    // success in the FUTURE-deadline EPERM retry branch. Keep the separate
+    // native member deliberately unreaped for an existing bounded interval:
+    // even after the retry budget expires, an occupied zombie-only group
+    // is not absence and must never authorize a successful CLEAR.
+    assert!(
+        reconcile_denied_signal_after_reap(
+            original,
+            denied(),
+            std::time::Instant::now() + GUARDIAN_SHUTDOWN_DEADLINE / 4,
+        )
+        .is_err(),
+        "future-budget EPERM ambiguity cannot be reconciled before the other member is reaped"
+    );
+    assert_eq!(
+        kill(Pid::from_raw(-raw), None),
+        Err(Errno::EPERM),
+        "the original same-group member must remain an unreaped native zombie"
+    );
 
     let (observed_tx, observed_rx) = std::sync::mpsc::channel();
     let _receipt = install_test_ambiguous_probe_receipt(group, observed_tx);
