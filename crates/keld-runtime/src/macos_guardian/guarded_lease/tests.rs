@@ -397,3 +397,84 @@ fn local_guardian_revocation_cannot_kill_foreign_group_after_birth_change() {
         "refused Guardian revocation signaled an unrelated live process group"
     );
 }
+
+// Unlike the group-only helper test, this exercises the exact Guardian lease
+// owner: enrolled original kernel birth -> actual SIGKILL -> exact retained
+// direct Child reap -> synthetic signal-phase EPERM -> independent kernel
+// absence. A mutation that omits the lease's reconciliation must turn RED.
+struct TestOwnedSingleLeader(Child);
+
+impl Drop for TestOwnedSingleLeader {
+    fn drop(&mut self) {
+        if matches!(self.0.try_wait(), Ok(None)) {
+            let _ = self.0.kill();
+        }
+        let _ = self.0.wait();
+    }
+}
+
+#[test]
+fn real_guardian_lease_reconciles_eperm_only_after_original_child_reap() {
+    let root = tempfile::tempdir().expect("private fixture root");
+    let socket = root.path().join("descendant.sock");
+    // This fixture role does not spawn descendants; only the direct Child's
+    // exact OS identity is needed and its Drop never signals a recycled PGID.
+    let mut leader = TestOwnedSingleLeader(
+        role_command("descendant", root.path())
+            .process_group(0)
+            .spawn()
+            .expect("one isolated native leader"),
+    );
+    let pid = leader.0.id();
+    let ready_deadline = Instant::now() + BOUND;
+    loop {
+        if let Ok(observed_pid) = fresh_response(&socket) {
+            assert_eq!(
+                observed_pid, pid,
+                "the fixture must be the exact direct Child"
+            );
+            break;
+        }
+        assert!(
+            Instant::now() < ready_deadline,
+            "single native leader never answered the active challenge"
+        );
+        thread::yield_now();
+    }
+    let witness = LocalGroupWitness::default();
+    witness
+        .register_child(pid)
+        .expect("kernel validates exact original leader and direct parent");
+    let lease = locally_enrolled_lease(pid, witness);
+    let shutdown_deadline = Instant::now() + super::super::GUARDIAN_SHUTDOWN_DEADLINE;
+    let outcome = lease.revoke_with_post_signal(
+        RevocationCause::Shutdown,
+        Some(shutdown_deadline),
+        || super::reap_guarded_child_before_clear(&mut leader.0, shutdown_deadline),
+        |identity| {
+            // Inject ONLY the old signal-result error AFTER the real native
+            // signal succeeds. No mock group, fake PID, or unsafe test kill.
+            super::super::process_group::terminate_attested_group(identity)?;
+            Err(super::super::lifecycle_error(
+                "macOS guardian process-group signal",
+                io::Error::from_raw_os_error(nix::libc::EPERM),
+            ))
+        },
+    );
+    outcome.expect("post-reap native ESRCH must reconcile only the injected EPERM");
+    assert!(
+        fresh_response(&socket).is_err(),
+        "previous Bun-equivalent leader cannot answer after Guardian revoke"
+    );
+    let raw = i32::try_from(pid).expect("isolated leader PGID");
+    assert_eq!(
+        nix::unistd::getpgid(Some(Pid::from_raw(raw))),
+        Err(nix::errno::Errno::ESRCH),
+        "original direct Child must have been reaped"
+    );
+    assert_eq!(
+        nix::sys::signal::kill(Pid::from_raw(-raw), None),
+        Err(nix::errno::Errno::ESRCH),
+        "whole native group must be absent before accepting signal-phase EPERM"
+    );
+}

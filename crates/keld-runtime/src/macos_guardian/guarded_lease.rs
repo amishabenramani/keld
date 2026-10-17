@@ -224,7 +224,7 @@ impl GenerationLease for GuardedPrimaryLease {
     fn revoke(self, cause: RevocationCause) -> Result<(), RuntimeError> {
         // A synthetic wire-only fixture may not own a direct Child. Shipping
         // supervisor callers use revoke_with_child below for its OS custody.
-        self.revoke_with_post_signal(cause, None, || Ok(()))
+        self.revoke_with_post_signal(cause, None, || Ok(()), terminate_attested_group)
     }
 
     fn revoke_with_child(
@@ -235,9 +235,12 @@ impl GenerationLease for GuardedPrimaryLease {
         // One revocation budget covers the signal, exact direct-Child reap and
         // read-only post-reap absence proof; do not start a fresh timeout.
         let deadline = Instant::now() + GUARDIAN_SHUTDOWN_DEADLINE;
-        self.revoke_with_post_signal(cause, Some(deadline), || {
-            reap_guarded_child_before_clear(child, deadline)
-        })
+        self.revoke_with_post_signal(
+            cause,
+            Some(deadline),
+            || reap_guarded_child_before_clear(child, deadline),
+            terminate_attested_group,
+        )
     }
 }
 
@@ -247,6 +250,9 @@ impl GuardedPrimaryLease {
         cause: RevocationCause,
         direct_child_deadline: Option<Instant>,
         reap_after_group_signal: impl FnOnce() -> Result<(), RuntimeError>,
+        signal_original_group: impl FnOnce(
+            super::process_group::GroupIdentity,
+        ) -> Result<(), RuntimeError>,
     ) -> Result<(), RuntimeError> {
         if let Some(admission) = self.admission.take() {
             let (group_pid, result) = admission.finish();
@@ -273,7 +279,7 @@ impl GuardedPrimaryLease {
         // to a stale lease after its leader has been recycled.
         let verified_group = self.group_witness.take();
         let signal_failure =
-            verified_group.and_then(|identity| terminate_attested_group(identity).err());
+            verified_group.and_then(|identity| signal_original_group(identity).err());
         #[cfg(not(test))]
         if verified_group.is_none() && group_pid.is_some() {
             failures.push(lifecycle_error(
