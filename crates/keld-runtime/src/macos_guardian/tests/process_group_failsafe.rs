@@ -159,6 +159,45 @@ fn guardian_signal_eperm_reconciles_only_after_native_group_absence() {
         leader.0.wait().expect("reap exact original Child").signal(),
         Some(9)
     );
+    assert_unreaped_native_member_remains_denied(original, raw, denied);
+
+    let (observed_tx, observed_rx) = std::sync::mpsc::channel();
+    let _receipt = install_test_ambiguous_probe_receipt(group, observed_tx);
+    let reaper = thread::spawn(move || {
+        observed_rx
+            .recv_timeout(GUARDIAN_SHUTDOWN_DEADLINE)
+            .expect("product observed actual EPERM zombie-group ambiguity");
+        member.0.wait().expect("reap independent group member")
+    });
+    let resolved = reconcile_denied_signal_after_reap(
+        original,
+        denied(),
+        std::time::Instant::now() + GUARDIAN_SHUTDOWN_DEADLINE / 4,
+    );
+    assert_eq!(
+        reaper
+            .join()
+            .expect("independent member-reap worker")
+            .signal(),
+        Some(9)
+    );
+    resolved.expect("only genuine post-reap ESRCH of leader and group can reconcile EPERM");
+    assert_eq!(
+        kill(Pid::from_raw(-raw), None),
+        Err(Errno::ESRCH),
+        "the native group was absent before any fixture rescue"
+    );
+    assert_other_native_failures_remain_denied(original);
+}
+
+// Keep one original native same-PGID member an unreaped zombie for the entire
+// read-only retry budget. The negative oracle is independent of the later
+// receipt-driven reaper, and detects an illegal early-Ok on ESRCH + EPERM.
+fn assert_unreaped_native_member_remains_denied(
+    original: GroupIdentity,
+    raw: i32,
+    denied: impl Fn() -> super::super::RuntimeError,
+) {
     assert_eq!(
         nix::unistd::getpgid(Some(Pid::from_raw(raw))),
         Err(Errno::ESRCH)
@@ -191,34 +230,6 @@ fn guardian_signal_eperm_reconciles_only_after_native_group_absence() {
         Err(Errno::EPERM),
         "the original same-group member must remain an unreaped native zombie"
     );
-
-    let (observed_tx, observed_rx) = std::sync::mpsc::channel();
-    let _receipt = install_test_ambiguous_probe_receipt(group, observed_tx);
-    let reaper = thread::spawn(move || {
-        observed_rx
-            .recv_timeout(GUARDIAN_SHUTDOWN_DEADLINE)
-            .expect("product observed actual EPERM zombie-group ambiguity");
-        member.0.wait().expect("reap independent group member")
-    });
-    let resolved = reconcile_denied_signal_after_reap(
-        original,
-        denied(),
-        std::time::Instant::now() + GUARDIAN_SHUTDOWN_DEADLINE / 4,
-    );
-    assert_eq!(
-        reaper
-            .join()
-            .expect("independent member-reap worker")
-            .signal(),
-        Some(9)
-    );
-    resolved.expect("only genuine post-reap ESRCH of leader and group can reconcile EPERM");
-    assert_eq!(
-        kill(Pid::from_raw(-raw), None),
-        Err(Errno::ESRCH),
-        "the native group was absent before any fixture rescue"
-    );
-    assert_other_native_failures_remain_denied(original);
 }
 
 // This separate error-class oracle runs *after* the real two-member native
