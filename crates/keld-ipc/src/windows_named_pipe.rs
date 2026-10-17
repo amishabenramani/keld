@@ -156,6 +156,10 @@ struct ServerInner {
     /// `ConnectNamedPipe` submits its OVERLAPPED on the exact kernel object.
     #[cfg(test)]
     after_accept_pipe_borrow: Mutex<Option<TestConsumeGate>>,
+    /// Test gate after the native `ConnectNamedPipe` result and issue unlock,
+    /// before its success can be published against terminal close.
+    #[cfg(test)]
+    after_accept_connect_result: Mutex<Option<TestConsumeGate>>,
     /// Test witness: reported once by a thread that finds the lifecycle lock
     /// held and is about to wait for it.
     #[cfg(test)]
@@ -387,6 +391,8 @@ impl WindowsNamedPipeServer {
                 #[cfg(test)]
                 after_accept_pipe_borrow: Mutex::new(None),
                 #[cfg(test)]
+                after_accept_connect_result: Mutex::new(None),
+                #[cfg(test)]
                 lifecycle_waiter: Mutex::new(None),
             }),
         })
@@ -432,15 +438,17 @@ impl WindowsNamedPipeServer {
         // dropping a mutex must not replace the Win32 last-error code.
         let connect_error = (!connected_now).then(io::Error::last_os_error);
         drop(issuance);
+        #[cfg(test)]
+        wait_at_test_consume_gate(&self.inner.after_accept_connect_result);
         if connected_now {
-            self.inner.connected.store(true, Ordering::Release);
+            self.publish_connected()?;
             return Ok(WaitOutcome::Ready);
         }
         let error = connect_error
             .ok_or_else(|| io::Error::other("native ConnectNamedPipe start lost its OS error"))?;
         match error.raw_os_error() {
             Some(code) if code == ERROR_PIPE_CONNECTED.cast_signed() => {
-                self.inner.connected.store(true, Ordering::Release);
+                self.publish_connected()?;
                 Ok(WaitOutcome::Ready)
             }
             Some(code) if code == ERROR_IO_PENDING.cast_signed() => {
@@ -455,7 +463,7 @@ impl WindowsNamedPipeServer {
                 )?;
                 match outcome {
                     WaitOutcome::Ready | WaitOutcome::PeerClosed => {
-                        self.inner.connected.store(true, Ordering::Release);
+                        self.publish_connected()?;
                     }
                     WaitOutcome::Cancelled | WaitOutcome::DeadlineElapsed => {
                         self.close_terminal()?;
@@ -464,11 +472,29 @@ impl WindowsNamedPipeServer {
                 Ok(outcome)
             }
             Some(232 | 233) => {
-                self.inner.connected.store(true, Ordering::Release);
+                self.publish_connected()?;
                 Ok(WaitOutcome::PeerClosed)
             }
             _ => Err(error),
         }
+    }
+
+    /// Publish a completed accept only while the terminal state remains open.
+    /// Both publication and terminal close take `io_issue`, so the consumed
+    /// check and connected state update cannot straddle terminal close. Unlike
+    /// `lifecycle`, this short lock cannot stall a concurrent one-shot gate.
+    /// Neither mutex is held across OVERLAPPED completion observation.
+    fn publish_connected(&self) -> io::Result<()> {
+        let _issuance = self
+            .inner
+            .io_issue
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        if self.inner.consumed.load(Ordering::Acquire) {
+            return Err(closed_pipe_error());
+        }
+        self.inner.connected.store(true, Ordering::Release);
+        Ok(())
     }
 
     pub(crate) fn disconnect_for_retry(&self) -> io::Result<()> {
@@ -580,7 +606,6 @@ impl WindowsNamedPipeServer {
 
     pub(crate) fn close_terminal(&self) -> io::Result<()> {
         let _lifecycle = self.lock_lifecycle();
-        self.inner.consumed.store(true, Ordering::Release);
         // Keep terminal close behind any read/write's brief native issuance.
         // Lock order lifecycle -> io_issue -> pipe; no lock crosses a wait.
         let _io_issue = self
@@ -588,6 +613,9 @@ impl WindowsNamedPipeServer {
             .io_issue
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
+        // Terminal state and a completed accept's publication share this
+        // lock; no later accept can set connected after a terminal close.
+        self.inner.consumed.store(true, Ordering::Release);
         self.cancel_pending_io()?;
         // SAFETY: a pending operation independently pins the same HANDLE
         // allocation until its completion is observed. Disconnect cannot
@@ -691,6 +719,8 @@ impl WindowsNamedPipeServer {
                 after_raw_pipe_borrow: Mutex::new(None),
                 #[cfg(test)]
                 after_accept_pipe_borrow: Mutex::new(None),
+                #[cfg(test)]
+                after_accept_connect_result: Mutex::new(None),
                 #[cfg(test)]
                 lifecycle_waiter: Mutex::new(None),
             }),
@@ -2093,7 +2123,7 @@ mod cancellation_tests {
         use std::sync::{PoisonError, mpsc};
         use std::thread;
 
-        use super::{WaitOutcome, WindowsNamedPipeServer, process_handle_count};
+        use super::{WindowsNamedPipeServer, process_handle_count};
         use crate::bootstrap::{TestConsumeGate, random_test_locator};
         use windows_sys::Win32::Foundation::GetHandleInformation;
 
@@ -2158,14 +2188,10 @@ mod cancellation_tests {
             valid_after,
             "terminal close invalidated a HANDLE already borrowed by accept_until"
         );
-        let safely_stopped = match &observed {
-            Ok(WaitOutcome::Cancelled | WaitOutcome::DeadlineElapsed) => true,
-            Err(error) => {
-                error.kind() == std::io::ErrorKind::NotConnected
-                    || error.raw_os_error() == Some(995)
-            }
-            _ => false,
-        };
+        let safely_stopped = matches!(
+            &observed,
+            Err(error) if error.kind() == std::io::ErrorKind::NotConnected
+        );
         assert!(
             safely_stopped,
             "accept must stop without using a stale native HANDLE: {observed:?}"
@@ -2174,6 +2200,99 @@ mod cancellation_tests {
             process_handle_count().expect("final process HANDLE count"),
             baseline,
             "no kernel HANDLE/event may leak after close versus accept"
+        );
+    }
+
+    /// A completed native connection must not resurrect terminal pipe state.
+    /// The real client establishes `ERROR_PIPE_CONNECTED` before the acceptor
+    /// calls `ConnectNamedPipe`; a one-shot gate stops before `connected.store`.
+    #[test]
+    fn terminal_close_cannot_be_followed_by_late_accept_ready_publication() {
+        use std::sync::{PoisonError, mpsc};
+        use std::thread;
+
+        use super::{WindowsNamedPipeServer, process_handle_count};
+        use crate::bootstrap::{TestConsumeGate, random_test_locator};
+
+        let warm = WindowsNamedPipeServer::bind(&format!(
+            r"\\.\pipe\keld-gh920-publication-warm-{}",
+            random_test_locator().expect("warm unique endpoint")
+        ))
+        .expect("warm real pipe");
+        warm.close_terminal().expect("warm native close");
+        drop(warm);
+        let baseline = process_handle_count().expect("kernel handle census");
+
+        let endpoint = format!(
+            r"\\.\pipe\keld-gh920-publish-{}",
+            random_test_locator().expect("unique endpoint")
+        );
+        let server = WindowsNamedPipeServer::bind(&endpoint).expect("real native listener");
+        let client = WindowsNamedPipeServer::connect_client(&endpoint)
+            .expect("real client connected before native accept");
+        let (entered_tx, entered_rx) = mpsc::sync_channel(1);
+        let (release_tx, release_rx) = mpsc::channel();
+        *server
+            .inner
+            .after_accept_connect_result
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = Some(TestConsumeGate {
+            entered: entered_tx,
+            release: release_rx,
+        });
+        let (accept_tx, accept_rx) = mpsc::sync_channel(1);
+        let accept_server = server.clone();
+        let acceptor = thread::spawn(move || {
+            accept_tx
+                .send(accept_server.accept_until(Some(Instant::now() + Duration::from_secs(2))))
+                .expect("report real accept result");
+        });
+        entered_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("native ConnectNamedPipe returned, but state is not yet published");
+        assert!(
+            !server.is_connected(),
+            "gate precedes connected publication"
+        );
+
+        let (close_tx, close_rx) = mpsc::sync_channel(1);
+        let close_server = server.clone();
+        let closer = thread::spawn(move || {
+            close_tx
+                .send(close_server.close_terminal())
+                .expect("report real terminal close");
+        });
+        let terminal = close_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("terminal close cannot depend on pending state publication");
+        closer.join().expect("join close owner");
+        release_tx
+            .send(())
+            .expect("release completed native accept result");
+        let observation = accept_rx
+            .recv_timeout(Duration::from_secs(3))
+            .expect("late accept must reach a bounded final result");
+        acceptor.join().expect("join native acceptor");
+        terminal.expect("native terminal close succeeds");
+        let still_connected = server.is_connected();
+        drop(client);
+        drop(server);
+
+        assert!(
+            matches!(
+                &observation,
+                Err(error) if error.kind() == std::io::ErrorKind::NotConnected
+            ),
+            "terminal must refuse a late native Ready/PeerClosed: {observation:?}"
+        );
+        assert!(
+            !still_connected,
+            "terminal pipe must never be re-published as connected"
+        );
+        assert_eq!(
+            process_handle_count().expect("kernel handle count after teardown"),
+            baseline,
+            "accept/terminal race must leak no pipe/event/connection handles"
         );
     }
 
