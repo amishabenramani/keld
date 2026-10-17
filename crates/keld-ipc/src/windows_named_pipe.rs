@@ -144,11 +144,12 @@ struct ServerInner {
     /// before it takes the lifecycle lock.
     #[cfg(test)]
     before_consume: Mutex<Option<TestConsumeGate>>,
-    /// Test-only pause between the last cancellation precheck and I/O submission.
+    /// Test-only pause after the early cancellation precheck, before the
+    /// final check guarded by `io_issue`.
     #[cfg(test)]
     after_stream_cancel_check: Mutex<Option<TestConsumeGate>>,
-    /// Deterministic test pause after borrowing the raw pipe HANDLE and
-    /// before the native read/write syscall can issue. No production gate.
+    /// Test-only pause after the final cancellation check and borrowed
+    /// owned pipe HANDLE under `io_issue`, before native `ReadFile` submission.
     #[cfg(test)]
     after_raw_pipe_borrow: Mutex<Option<TestConsumeGate>>,
     /// Test witness: reported once by a thread that finds the lifecycle lock
@@ -1602,7 +1603,7 @@ mod cancellation_tests {
     /// millisecond rounds up, a whole one stays exact, zero waits one
     /// millisecond (never a busy poll), an unbounded wait is `INFINITE`, and
     /// an overlong one saturates below it. Oracle: literal millisecond values.
-    /// Native failure-first: cancellation after the last precheck but before
+    /// Native failure-first: cancellation after the first precheck but before
     /// `ReadFile` must not schedule new pending I/O which `CancelIoEx` already missed.
     /// The actual connected peer stays silent; 900ms is a bounded red-case
     /// escape limit, not the expected behaviour (`ERROR_OPERATION_ABORTED` 995).
@@ -1747,6 +1748,157 @@ mod cancellation_tests {
             receive.raw_os_error(),
             Some(121),
             "silent connected peer times out without receiving a byte: {receive}"
+        );
+    }
+
+    /// The last cancellation check and the actual Win32 read submission form
+    /// one atomic issuance interval. The earlier precheck gate cannot prove it.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "both native gate witnesses, cancel/issue ordering and kernel peer/leak oracles must be visible"
+    )]
+    #[test]
+    fn cancelled_issuer_holds_io_lock_after_final_check_until_native_read_starts() {
+        use std::io::Read as _;
+        use std::sync::{PoisonError, TryLockError, mpsc};
+        use std::thread;
+
+        use super::{WaitOutcome, WindowsNamedPipeServer, process_handle_count};
+        use crate::bootstrap::{TestConsumeGate, random_test_locator};
+
+        // First use of named-pipe ACL APIs can initialize unrelated process
+        // handles: compare counts only after the same native path was warmed.
+        let warm_name = format!(
+            r"\\.\pipe\keld-gh905-final-warm-{}",
+            random_test_locator().expect("fresh warm endpoint")
+        );
+        let warm = WindowsNamedPipeServer::bind(&warm_name).expect("warm server");
+        let warm_peer = WindowsNamedPipeServer::connect_client(&warm_name).expect("warm peer");
+        assert_eq!(
+            warm.accept_until(Some(Instant::now() + Duration::from_secs(3)))
+                .expect("warm accept"),
+            WaitOutcome::Ready
+        );
+        warm.close_terminal().expect("warm terminal");
+        drop(warm_peer);
+        drop(warm);
+        let baseline = process_handle_count().expect("warmed native handle census");
+
+        let name = format!(
+            r"\\.\pipe\keld-gh905-final-{}",
+            random_test_locator().expect("fresh native endpoint")
+        );
+        let server = WindowsNamedPipeServer::bind(&name).expect("bind real pipe");
+        let mut client = WindowsNamedPipeServer::connect_client(&name).expect("silent peer");
+        client
+            .set_read_timeout(Some(Duration::from_millis(180)))
+            .expect("bounded peer-byte oracle");
+        assert_eq!(
+            server
+                .accept_until(Some(Instant::now() + Duration::from_secs(3)))
+                .expect("native accept"),
+            WaitOutcome::Ready
+        );
+        let mut stream = server.stream().expect("unconsumed server stream");
+        stream
+            .set_read_timeout(Some(Duration::from_millis(900)))
+            .expect("bounded native read");
+        let (entered, at_final_check) = mpsc::sync_channel(1);
+        let (release_read, resume_read) = mpsc::channel();
+        *server
+            .inner
+            .after_raw_pipe_borrow
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = Some(TestConsumeGate {
+            entered,
+            release: resume_read,
+        });
+        let (cancel_entered, at_cancel_gate) = mpsc::sync_channel(1);
+        let (release_cancel, resume_cancel) = mpsc::channel();
+        server.install_cancel_gate(TestConsumeGate {
+            entered: cancel_entered,
+            release: resume_cancel,
+        });
+
+        let (read_sent, read_outcome) = mpsc::sync_channel(1);
+        let reader = thread::spawn(move || {
+            let mut byte = [0_u8; 1];
+            read_sent
+                .send(stream.read(&mut byte))
+                .expect("report native read");
+        });
+        at_final_check
+            .recv_timeout(Duration::from_secs(2))
+            .expect("reader passed final cancellation check before ReadFile");
+
+        // A compile-valid mutant drops io_issue after that check, then
+        // reacquires it before ReadFile without checking cancellation again.
+        let lock_held = matches!(
+            server.inner.io_issue.try_lock(),
+            Err(TryLockError::WouldBlock)
+        );
+        let (cancel_sent, cancel_outcome) = mpsc::sync_channel(1);
+        let canceller = server.clone();
+        let cancel_thread = thread::spawn(move || {
+            cancel_sent
+                .send(canceller.cancel())
+                .expect("report native cancel");
+        });
+        at_cancel_gate
+            .recv_timeout(Duration::from_secs(2))
+            .expect("cancel acquired lifecycle before trying io_issue");
+        release_cancel.send(()).expect("allow actual cancellation");
+
+        // If an unsafe gap exists, wait for cancellation to ACT while the
+        // read remains parked. Correct code holds io_issue, so it must
+        // release the reader first and let CancelIoEx abort pending I/O.
+        let early_cancel = if lock_held {
+            None
+        } else {
+            Some(
+                cancel_outcome
+                    .recv_timeout(Duration::from_secs(2))
+                    .expect("unlocked mutant allows cancel to finish before ReadFile"),
+            )
+        };
+        release_read
+            .send(())
+            .expect("release actual Win32 ReadFile");
+        let read = read_outcome
+            .recv_timeout(Duration::from_secs(3))
+            .expect("native read must terminate after cancellation");
+        reader.join().expect("native reader joined");
+        early_cancel
+            .unwrap_or_else(|| {
+                cancel_outcome
+                    .recv_timeout(Duration::from_secs(3))
+                    .expect("cancel must finish after native issuance")
+            })
+            .expect("native cancellation succeeded");
+        cancel_thread.join().expect("native canceller joined");
+
+        let error = read.expect_err("no silent-peer read is admitted after cancellation");
+        assert_eq!(
+            error.raw_os_error(),
+            Some(995),
+            "late ReadFile escaped cancellation and waited for deadline: {error}"
+        );
+        assert!(
+            lock_held,
+            "io_issue was unlocked after final cancellation check"
+        );
+        assert!(!server.consume(), "cancel won the unconsumed one-shot");
+        let mut byte = [0_u8; 1];
+        let peer = client
+            .read(&mut byte)
+            .expect_err("silent peer received no byte");
+        assert_eq!(peer.raw_os_error(), Some(121), "{peer}");
+        drop(client);
+        drop(server);
+        assert_eq!(
+            process_handle_count().expect("final native handle census"),
+            baseline,
+            "the checked and cancelled native I/O must not leak HANDLEs"
         );
     }
 
