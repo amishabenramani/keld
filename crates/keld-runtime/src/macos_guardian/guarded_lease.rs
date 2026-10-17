@@ -314,7 +314,7 @@ impl GuardedPrimaryLease {
                     // INTENTIONAL FAIL-CLOSED MUTANT: even kernel-confirmed
                     // absence must raise a false fault. Only the isolated
                     // red-control PR contains this branch; never integrate.
-                    reconcile_denied_signal_after_reap(identity, error, deadline).and(Err(
+                    reconcile_denied_signal_after_reap(identity, error, deadline).and(Err::<(), _>(
                         lifecycle_error(
                             "test-only negative-control Guardian EPERM",
                             io::Error::other("intentional post-reap refusal"),
