@@ -152,8 +152,8 @@ struct ServerInner {
     /// owned pipe HANDLE under `io_issue`, before native `ReadFile` submission.
     #[cfg(test)]
     after_raw_pipe_borrow: Mutex<Option<TestConsumeGate>>,
-    /// Test-only pause after accept_until obtains a raw HANDLE but before
-    /// ConnectNamedPipe submits its OVERLAPPED on the exact kernel object.
+    /// Test-only pause after `accept_until` obtains a raw HANDLE but before
+    /// `ConnectNamedPipe` submits its OVERLAPPED on the exact kernel object.
     #[cfg(test)]
     after_accept_pipe_borrow: Mutex<Option<TestConsumeGate>>,
     /// Test witness: reported once by a thread that finds the lifecycle lock
@@ -402,17 +402,43 @@ impl WindowsNamedPipeServer {
         let operation_event = &self.inner.connect_event;
         operation_event.reset()?;
         let mut overlapped = operation_event.overlapped();
-        // SAFETY: the pipe was created for overlapped I/O; `overlapped` and
-        // its event remain live until completion is observed below.
-        let pipe = self.raw_pipe()?;
+        // A terminal close may remove the named endpoint while this accept
+        // waits. Retain the original HANDLE through its overlapped completion.
+        let pipe = self
+            .inner
+            .pipe
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .as_ref()
+            .cloned()
+            .ok_or_else(closed_pipe_error)?;
         #[cfg(test)]
         wait_at_test_consume_gate(&self.inner.after_accept_pipe_borrow);
-        let connected_now = unsafe { ConnectNamedPipe(pipe, &raw mut overlapped) } != 0;
+        // The final terminal check and ConnectNamedPipe issue share the short
+        // issuance lock with close_terminal. Never hold it across a wait.
+        let issuance = self
+            .inner
+            .io_issue
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        if self.inner.consumed.load(Ordering::Acquire) {
+            return Err(closed_pipe_error());
+        }
+        // SAFETY: the pipe is the same pinned OS HANDLE owned until the
+        // OVERLAPPED operation completes; its event and state also stay live.
+        let connected_now =
+            unsafe { ConnectNamedPipe(pipe.as_raw_handle(), &raw mut overlapped) } != 0;
+        // Capture the native status while still holding the issuance lock:
+        // dropping a mutex must not replace the Win32 last-error code.
+        let connect_error = (!connected_now).then(io::Error::last_os_error);
+        drop(issuance);
         if connected_now {
             self.inner.connected.store(true, Ordering::Release);
             return Ok(WaitOutcome::Ready);
         }
-        match io::Error::last_os_error().raw_os_error() {
+        let error = connect_error
+            .ok_or_else(|| io::Error::other("native ConnectNamedPipe start lost its OS error"))?;
+        match error.raw_os_error() {
             Some(code) if code == ERROR_PIPE_CONNECTED.cast_signed() => {
                 self.inner.connected.store(true, Ordering::Release);
                 Ok(WaitOutcome::Ready)
@@ -421,7 +447,7 @@ impl WindowsNamedPipeServer {
                 #[cfg(test)]
                 let _pending = PendingAccept::new(&self.inner.accept_pending);
                 let outcome = wait_for_operation(
-                    self.raw_pipe()?,
+                    pipe.as_raw_handle(),
                     &mut overlapped,
                     operation_event.raw(),
                     self.raw_cancel_event(),
@@ -441,7 +467,7 @@ impl WindowsNamedPipeServer {
                 self.inner.connected.store(true, Ordering::Release);
                 Ok(WaitOutcome::PeerClosed)
             }
-            _ => Err(io::Error::last_os_error()),
+            _ => Err(error),
         }
     }
 
@@ -2060,7 +2086,7 @@ mod cancellation_tests {
     }
 
     /// Fail-first native kernel HANDLE oracle: a terminal close must not
-    /// invalidate an acceptor's already borrowed HANDLE before ConnectNamedPipe.
+    /// invalidate an acceptor's already borrowed HANDLE before `ConnectNamedPipe`.
     #[test]
     fn terminal_close_cannot_invalidate_a_borrowed_accept_handle() {
         use std::os::windows::io::AsRawHandle as _;
