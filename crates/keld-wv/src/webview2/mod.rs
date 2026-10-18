@@ -3684,6 +3684,28 @@ mod tests {
     }
 
     #[test]
+    fn real_controller_launch_deadline_keeps_its_profile_failure_kind() {
+        let (_sender, receiver) = std::sync::mpsc::channel::<()>();
+        let observed = super::wait_for_launch_with_message_pump_until(
+            &receiver,
+            std::time::Instant::now() - std::time::Duration::from_secs(1),
+        )
+        .expect_err("a deadline that already elapsed must refuse before pumping messages");
+        let error = super::ControllerCreationError::Pump(observed).into_wv_error();
+        let WvError::ProfileSelection(profile) = error else {
+            panic!("the real pump deadline must preserve its typed profile error: {error}");
+        };
+        assert_eq!(profile.kind(), ProfileErrorKind::LifecycleUnproven);
+        let message = profile.to_string();
+        assert!(message.contains("KELD-WV-009"), "{message}");
+        assert!(
+            message.contains(super::LAUNCH_DEADLINE_EXPIRED),
+            "{message}"
+        );
+        assert!(!message.contains("KELD-WV-008"), "{message}");
+    }
+
+    #[test]
     fn environment_creation_hresult_keeps_its_phase_and_does_not_claim_missing_runtime() {
         let error = super::environment_creation_error(
             "completion",
