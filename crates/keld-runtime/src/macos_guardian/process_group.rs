@@ -425,6 +425,12 @@ pub(super) fn reconcile_denied_signal_after_reap(
         return Err(denied);
     };
     loop {
+        // A post-reap EPERM may be reconsidered only inside the *original*
+        // revocation budget. Even genuine absence observed afterward cannot
+        // retroactively convert the terminal signal error into success.
+        if Instant::now() >= deadline {
+            return Err(denied);
+        }
         let leader = getpgid(Some(Pid::from_raw(raw)));
         let group_live = kill(Pid::from_raw(-raw), None);
         #[cfg(test)]
@@ -435,7 +441,9 @@ pub(super) fn reconcile_denied_signal_after_reap(
             report_test_ambiguous_probe(group.pid);
         }
         match (leader, group_live) {
-            (Err(Errno::ESRCH), Err(Errno::ESRCH)) => return Ok(()),
+            (Err(Errno::ESRCH), Err(Errno::ESRCH)) if Instant::now() < deadline => {
+                return Ok(());
+            }
             (Err(Errno::ESRCH), Err(Errno::EPERM)) if Instant::now() < deadline => {
                 std::thread::sleep(GENERATION_CONTROL_POLL);
             }

@@ -255,6 +255,68 @@ fn assert_other_native_failures_remain_denied(original: GroupIdentity) {
     }
 }
 
+// A later, genuine dual-ESRCH observation must not retroactively reconcile a
+// signal-phase EPERM after the original revocation deadline has passed. The
+// original group is truly absent, so this is not an ambiguous-zombie oracle.
+#[test]
+fn expired_post_reap_reconciliation_cannot_accept_late_native_absence() {
+    let mut leader = TestOwnedGroupChild(
+        Command::new("/bin/sleep")
+            .arg("30")
+            .process_group(0)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("own isolated native leader"),
+    );
+    let group_pid = leader.0.id();
+    let original = observe_group_identity(group_pid).expect("pin original native leader birth");
+    let raw = i32::try_from(group_pid).expect("positive group id");
+    assert_ne!(Pid::from_raw(raw), nix::unistd::getpgrp());
+
+    terminate_attested_group(original).expect("signal only original attested group");
+    assert_eq!(
+        leader
+            .0
+            .wait()
+            .expect("reap original owned leader")
+            .signal(),
+        Some(9)
+    );
+    assert_eq!(
+        nix::unistd::getpgid(Some(Pid::from_raw(raw))),
+        Err(Errno::ESRCH)
+    );
+    assert_eq!(
+        kill(Pid::from_raw(-raw), None),
+        Err(Errno::ESRCH),
+        "the kernel must confirm genuine original group absence before the call"
+    );
+
+    let signal_denied = || {
+        super::super::lifecycle_error(
+            "macOS guardian process-group signal",
+            std::io::Error::from_raw_os_error(nix::libc::EPERM),
+        )
+    };
+    let expired = std::time::Instant::now()
+        .checked_sub(std::time::Duration::from_millis(1))
+        .expect("clock represents a deadline already elapsed");
+    let refusal = reconcile_denied_signal_after_reap(original, signal_denied(), expired)
+        .expect_err("late group absence cannot extend the original revocation deadline");
+    assert!(
+        refusal.to_string().contains("process-group signal"),
+        "keep the original denied-signal error on expired reconciliation: {refusal}"
+    );
+    reconcile_denied_signal_after_reap(
+        original,
+        signal_denied(),
+        std::time::Instant::now() + GUARDIAN_SHUTDOWN_DEADLINE,
+    )
+    .expect("the same real absence is acceptable inside a fresh, unexpired budget");
+}
+
 #[test]
 fn stale_group_birth_cannot_signal_a_live_unrelated_native_group() {
     let mut outsider = TestOwnedGroupChild(
