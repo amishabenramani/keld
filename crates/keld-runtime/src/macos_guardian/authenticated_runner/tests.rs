@@ -8,21 +8,46 @@ use nix::sys::wait::{WaitPidFlag, waitpid as native_waitpid};
 use nix::unistd::{Pid, getpgid, getpgrp, pipe};
 use std::fs::File;
 use std::os::unix::process::CommandExt as _;
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, Stdio};
 use std::sync::mpsc;
 use std::time::Duration;
 
+// Own the actual spawned Child from the first fallible fixture assertion
+// until it is transferred to run_live_group. A setup panic must never leave
+// the native /bin/sleep leader executing without an owned direct-child wait.
+struct PendingDirectChild(Option<Child>);
+
+impl PendingDirectChild {
+    fn take(&mut self) -> Child {
+        self.0.take().expect("transfer exact native child once")
+    }
+}
+
+impl Drop for PendingDirectChild {
+    fn drop(&mut self) {
+        let Some(child) = self.0.as_mut() else {
+            return;
+        };
+        if matches!(child.try_wait(), Ok(None)) {
+            let _ = child.kill();
+        }
+        let _ = child.wait();
+    }
+}
+
 #[test]
 fn denied_attested_kgr1_group_signal_never_blocks_on_live_direct_child_wait() {
-    let child = Command::new("/bin/sleep")
-        .arg("30")
-        .process_group(0)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .expect("own original native KGR1-style group leader");
-    let pid = child.id();
+    let mut child = PendingDirectChild(Some(
+        Command::new("/bin/sleep")
+            .arg("30")
+            .process_group(0)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("own original native KGR1-style group leader"),
+    ));
+    let pid = child.0.as_ref().expect("original child owner").id();
     let raw = i32::try_from(pid).expect("original native group PID");
     assert_ne!(
         Pid::from_raw(raw),
@@ -36,6 +61,7 @@ fn denied_attested_kgr1_group_signal_never_blocks_on_live_direct_child_wait() {
     drop(writer); // Actual host EOF is what starts terminal group cleanup.
     let stale_birth = original.altered_birth_for_test();
     let (tx, rx) = mpsc::channel();
+    let child = child.take();
     let worker = std::thread::spawn(move || {
         let result = run_live_group(child, stale_birth, File::from(reader), || Ok(()));
         let _ = tx.send(result);
@@ -54,12 +80,19 @@ fn denied_attested_kgr1_group_signal_never_blocks_on_live_direct_child_wait() {
     // must already have reaped its actual Child. A mutant that merely drops
     // the live child returns StillAlive; one that signals but does not reap
     // returns a waitable zombie. Never let test cleanup create a false green.
-    let reaped_before_rescue = native_waitpid(Pid::from_raw(raw), Some(WaitPidFlag::WNOHANG));
+    // If the 400ms negative timeout fired, the product still owns a live
+    // Child on the worker thread. Never race its waitpid or steal its OS
+    // exit status. Independent ECHILD proof is safe only AFTER an actual
+    // product completion receipt was observed.
+    let reaped_before_rescue = early
+        .as_ref()
+        .ok()
+        .map(|_| native_waitpid(Pid::from_raw(raw), Some(WaitPidFlag::WNOHANG)));
     let rescue = terminate_attested_group(original);
     worker
         .join()
         .expect("terminal error worker joins after owned rescue");
-    if !matches!(reaped_before_rescue, Err(Errno::ECHILD)) {
+    if !matches!(reaped_before_rescue, Some(Err(Errno::ECHILD))) {
         // An intentionally broken mutant must not leave its original child
         // zombie behind after the negative verdict has been sampled.
         let _ = native_waitpid(Pid::from_raw(raw), None);
@@ -70,7 +103,7 @@ fn denied_attested_kgr1_group_signal_never_blocks_on_live_direct_child_wait() {
         "failed attested group cleanup may not block indefinitely in Child::wait"
     );
     assert!(
-        matches!(reaped_before_rescue, Err(Errno::ECHILD)),
+        matches!(reaped_before_rescue, Some(Err(Errno::ECHILD))),
         "the Guardian must reap its exact original direct Child before test rescue, not leave zombie custody to a later test-only wait: {reaped_before_rescue:?}"
     );
     assert!(
