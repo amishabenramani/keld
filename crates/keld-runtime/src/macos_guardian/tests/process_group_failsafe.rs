@@ -12,7 +12,8 @@ use nix::unistd::Pid;
 use super::super::GUARDIAN_SHUTDOWN_DEADLINE;
 use super::super::process_group::{
     GroupIdentity, finish_group_termination, install_test_ambiguous_probe_receipt,
-    observe_group_identity, reconcile_denied_signal_after_reap, terminate_attested_group,
+    observe_group_identity, reconcile_denied_signal_after_reap,
+    reconcile_denied_signal_after_reap_for_test, terminate_attested_group,
     terminate_registered_group, validate_guardian_child_group,
 };
 
@@ -146,7 +147,12 @@ fn guardian_signal_eperm_reconciles_only_after_native_group_absence() {
         )
     };
     assert!(
-        reconcile_denied_signal_after_reap(original, denied(), std::time::Instant::now()).is_err(),
+        reconcile_denied_signal_after_reap(
+            original,
+            denied(),
+            std::time::Instant::now() + GUARDIAN_SHUTDOWN_DEADLINE / 4,
+        )
+        .is_err(),
         "EPERM cannot be forgiven for an executing group"
     );
     assert!(
@@ -247,7 +253,7 @@ fn assert_other_native_failures_remain_denied(original: GroupIdentity) {
             reconcile_denied_signal_after_reap(
                 original,
                 super::super::lifecycle_error(phase, std::io::Error::from_raw_os_error(errno)),
-                std::time::Instant::now()
+                std::time::Instant::now() + GUARDIAN_SHUTDOWN_DEADLINE / 4
             )
             .is_err(),
             "unrelated native failure {phase} ({errno}) must not be reconciled"
@@ -309,6 +315,58 @@ fn expired_post_reap_reconciliation_cannot_accept_late_native_absence() {
         refusal.to_string().contains("process-group signal"),
         "keep the original denied-signal error on expired reconciliation: {refusal}"
     );
+    let mut expired_probes = 0;
+    reconcile_denied_signal_after_reap_for_test(
+        original,
+        signal_denied(),
+        expired,
+        std::time::Instant::now,
+        |native_group| {
+            expired_probes += 1;
+            (
+                nix::unistd::getpgid(Some(Pid::from_raw(native_group))),
+                kill(Pid::from_raw(-native_group), None),
+            )
+        },
+    )
+    .expect_err("expired budget must deny BEFORE issuing the read-only probes");
+    assert_eq!(
+        expired_probes, 0,
+        "already expired reconciliation must not observe after its original deadline"
+    );
+
+    // The kernel observations below are still real dual ESRCH. Only the
+    // monotonic-clock cut is controlled: a valid pre-probe budget expires
+    // before the result is considered. Removing ONLY the post-probe guard
+    // must make this negative control RED even with the pre-check intact.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
+    let before = deadline
+        .checked_sub(std::time::Duration::from_millis(1))
+        .expect("pre-observation instant");
+    let after = deadline + std::time::Duration::from_millis(1);
+    let mut clock_reads = 0;
+    let mut kernel_probes = 0;
+    reconcile_denied_signal_after_reap_for_test(
+        original,
+        signal_denied(),
+        deadline,
+        || {
+            clock_reads += 1;
+            if clock_reads == 1 { before } else { after }
+        },
+        |native_group| {
+            kernel_probes += 1;
+            let leader = nix::unistd::getpgid(Some(Pid::from_raw(native_group)));
+            let group = kill(Pid::from_raw(-native_group), None);
+            assert_eq!(leader, Err(Errno::ESRCH));
+            assert_eq!(group, Err(Errno::ESRCH));
+            (leader, group)
+        },
+    )
+    .expect_err("dual ESRCH after deadline cannot retroactively forgive EPERM");
+    assert_eq!(kernel_probes, 1, "real native probes must execute");
+    assert_eq!(clock_reads, 2, "post-observation deadline must be checked");
+
     reconcile_denied_signal_after_reap(
         original,
         signal_denied(),

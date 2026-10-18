@@ -412,6 +412,32 @@ pub(super) fn reconcile_denied_signal_after_reap(
     denied: RuntimeError,
     deadline: Instant,
 ) -> Result<(), RuntimeError> {
+    reconcile_denied_signal_after_reap_with_observers(
+        group,
+        denied,
+        deadline,
+        Instant::now,
+        |raw| {
+            (
+                getpgid(Some(Pid::from_raw(raw))),
+                kill(Pid::from_raw(-raw), None),
+            )
+        },
+    )
+}
+
+// Keep time-of-observation and read-only kernel witnesses explicit, so native
+// tests can independently falsify both deadline guards. The shipping caller
+// above always supplies the real monotonic clock and exact kernel probes;
+// neither observer carries process-group signal authority. This injected seam
+// remains private to the module, not another production reconciliation API.
+fn reconcile_denied_signal_after_reap_with_observers(
+    group: GroupIdentity,
+    denied: RuntimeError,
+    deadline: Instant,
+    mut now: impl FnMut() -> Instant,
+    mut probe: impl FnMut(i32) -> (Result<Pid, Errno>, Result<(), Errno>),
+) -> Result<(), RuntimeError> {
     if !matches!(
         &denied,
         RuntimeError::Lifecycle {
@@ -428,11 +454,10 @@ pub(super) fn reconcile_denied_signal_after_reap(
         // A post-reap EPERM may be reconsidered only inside the *original*
         // revocation budget. Even genuine absence observed afterward cannot
         // retroactively convert the terminal signal error into success.
-        if Instant::now() >= deadline {
+        if now() >= deadline {
             return Err(denied);
         }
-        let leader = getpgid(Some(Pid::from_raw(raw)));
-        let group_live = kill(Pid::from_raw(-raw), None);
+        let (leader, group_live) = probe(raw);
         #[cfg(test)]
         if matches!(
             (&leader, &group_live),
@@ -441,15 +466,26 @@ pub(super) fn reconcile_denied_signal_after_reap(
             report_test_ambiguous_probe(group.pid);
         }
         match (leader, group_live) {
-            (Err(Errno::ESRCH), Err(Errno::ESRCH)) if Instant::now() < deadline => {
+            (Err(Errno::ESRCH), Err(Errno::ESRCH)) if now() < deadline => {
                 return Ok(());
             }
-            (Err(Errno::ESRCH), Err(Errno::EPERM)) if Instant::now() < deadline => {
+            (Err(Errno::ESRCH), Err(Errno::EPERM)) if now() < deadline => {
                 std::thread::sleep(GENERATION_CONTROL_POLL);
             }
             _ => return Err(denied),
         }
     }
+}
+
+#[cfg(test)]
+pub(super) fn reconcile_denied_signal_after_reap_for_test(
+    group: GroupIdentity,
+    denied: RuntimeError,
+    deadline: Instant,
+    now: impl FnMut() -> Instant,
+    probe: impl FnMut(i32) -> (Result<Pid, Errno>, Result<(), Errno>),
+) -> Result<(), RuntimeError> {
+    reconcile_denied_signal_after_reap_with_observers(group, denied, deadline, now, probe)
 }
 
 // Registration has not yet transferred ownership. A rejected or dropped
