@@ -52,7 +52,7 @@ fn main() {
         }
         return;
     }
-    if args.iter().any(|a| a == "--hello") {
+    if host_hello_requested(&args) {
         if let Err(error) = keld_core::prepare_webview_process() {
             eprintln!("{error}");
             process::exit(1);
@@ -137,6 +137,20 @@ fn main() {
         // This existing fatal exit is failure, never a physical-drain receipt.
         process::exit(1);
     }
+}
+
+// Windows must not treat --hello in an argument's value position as a
+// command. That would bypass the normal no-argument host boot grammar and
+// could create a GUI from an out-of-position flag.
+#[cfg(windows)]
+fn host_hello_requested(args: &[String]) -> bool {
+    args.get(1).is_some_and(|arg| arg == "--hello")
+}
+
+// Preserve the current Mac/Linux hello handling under their separate owners.
+#[cfg(not(windows))]
+fn host_hello_requested(args: &[String]) -> bool {
+    args.iter().any(|arg| arg == "--hello")
 }
 
 // Private Windows role selectors consume native, potentially non-Unicode argv
