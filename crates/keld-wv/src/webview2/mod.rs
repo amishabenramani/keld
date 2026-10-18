@@ -1587,16 +1587,16 @@ fn create_environment_with_options_until(
             )),
         )
     };
-    if let Err(err) = launched {
-        return Err(WvError::WebView2RuntimeMissing {
-            detail: err.to_string(),
-        });
-    }
+    launched.map_err(|error| environment_creation_error("launch", error))?;
 
     let environment = wait_for_launch_with_message_pump_until(&rx, deadline)?;
-    environment.map_err(|err| WvError::WebView2RuntimeMissing {
-        detail: err.to_string(),
-    })
+    environment.map_err(|error| environment_creation_error("completion", error))
+}
+
+fn environment_creation_error(phase: &'static str, error: windows::core::Error) -> WvError {
+    // The Evergreen availability check belongs to runtime_version(). A
+    // creation HRESULT can instead mean profile access, COM or launch failure.
+    WvError::Webview(format!("WebView2 environment {phase} failed: {error}"))
 }
 
 /// Creates the controller that hosts one webview inside `hwnd`.
@@ -1877,11 +1877,7 @@ fn probe_exclusive_udf_with_observer(
     let controller = match create_controller_observed_until(environment, window, launch_deadline) {
         Ok(controller) => controller,
         Err(error) if error.is_invalid_state() => return ExclusiveUdfRelease::Busy,
-        Err(error) => {
-            return ExclusiveUdfRelease::Unproven(WvError::WebView2RuntimeMissing {
-                detail: error.to_string(),
-            });
-        }
+        Err(error) => return ExclusiveUdfRelease::Unproven(error.into_wv_error()),
     };
     // SAFETY: the controller was created on this STA for the live recovery
     // window. No navigation or content is created by this probe.
@@ -3684,6 +3680,25 @@ mod tests {
         let message = error.to_string();
         assert!(message.contains("KELD-WV-004"), "{message}");
         assert!(message.contains("test-owned pump failure"), "{message}");
+        assert!(!message.contains("KELD-WV-008"), "{message}");
+    }
+
+    #[test]
+    fn environment_creation_hresult_keeps_its_phase_and_does_not_claim_missing_runtime() {
+        let error = super::environment_creation_error(
+            "completion",
+            windows::core::Error::from(windows::Win32::Foundation::E_POINTER),
+        );
+        assert!(
+            matches!(error, WvError::Webview(_)),
+            "an environment completion HRESULT is not an Evergreen version probe: {error}"
+        );
+        let message = error.to_string();
+        assert!(message.contains("KELD-WV-003"), "{message}");
+        assert!(
+            message.contains("environment completion failed"),
+            "{message}"
+        );
         assert!(!message.contains("KELD-WV-008"), "{message}");
     }
 

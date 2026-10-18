@@ -68,7 +68,7 @@ impl fmt::Display for WvError {
                 f,
                 "KELD-WV-003: failed to create webview — {msg}. \
                  On macOS ensure WKWebView is available (10.13+); \
-                 on Windows ensure the WebView2 runtime is installed."
+                 on Windows inspect the WebView2 HRESULT, profile permissions and controller state."
             ),
             Self::EventLoop(msg) => write!(
                 f,
