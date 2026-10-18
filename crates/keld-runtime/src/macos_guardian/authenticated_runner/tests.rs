@@ -2,7 +2,9 @@
 //! waiting indefinitely for a still-executing, independently test-owned Child.
 use super::run_live_group;
 use crate::macos_guardian::process_group::{observe_group_identity, terminate_attested_group};
+use nix::errno::Errno;
 use nix::sys::signal::kill;
+use nix::sys::wait::{WaitPidFlag, waitpid as native_waitpid};
 use nix::unistd::{Pid, getpgid, getpgrp, pipe};
 use std::fs::File;
 use std::os::unix::process::CommandExt as _;
@@ -39,35 +41,41 @@ fn denied_attested_kgr1_group_signal_never_blocks_on_live_direct_child_wait() {
         let _ = tx.send(result);
     });
 
-    // Sample the product result BEFORE independent cleanup. An intentional
-    // wrong-birth group signal must not kill the executing original group.
-    // The test subsequently rescues with the TRUE retained kernel birth even
-    // in the deliberate failing old-code version: no leaked native process.
+    // Sample the product result and actual direct-child disappearance BEFORE
+    // independent rescue. Wrong-birth group authority MUST stay denied, but
+    // the retained unreaped Child may still be killed as its original owner.
+    // A mutant which only returns Err and drops that live Child is also RED.
+    // The test subsequently rescues with its TRUE retained kernel birth even
+    // in an old unbounded-wait or live-child-drop variant.
     let early = rx.recv_timeout(Duration::from_millis(400));
-    let still_alive = kill(Pid::from_raw(raw), None).is_ok()
-        && getpgid(Some(Pid::from_raw(raw))) == Ok(Pid::from_raw(raw));
+    let gone_before_rescue = kill(Pid::from_raw(raw), None) == Err(Errno::ESRCH)
+        && getpgid(Some(Pid::from_raw(raw))) == Err(Errno::ESRCH);
+    // This read is BEFORE the test-only rescue; a successful product return
+    // must already have reaped its actual Child. A mutant that merely drops
+    // the live child returns StillAlive; one that signals but does not reap
+    // returns a waitable zombie. Never let test cleanup create a false green.
+    let reaped_before_rescue = native_waitpid(Pid::from_raw(raw), Some(WaitPidFlag::WNOHANG));
     let rescue = terminate_attested_group(original);
     worker
         .join()
         .expect("terminal error worker joins after owned rescue");
-    let reaped = rustix::process::waitpid(
-        rustix::process::Pid::from_raw(raw),
-        rustix::process::WaitOptions::empty(),
-    );
+    if !matches!(reaped_before_rescue, Err(Errno::ECHILD)) {
+        // An intentionally broken mutant must not leave its original child
+        // zombie behind after the negative verdict has been sampled.
+        let _ = native_waitpid(Pid::from_raw(raw), None);
+    }
     rescue.expect("original test-owned birth must permit native cleanup");
     assert!(
         early.is_ok(),
         "failed attested group cleanup may not block indefinitely in Child::wait"
     );
-    let observed =
-        reaped.expect("product returned without reaping, so test must own exact native wait");
     assert!(
-        observed.is_some(),
-        "original test-owned child was not externally reaped"
+        matches!(reaped_before_rescue, Err(Errno::ECHILD)),
+        "the Guardian must reap its exact original direct Child before test rescue, not leave zombie custody to a later test-only wait: {reaped_before_rescue:?}"
     );
     assert!(
-        still_alive,
-        "a false birth must not signal the original live group"
+        gone_before_rescue,
+        "a failed group signal must not abandon an executing original direct Child when exact retained Child::kill is available"
     );
     let error = early
         .expect("captured bounded result")

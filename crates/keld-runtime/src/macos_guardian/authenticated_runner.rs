@@ -2,12 +2,13 @@
 //! No Bun image executes before the host has accepted and retained its group.
 use super::process_group::{GroupIdentity, LocalGroupWitness, terminate_attested_group};
 use super::{
-    AwaitHostGroupRetention, Command, CommandExt, GuardianReport, Read, RuntimeError,
-    SpawnAdmission, Stdio, await_host_death, collapse_failures, fail_before_child, io,
-    lifecycle_error, validate_group_pid, validate_liveness_bootstrap, write_group_registration,
+    AwaitHostGroupRetention, Command, CommandExt, GUARDIAN_SHUTDOWN_DEADLINE, GuardianReport,
+    Instant, Read, RuntimeError, SpawnAdmission, Stdio, await_host_death, collapse_failures,
+    fail_before_child, io, lifecycle_error, validate_group_pid, validate_liveness_bootstrap,
+    write_group_registration,
 };
 use std::os::fd::AsFd;
-use std::process::Child;
+use std::process::{Child, ExitStatus};
 
 pub(super) fn run_with_authenticated_registration<R, F>(
     mut command: Command,
@@ -142,6 +143,9 @@ fn run_live_group<R: Read + AsFd>(
     revoke: impl FnOnce() -> io::Result<()>,
 ) -> Result<GuardianReport, RuntimeError> {
     let liveness_result = await_host_death(&mut liveness);
+    // Bound the native error-path fallback from the original host-death
+    // observation, never add a fresh budget after resource revocation.
+    let original_cleanup_deadline = Instant::now() + GUARDIAN_SHUTDOWN_DEADLINE;
     let mut failures = Vec::new();
     if let Err(error) = liveness_result {
         failures.push(error);
@@ -161,11 +165,13 @@ fn run_live_group<R: Read + AsFd>(
     };
     // A failed birth-attested group signal cannot guarantee the direct Bun
     // Child has stopped. An unconditional Child::wait on that OS error could
-    // block this fatal cleanup forever. Observe the *retained Child* once and
-    // fail closed if still live: no unverified PID signal and no new deadline.
-    // A successful native group signal retains the original wait/reap path.
+    // block forever, while immediately dropping a still-live Child would
+    // abandon its only Guardian-owned direct-process witness after host EOF.
+    // Use only this exact retained Child's native kill fallback and bounded
+    // reap, preserving the original group-signal failure (never claim whole
+    // group absence or signal a stale numeric PGID). Normal success is intact.
     let leader_status = match if group_signal_failed {
-        child.try_wait()
+        reap_owned_child_after_group_refusal(&mut child, original_cleanup_deadline).map(Some)
     } else {
         child.wait().map(Some)
     } {
@@ -192,6 +198,33 @@ fn run_live_group<R: Read + AsFd>(
         })
     } else {
         Err(collapse_failures(failures))
+    }
+}
+
+// On original group-signal refusal the direct Child is still our unreaped OS
+// child. try_wait() establishes that live ownership before Child::kill; it is
+// never a raw-PID fallback from the untrusted authenticated registration.
+// A direct-child kill cannot establish whole-group absence, so the caller
+// always returns the original typed GROUP cleanup failure even after reap.
+fn reap_owned_child_after_group_refusal(
+    child: &mut Child,
+    deadline: Instant,
+) -> Result<ExitStatus, io::Error> {
+    if let Some(status) = child.try_wait()? {
+        return Ok(status);
+    }
+    child.kill()?;
+    loop {
+        match child.try_wait()? {
+            Some(status) => return Ok(status),
+            None if Instant::now() < deadline => std::thread::yield_now(),
+            None => {
+                return Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    "original direct child did not reap within the existing Guardian shutdown budget",
+                ));
+            }
+        }
     }
 }
 
