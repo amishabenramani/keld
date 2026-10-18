@@ -1587,13 +1587,13 @@ fn create_environment_with_options_until(
             )),
         )
     };
-    launched.map_err(|error| environment_creation_error("launch", error))?;
+    launched.map_err(|error| environment_creation_error("launch", &error))?;
 
     let environment = wait_for_launch_with_message_pump_until(&rx, deadline)?;
-    environment.map_err(|error| environment_creation_error("completion", error))
+    environment.map_err(|error| environment_creation_error("completion", &error))
 }
 
-fn environment_creation_error(phase: &'static str, error: windows::core::Error) -> WvError {
+fn environment_creation_error(phase: &'static str, error: &windows::core::Error) -> WvError {
     // The Evergreen availability check belongs to runtime_version(). A
     // creation HRESULT can instead mean profile access, COM or launch failure.
     WvError::Webview(format!("WebView2 environment {phase} failed: {error}"))
@@ -3686,11 +3686,9 @@ mod tests {
     #[test]
     fn real_controller_launch_deadline_keeps_its_profile_failure_kind() {
         let (_sender, receiver) = std::sync::mpsc::channel::<()>();
-        let observed = super::wait_for_launch_with_message_pump_until(
-            &receiver,
-            std::time::Instant::now() - std::time::Duration::from_secs(1),
-        )
-        .expect_err("a deadline that already elapsed must refuse before pumping messages");
+        let observed =
+            super::wait_for_launch_with_message_pump_until(&receiver, std::time::Instant::now())
+                .expect_err("a deadline that already elapsed must refuse before pumping messages");
         let error = super::ControllerCreationError::Pump(observed).into_wv_error();
         let WvError::ProfileSelection(profile) = error else {
             panic!("the real pump deadline must preserve its typed profile error: {error}");
@@ -3709,7 +3707,7 @@ mod tests {
     fn environment_creation_hresult_keeps_its_phase_and_does_not_claim_missing_runtime() {
         let error = super::environment_creation_error(
             "completion",
-            windows::core::Error::from(windows::Win32::Foundation::E_POINTER),
+            &windows::core::Error::from(windows::Win32::Foundation::E_POINTER),
         );
         assert!(
             matches!(error, WvError::Webview(_)),
