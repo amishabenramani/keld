@@ -29,11 +29,10 @@ const WINDOWS_DEV_STAGE_CLEANUP_ARG: &str = "--keld-windows-dev-stage-cleanup-v1
 
 fn main() {
     #[cfg(windows)]
-    let windows_args: Vec<std::ffi::OsString> = env::args_os().collect();
-    #[cfg(windows)]
-    if handle_windows_private_role(&windows_args) {
+    let Some(args) = windows_host_args() else {
         return;
-    }
+    };
+    #[cfg(not(windows))]
     let args: Vec<String> = env::args().collect();
     #[cfg(all(target_os = "macos", feature = "profile-test-hooks", debug_assertions))]
     if run_macos_profile_fixture_role(&args) {
@@ -88,9 +87,7 @@ fn main() {
         process::exit(1);
     }
 
-    // The capability is kept until the host exits; nothing closes its handle
-    // (KEL-53 §4 "Candidate release after commit"). S6c adds the one
-    // `release_for_exit` call on the committed `PerUserDirect` exit path.
+    // Keep the Job until exit (KEL-53 §4); S6c owns the committed release_for_exit call.
     #[cfg(windows)]
     let _host_death_job = match keld_runtime::windows_job::install_host_death_job() {
         Ok(host_death_job) => host_death_job,
@@ -140,6 +137,34 @@ fn main() {
         // This existing fatal exit is failure, never a physical-drain receipt.
         process::exit(1);
     }
+}
+
+// Private Windows role selectors consume native, potentially non-Unicode argv
+// before the ordinary shipping host requires valid Unicode arguments. A
+// completed private role returns None, preserving main's early return.
+#[cfg(windows)]
+fn windows_host_args() -> Option<Vec<String>> {
+    let args: Vec<std::ffi::OsString> = env::args_os().collect();
+    if handle_windows_private_role(&args) {
+        return None;
+    }
+    Some(windows_unicode_host_args(args))
+}
+
+// Native Windows arguments may contain unpaired UTF-16 surrogates. The
+// ordinary host accepts Unicode text only; refuse malformed argv before
+// selecting an app or creating any WebView2/OS authority. Private Windows
+// roles are dispatched first using the untouched native OsString values.
+#[cfg(windows)]
+fn windows_unicode_host_args(args: Vec<std::ffi::OsString>) -> Vec<String> {
+    args.into_iter()
+        .map(|arg| {
+            arg.into_string().unwrap_or_else(|_| {
+                eprintln!("KELD-CLI-044: host arguments must be valid Unicode.");
+                process::exit(2);
+            })
+        })
+        .collect()
 }
 
 #[cfg(windows)]

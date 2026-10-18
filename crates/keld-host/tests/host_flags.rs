@@ -3,6 +3,26 @@
 
 use std::process::Command;
 
+#[cfg(windows)]
+#[test]
+fn malformed_windows_utf16_argv_is_cli_044_not_a_panic() {
+    use std::os::windows::ffi::OsStringExt as _;
+
+    // An unpaired surrogate is representable in the Windows native argv but
+    // cannot be converted by std::env::args(). The host must refuse this
+    // unsupported CLI argument before any boot or WebView2 authority exists.
+    let malformed = std::ffi::OsString::from_wide(&[0xd800]);
+    let output = Command::new(env!("CARGO_BIN_EXE_keld-host"))
+        .arg(malformed)
+        .output()
+        .expect("launch host with a test-owned malformed Unicode argument");
+    assert_eq!(output.status.code(), Some(2));
+    let stderr = String::from_utf8(output.stderr).expect("fixed error uses UTF-8");
+    assert!(stderr.contains("KELD-CLI-044"), "{stderr}");
+    assert!(!stderr.contains("panicked at"), "{stderr}");
+    assert!(!stderr.contains("KELD-CORE-034"), "{stderr}");
+}
+
 #[test]
 fn unknown_argument_is_cli_044_before_boot_selection() {
     let output = Command::new(env!("CARGO_BIN_EXE_keld-host"))
