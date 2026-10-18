@@ -84,6 +84,20 @@ fn terminate_generation(generation: RegisteredPrimaryGeneration) -> Result<(), R
     ))
 }
 
+// One native fail-safe owner for every terminal path. Hold the generation
+// mutex across the birth-attested signal, just like fail_current_generation
+// and KGC1 CLEAR. A failed signal cannot consume the original group witness;
+// only successful termination releases this host-side enrollment.
+fn terminate_and_release_generation(
+    registered: &mut Option<RegisteredPrimaryGeneration>,
+) -> Result<(), RuntimeError> {
+    if let Some(generation) = *registered {
+        terminate_generation(generation)?;
+        *registered = None;
+    }
+    Ok(())
+}
+
 impl GuardedPrimary {
     pub(super) fn start(
         mut child: Child,
@@ -253,11 +267,7 @@ impl GuardedPrimary {
             Ok(None) => {}
             Ok(Some(status)) => {
                 self.liveness_writer.take();
-                let generation = take_generation(&self.current_generation);
-                let group_pid = generation.map_or(0, |generation| generation.group_pid);
-                let cleanup_error = generation
-                    .and_then(|generation| terminate_generation(generation).err())
-                    .map(|error| io::Error::other(error.to_string()));
+                let (group_pid, cleanup_error) = self.fatal_group_cleanup_status();
                 Err(RuntimeError::GuardianExited {
                     group_pid,
                     exit_code: status.code(),
@@ -306,8 +316,8 @@ impl GuardedPrimary {
         }
         let result = self.shutdown_once();
         if result.is_err() {
-            // Cleanup consumed the worker and group witnesses; a later call
-            // cannot turn the original failed shutdown into fresh success.
+            // A later call cannot turn the original failed shutdown into
+            // success, even when native failure retained the group witness.
             self.shutdown_failed = true;
         }
         result
@@ -378,11 +388,7 @@ impl GuardedPrimary {
         if let Some(observed) = status
             && !observed.success()
         {
-            let generation = take_generation(&self.current_generation);
-            let group_pid = generation.map_or(0, |generation| generation.group_pid);
-            let cleanup_error = generation
-                .and_then(|generation| terminate_generation(generation).err())
-                .map(|error| io::Error::other(error.to_string()));
+            let (group_pid, cleanup_error) = self.fatal_group_cleanup_status();
             failures.push(RuntimeError::GuardianExited {
                 group_pid,
                 exit_code: observed.code(),
@@ -528,8 +534,20 @@ impl GuardedPrimary {
         })?
     }
 
+    fn fatal_group_cleanup_status(&self) -> (u32, Option<io::Error>) {
+        let mut current = lock_generation(&self.current_generation);
+        let group_pid = current
+            .as_ref()
+            .map_or(0, |generation| generation.group_pid);
+        let cleanup_error = terminate_and_release_generation(&mut current)
+            .err()
+            .map(|error| io::Error::other(error.to_string()));
+        (group_pid, cleanup_error)
+    }
+
     fn fail_safe_current_group(&self) -> Result<(), RuntimeError> {
-        take_generation(&self.current_generation).map_or(Ok(()), terminate_generation)
+        let mut current = lock_generation(&self.current_generation);
+        terminate_and_release_generation(&mut current)
     }
 }
 
@@ -540,12 +558,6 @@ pub(super) fn lock_generation(
         Ok(generation) => generation,
         Err(poisoned) => poisoned.into_inner(),
     }
-}
-
-pub(super) fn take_generation(
-    generation: &Mutex<Option<RegisteredPrimaryGeneration>>,
-) -> Option<RegisteredPrimaryGeneration> {
-    lock_generation(generation).take()
 }
 
 impl Drop for GuardedPrimary {
