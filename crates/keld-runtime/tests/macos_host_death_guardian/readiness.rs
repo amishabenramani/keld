@@ -73,8 +73,8 @@ pub(super) fn await_ready(
         }
         match event {
             Some("GUARDIAN") => {
-                let announced_guardian = parse_pid(fields.next(), &line);
-                let group = parse_pid(fields.next(), &line);
+                let announced_guardian = parse_pid(fields.next(), "GUARDIAN");
+                let group = parse_pid(fields.next(), "GUARDIAN");
                 // A private control event is not signal authority. Require
                 // both actual original kernel births and the exact host ->
                 // Guardian -> group leader parent chain while they are live.
@@ -85,12 +85,12 @@ pub(super) fn await_ready(
                 guardian_ready_after = Some(cycle_started.elapsed());
                 cleanup.group = Some(group);
             }
-            Some("LEADER") => leader_event_pid = Some(parse_pid(fields.next(), &line)),
-            Some("DESCENDANT") => descendant_pid = Some(parse_pid(fields.next(), &line)),
+            Some("LEADER") => leader_event_pid = Some(parse_pid(fields.next(), "LEADER")),
+            Some("DESCENDANT") => descendant_pid = Some(parse_pid(fields.next(), "DESCENDANT")),
             Some("APP_LINK") => {
                 let app_link_value = fields
                     .next()
-                    .unwrap_or_else(|| panic!("APP_LINK event omitted value: {line}"))
+                    .unwrap_or_else(|| panic!("APP_LINK event omitted value"))
                     .to_owned();
                 cleanup.peer = Some(spawn_link_peer(control, &app_link_value, eof_witness));
                 app_link = Some(app_link_value);
@@ -98,17 +98,17 @@ pub(super) fn await_ready(
             Some("REGISTERED_LINK") => {
                 registered_link =
                     Some(PathBuf::from(fields.next().unwrap_or_else(|| {
-                        panic!("REGISTERED_LINK event omitted path: {line}")
+                        panic!("REGISTERED_LINK event omitted path")
                     })));
             }
             Some("LINK_BOUND") => link_bound = true,
             Some("PEER_BOUND") => peer_bound = true,
             Some("LEAKER") => {
-                let leaker = parse_pid(fields.next(), &line);
+                let leaker = parse_pid(fields.next(), "LEAKER");
                 cleanup.leaker_birth = Some(retain_parented_birth(leaker, host_pid));
                 cleanup.leaker = Some(leaker);
             }
-            event => panic!("unexpected readiness event {event:?}: {line}"),
+            _ => panic!("unexpected readiness event kind"),
         }
     }
 
@@ -234,5 +234,100 @@ mod strict_event_shape_tests {
             !detail.contains("private-token-must-be-redacted"),
             "malformed event diagnostic revealed a private fixture field"
         );
+    }
+
+    #[test]
+    fn invalid_pid_and_unknown_event_do_not_echo_private_fields() {
+        const PRIVATE: &str = "private-token-must-not-appear";
+        for record in [
+            "LEADER private-token-must-not-appear",
+            "UNKNOWN private-token-must-not-appear",
+        ] {
+            let fixture = Fixture::new();
+            let listener = UnixListener::bind(&fixture.control).expect("own private event socket");
+            listener
+                .set_nonblocking(true)
+                .expect("nonblocking event accept");
+            let host = std::process::Command::new("/usr/bin/true")
+                .spawn()
+                .expect("own harmless host placeholder");
+            let host_pid = host.id();
+            let mut cleanup = CycleCleanup::new(host);
+            send_event(&fixture.control, record);
+            let outcome = catch_unwind(AssertUnwindSafe(|| {
+                await_ready(
+                    &listener,
+                    &fixture.control,
+                    host_pid,
+                    Instant::now(),
+                    &mut cleanup,
+                    None,
+                    false,
+                )
+            }));
+            let panic = outcome.err().expect("invalid role event must be refused");
+            let detail = panic
+                .downcast_ref::<String>()
+                .map(String::as_str)
+                .or_else(|| panic.downcast_ref::<&str>().copied())
+                .unwrap_or("non-string panic");
+            assert!(
+                !detail.contains(PRIVATE),
+                "untrusted control field leaked into rejected-event diagnostic"
+            );
+        }
+    }
+
+    #[test]
+    fn surplus_authority_bearing_records_cannot_create_cleanup_witnesses_or_peers() {
+        for (record, event) in [
+            ("GUARDIAN 4294967294 4294967293 surplus", "GUARDIAN"),
+            ("LEAKER 4294967294 surplus", "LEAKER"),
+            ("APP_LINK private-test-link surplus", "APP_LINK"),
+        ] {
+            let fixture = Fixture::new();
+            let listener = UnixListener::bind(&fixture.control).expect("own readiness socket");
+            listener
+                .set_nonblocking(true)
+                .expect("nonblocking role-event listener");
+            let host = std::process::Command::new("/usr/bin/true")
+                .spawn()
+                .expect("own native host placeholder");
+            let host_pid = host.id();
+            let mut cleanup = CycleCleanup::new(host);
+            send_event(&fixture.control, record);
+            // Broken arity checks fail on a DIFFERENT poison record (or on
+            // later birth validation), never on the original surplus bytes.
+            send_event(&fixture.control, "POISON_AFTER_AUTHORITY_RECORD");
+            let outcome = catch_unwind(AssertUnwindSafe(|| {
+                await_ready(
+                    &listener,
+                    &fixture.control,
+                    host_pid,
+                    Instant::now(),
+                    &mut cleanup,
+                    None,
+                    false,
+                )
+            }));
+            let panic = outcome.err().expect("surplus role record must be refused");
+            let detail = panic
+                .downcast_ref::<String>()
+                .map(String::as_str)
+                .or_else(|| panic.downcast_ref::<&str>().copied())
+                .unwrap_or("non-string panic");
+            assert!(
+                detail.contains("unexpected trailing readiness event fields"),
+                "{event} was not rejected at the original field-count gate: {detail}"
+            );
+            assert!(
+                cleanup.group_birth.is_none()
+                    && cleanup.group.is_none()
+                    && cleanup.leaker_birth.is_none()
+                    && cleanup.leaker.is_none()
+                    && cleanup.peer.is_none(),
+                "{event} minted native cleanup or child authority before framing validation"
+            );
+        }
     }
 }
