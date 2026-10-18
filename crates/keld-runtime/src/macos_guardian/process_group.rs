@@ -299,6 +299,83 @@ pub(super) fn terminate_attested_group(group: GroupIdentity) -> Result<(), Runti
     }
 }
 
+/// A successful SIGKILL only proves signal delivery. It does not prove that
+/// the original process group disappeared: the exact leader or an inherited
+/// descendant can remain as a zombie until its parent reaps it. After the
+/// single birth-attested signal, permit CLEAR only if both *read-only* kernel
+/// observations report ESRCH within the existing shutdown budget.
+///
+/// This function never signals a raw PGID. A reused live leader is an error,
+/// not new authority, and all inaccessible or persistent groups fail closed.
+/// The two reads remain a point-in-time witness, not a kernel-pinned handle.
+pub(super) fn require_attested_group_absence(
+    group: GroupIdentity,
+    deadline: Instant,
+) -> Result<(), RuntimeError> {
+    let raw = validate_group_pid(group.pid)?;
+    loop {
+        if Instant::now() >= deadline {
+            return Err(lifecycle_error(
+                "macOS guardian generation clear group absence",
+                io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    "original group absence remains unproven after the shutdown budget",
+                ),
+            ));
+        }
+        let leader = getpgid(Some(Pid::from_raw(raw)));
+        let whole_group = kill(Pid::from_raw(-raw), None);
+        // Both reads and the decision must fall inside the original budget;
+        // dual ESRCH observed only after expiration cannot authorize CLEARED.
+        if leader == Err(Errno::ESRCH)
+            && whole_group == Err(Errno::ESRCH)
+            && Instant::now() < deadline
+        {
+            return Ok(());
+        }
+        match leader {
+            Ok(_) => {
+                if let Ok(observed) = observe_group_identity(group.pid)
+                    && observed != group
+                {
+                    return Err(lifecycle_error(
+                        "macOS guardian generation clear group absence",
+                        io::Error::new(
+                            io::ErrorKind::PermissionDenied,
+                            "group leader birth changed before confirmed native absence",
+                        ),
+                    ));
+                }
+            }
+            Err(Errno::ESRCH) => {}
+            Err(error) => {
+                return Err(lifecycle_error(
+                    "macOS guardian generation clear group absence",
+                    nix_io_error(error),
+                ));
+            }
+        }
+        if let Err(error) = whole_group
+            && !matches!(error, Errno::EPERM | Errno::ESRCH)
+        {
+            return Err(lifecycle_error(
+                "macOS guardian generation clear group absence",
+                nix_io_error(error),
+            ));
+        }
+        if Instant::now() >= deadline {
+            return Err(lifecycle_error(
+                "macOS guardian generation clear group absence",
+                io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    "original group absence remains unproven after the shutdown budget",
+                ),
+            ));
+        }
+        std::thread::sleep(GENERATION_CONTROL_POLL);
+    }
+}
+
 pub(super) fn terminate_registered_group(group: u32) -> Result<(), RuntimeError> {
     let group = validate_group_pid(group)?;
     let result = killpg(Pid::from_raw(group), Signal::SIGKILL);

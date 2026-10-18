@@ -1,6 +1,7 @@
 //! A forged/early authenticated KGC1 CLEAR cannot discard a live Bun group.
-//! The host must exercise its own attested native fail-safe before CLEARED.
-use std::io::Write as _;
+//! The host must exercise its own attested native fail-safe AND prove whole-group
+//! absence before CLEARED; a successful signal is not the absence witness.
+use std::io::{self, Read as _, Write as _};
 use std::os::unix::net::UnixStream;
 use std::os::unix::process::{CommandExt as _, ExitStatusExt as _};
 use std::process::{Command, Stdio};
@@ -12,15 +13,16 @@ use nix::sys::signal::kill;
 use nix::unistd::{Pid, getpgid};
 
 use super::super::super::process_group::{
-    GroupIdentity, observe_group_identity, terminate_attested_group,
+    GroupIdentity, observe_group_identity, require_attested_group_absence, terminate_attested_group,
 };
 use super::super::super::{handshake_client, parse_app_link};
 use super::super::test_support::{NativeChildOwner, verified_real_bun};
 use super::{
     CONTROL_CLEAR, CONTROL_CLEARED, CONTROL_PREPARE, CONTROL_PREPARED, CONTROL_REGISTERED,
     CONTROL_REVOKE, CONTROL_REVOKED, CONTROL_SPAWNED, GenerationControlRecord,
-    GuardedPrimaryUpdate, RecoveryState, RevocationCause, guardian_exchange, lock_recovery,
-    start_generation_host_fixture,
+    GuardedPrimaryUpdate, RecoveryState, RevocationCause, RuntimeError, guardian_exchange,
+    lock_recovery, read_generation_control, start_generation_host_fixture,
+    write_generation_control,
 };
 
 struct NativeBunGroup {
@@ -121,20 +123,59 @@ fn descendant_gone(pid: i32) {
     }
 }
 
-#[test]
-fn early_kgc1_clear_reaps_live_bun_and_same_group_descendant_before_cleared() {
-    let root = tempfile::tempdir().expect("owned native Bun/CLEAR test root");
-    let marker = root.path().join("descendant.pid");
-    let mut owned = start_real_bun_group(&marker);
-    let group_pid = owned.leader.id();
-    let group = Pid::from_raw(i32::try_from(group_pid).expect("group pid fits"));
-    let descendant = await_bun_descendant(&marker);
+fn await_held_zombie_group(group: Pid) {
+    let signal_deadline = Instant::now() + Duration::from_secs(3);
+    loop {
+        match kill(Pid::from_raw(-group.as_raw()), None) {
+            Err(Errno::EPERM) => break, // zombie-only process group, not absent
+            Err(Errno::ESRCH) => panic!("whole group disappeared before direct Child reap"),
+            Ok(()) if Instant::now() < signal_deadline => std::thread::yield_now(),
+            probe => panic!("host did not create a held zombie group: {probe:?}"),
+        }
+    }
+}
+
+fn assert_no_premature_cleared(guardian: &mut UnixStream, group: Pid) {
+    // Read just one byte: any early ACK is a violation. On success, the
+    // original framed KGC1 record is left untouched for the later read.
+    guardian
+        .set_read_timeout(Some(Duration::from_millis(20)))
+        .expect("bounded KGC1 ACK observation");
+    let no_ack_deadline = Instant::now() + Duration::from_millis(150);
+    let mut first_byte = [0];
+    while Instant::now() < no_ack_deadline {
+        match guardian.read(&mut first_byte) {
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    io::ErrorKind::WouldBlock
+                        | io::ErrorKind::TimedOut
+                        | io::ErrorKind::Interrupted
+                ) => {}
+            Ok(0) => panic!("host closed KGC1 before native group absence"),
+            Ok(_) => panic!("host sent CLEARED before native zombie was reaped"),
+            Err(error) => panic!("KGC1 ACK observation failed: {error}"),
+        }
+        assert_ne!(
+            kill(Pid::from_raw(-group.as_raw()), None),
+            Err(Errno::ESRCH),
+            "test-owned group unexpectedly disappeared before direct Child reap"
+        );
+        std::thread::yield_now();
+    }
+    guardian
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .expect("restore KGC1 framing after native absence witness");
+}
+
+fn assert_live_bun_group_before_control(owned: &mut NativeBunGroup, descendant: i32, group: Pid) {
     assert_eq!(
         getpgid(Some(Pid::from_raw(descendant))),
         Ok(group),
         "real Bun descendant belongs to the exact registered process group"
     );
-    observe_group_identity(group_pid).expect("kernel still holds original Bun leader birth");
+    observe_group_identity(owned.leader.id())
+        .expect("kernel still holds original Bun leader birth");
     assert!(
         owned
             .leader
@@ -143,6 +184,50 @@ fn early_kgc1_clear_reaps_live_bun_and_same_group_descendant_before_cleared() {
             .is_none(),
         "premature Bun exit cannot satisfy the forged CLEAR negative control"
     );
+}
+
+#[test]
+fn held_unreaped_bun_group_exhausts_absence_budget_before_native_reap() {
+    let root = tempfile::tempdir().expect("owned negative-control Bun/CLEAR root");
+    let mut owned = start_real_bun_group(&root.path().join("descendant.pid"));
+    let descendant = await_bun_descendant(&root.path().join("descendant.pid"));
+    let group = Pid::from_raw(i32::try_from(owned.leader.id()).expect("group pid fits"));
+    let original_birth = owned.original_birth.expect("retain real group birth");
+    assert_eq!(getpgid(Some(Pid::from_raw(descendant))), Ok(group));
+
+    terminate_attested_group(original_birth).expect("one birth-attested SIGKILL");
+    await_held_zombie_group(group);
+    // The original test also proves host-side CLEAR wiring. This additional
+    // independent negative control holds the actual zombie beyond a complete
+    // injected 350ms polling budget. A bogus 200ms delayed Ok must fail it.
+    let error =
+        require_attested_group_absence(original_birth, Instant::now() + Duration::from_millis(350))
+            .expect_err("a held native zombie group must not satisfy absence");
+    assert!(
+        matches!(error, RuntimeError::Lifecycle { phase: "macOS guardian generation clear group absence", source } if source.kind() == io::ErrorKind::TimedOut),
+        "absence must fail closed with a typed timeout"
+    );
+    assert_eq!(
+        kill(Pid::from_raw(-group.as_raw()), None),
+        Err(Errno::EPERM)
+    );
+
+    let status = owned.leader.wait().expect("reap exact native group leader");
+    assert_eq!(status.signal(), Some(9));
+    descendant_gone(descendant);
+    require_attested_group_absence(original_birth, Instant::now() + Duration::from_secs(5))
+        .expect("real dual ESRCH permits absence only after exact native reap");
+}
+
+#[test]
+fn early_kgc1_clear_reaps_live_bun_and_same_group_descendant_before_cleared() {
+    let root = tempfile::tempdir().expect("owned native Bun/CLEAR test root");
+    let marker = root.path().join("descendant.pid");
+    let mut owned = start_real_bun_group(&marker);
+    let group_pid = owned.leader.id();
+    let group = Pid::from_raw(i32::try_from(group_pid).expect("group pid fits"));
+    let descendant = await_bun_descendant(&marker);
+    assert_live_bun_group_before_control(&mut owned, descendant, group);
 
     let (host, mut guardian) = UnixStream::pair().expect("private KGC1 generation-control pair");
     guardian
@@ -200,16 +285,31 @@ fn early_kgc1_clear_reaps_live_bun_and_same_group_descendant_before_cleared() {
             .is_none(),
         "REVOKED alone must not be miscounted as native group termination"
     );
-    // Compromised/buggy Guardian falsely claims CLEAR despite still-live Bun
-    // and descendant. Without the production CLEAR fail-safe, this receives
-    // CLEARED while both continue to execute (failure-first negative oracle).
-    guardian_exchange(
+    // A faulty but authenticated Guardian claims CLEAR while Bun and its
+    // descendant are still executing. Retain the exact direct Child UNREAPED
+    // to force the kernel's zombie-only group state. A successful host SIGKILL
+    // is not sufficient to send CLEARED while the group is still visible.
+    assert_eq!(kill(Pid::from_raw(-group.as_raw()), None), Ok(()));
+    write_generation_control(
         &mut guardian,
         &GenerationControlRecord::new(CONTROL_CLEAR, 1).with_pid(group_pid),
-        CONTROL_CLEARED,
-    );
-    let leader_status = owned.leader.wait().expect("host cleared native Bun group");
+    )
+    .expect("send early authenticated KGC1 CLEAR");
+    await_held_zombie_group(group);
+    assert_no_premature_cleared(&mut guardian, group);
+    let leader_status = owned
+        .leader
+        .wait()
+        .expect("reap exact SIGKILLed Bun leader");
+    // Reaping the direct Child and observing the descendant's exit are native
+    // facts independent of the KGC1 acknowledgment under test.
     descendant_gone(descendant);
+    let cleared = read_generation_control(&mut guardian)
+        .expect("host acknowledges CLEAR only after native absence");
+    assert_eq!(
+        (cleared.kind, cleared.attempt, cleared.pid),
+        (CONTROL_CLEARED, 1, group_pid)
+    );
     assert_eq!(
         leader_status.signal(),
         Some(9),
