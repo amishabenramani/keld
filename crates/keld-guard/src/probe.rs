@@ -7,8 +7,9 @@
 //! that macOS/Windows/Linux are contained.
 
 use std::fs;
-use std::io::{self, ErrorKind};
+use std::io::{self, ErrorKind, Write as _};
 use std::net::TcpListener;
+use std::path::Path;
 use std::process::{Command, Stdio};
 
 use crate::admit::{
@@ -142,15 +143,32 @@ fn other_layer(
 }
 
 fn probe_direct_filesystem() -> ProbeRecord {
-    let path = std::env::temp_dir().join(format!(
+    probe_direct_filesystem_in(&std::env::temp_dir())
+}
+
+fn probe_direct_filesystem_in(directory: &Path) -> ProbeRecord {
+    let path = directory.join(format!(
         "keld-kel78-t1-{}-{}",
         std::process::id(),
         "host.txt"
     ));
-    let result = fs::write(&path, b"kel78-t1");
-    if path.exists() {
-        let _ = fs::remove_file(&path);
+    // The PID-based name is predictable. Create exclusively so an occupied
+    // pathname (including a symlink) is neither followed nor replaced.
+    let mut options = fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options.mode(0o600);
     }
+    let result = options.open(&path).and_then(|mut file| {
+        let write_result = file.write_all(b"kel78-t1");
+        drop(file);
+        // Only a successful exclusive create owns this pathname. A failed
+        // open must never unlink a file or symlink left by another process.
+        let _ = fs::remove_file(&path);
+        write_result
+    });
     match result {
         Ok(()) => os_row(
             "direct_filesystem",
@@ -252,6 +270,131 @@ mod tests {
     use crate::admit::{
         AdmissionError, AdmissionRequest, HostFacts, ProfileState, RoleInstance, admit,
     };
+
+    struct ProbeFixture {
+        directory: std::path::PathBuf,
+    }
+
+    impl ProbeFixture {
+        fn new(case: &str) -> Self {
+            let nonce = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("current clock")
+                .as_nanos();
+            let directory = std::env::temp_dir().join(format!(
+                "keld-guard-probe-{case}-{}-{nonce}",
+                std::process::id()
+            ));
+            let mut builder = fs::DirBuilder::new();
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::DirBuilderExt as _;
+                builder.mode(0o700);
+            }
+            builder
+                .create(&directory)
+                .expect("new private probe fixture");
+            Self { directory }
+        }
+
+        fn directory(&self) -> &Path {
+            &self.directory
+        }
+
+        fn predicted_path(&self) -> std::path::PathBuf {
+            self.directory
+                .join(format!("keld-kel78-t1-{}-host.txt", std::process::id()))
+        }
+    }
+
+    impl Drop for ProbeFixture {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.directory);
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn filesystem_probe_preserves_preseeded_symlink_and_its_target() {
+        use std::os::unix::fs::symlink;
+
+        let fixture = ProbeFixture::new("symlink");
+        let sentinel = fixture.directory().join("sentinel");
+        fs::write(&sentinel, b"original sentinel bytes").expect("seed sentinel");
+        let predicted = fixture.predicted_path();
+        symlink(&sentinel, &predicted).expect("preseed predicted filename as a symlink");
+
+        let row = probe_direct_filesystem_in(fixture.directory());
+
+        assert_eq!(
+            fs::read(&sentinel).expect("read sentinel"),
+            b"original sentinel bytes",
+            "the probe must not write through a pre-existing symlink"
+        );
+        assert!(
+            fs::symlink_metadata(&predicted)
+                .expect("existing symlink remains")
+                .file_type()
+                .is_symlink(),
+            "the probe must not remove an entry it did not create"
+        );
+        assert_eq!(row.verdict, ProbeVerdict::Fail);
+        assert_eq!(row.oracle, ProbeOracle::NotOsDeny);
+        assert!(
+            row.detail
+                .starts_with("create failed without sandbox deny:"),
+            "{row:?}"
+        );
+    }
+
+    #[test]
+    fn filesystem_probe_preserves_preexisting_regular_file() {
+        let fixture = ProbeFixture::new("regular");
+        let predicted = fixture.predicted_path();
+        fs::write(&predicted, b"pre-existing data").expect("seed occupied filename");
+
+        let row = probe_direct_filesystem_in(fixture.directory());
+
+        assert_eq!(
+            fs::read(&predicted).expect("pre-existing file remains"),
+            b"pre-existing data",
+            "the probe must not overwrite or remove an occupied filename"
+        );
+        assert_eq!(row.verdict, ProbeVerdict::Fail);
+        assert_eq!(row.oracle, ProbeOracle::NotOsDeny);
+        assert!(
+            row.detail
+                .starts_with("create failed without sandbox deny:"),
+            "{row:?}"
+        );
+    }
+
+    #[test]
+    fn filesystem_probe_removes_its_own_created_file_and_reports_real_io() {
+        let fixture = ProbeFixture::new("created");
+        let predicted = fixture.predicted_path();
+
+        let success = probe_direct_filesystem_in(fixture.directory());
+
+        assert_eq!(success.verdict, ProbeVerdict::Fail);
+        assert_eq!(success.oracle, ProbeOracle::NotOsDeny);
+        assert_eq!(success.detail, "host temp create succeeded; not an OS deny");
+        assert!(
+            fs::symlink_metadata(&predicted).is_err(),
+            "the probe must remove its own temporary file"
+        );
+
+        let missing_parent = fixture.directory().join("absent-directory");
+        let missing = probe_direct_filesystem_in(&missing_parent);
+        assert_eq!(missing.verdict, ProbeVerdict::Fail);
+        assert_eq!(missing.oracle, ProbeOracle::NotOsDeny);
+        assert!(
+            missing
+                .detail
+                .starts_with("create failed without sandbox deny:"),
+            "{missing:?}"
+        );
+    }
 
     #[test]
     fn live_direct_network_is_not_an_os_deny_pass() {
