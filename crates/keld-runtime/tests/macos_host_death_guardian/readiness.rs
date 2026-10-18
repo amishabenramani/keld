@@ -65,7 +65,10 @@ pub(super) fn await_ready(
         if let Some(maximum_args) = maximum_args {
             assert!(
                 fields.clone().count() <= maximum_args,
-                "unexpected trailing readiness event fields: {line}"
+                // `event` is one of the fixed whitelisted role names here.
+                // Never print the untrusted full event: APP_LINK may contain
+                // a private endpoint/token and a malformed line is attacker data.
+                "unexpected trailing readiness event fields for {event:?}"
             );
         }
         match event {
@@ -197,7 +200,12 @@ mod strict_event_shape_tests {
         // observable without changing any shipping Guardian role. The second
         // poison record forces an immediate distinct error on the old parser,
         // avoiding an artificial 10-second fixture timeout as a false RED.
-        send_event(&fixture.control, "LINK_BOUND unexpected-extra-field");
+        // This extra field stands in for a sensitive private app-link token;
+        // a fail-closed controller parser must never echo its raw contents.
+        send_event(
+            &fixture.control,
+            "LINK_BOUND private-token-must-be-redacted",
+        );
         send_event(&fixture.control, "POISON_AFTER_MALFORMED_EVENT");
         let outcome = catch_unwind(AssertUnwindSafe(|| {
             await_ready(
@@ -221,6 +229,10 @@ mod strict_event_shape_tests {
         assert!(
             detail.contains("unexpected trailing readiness event fields"),
             "malformed first record must fail on its extra token, not on a later poison event: {detail}"
+        );
+        assert!(
+            !detail.contains("private-token-must-be-redacted"),
+            "malformed event diagnostic revealed a private fixture field"
         );
     }
 }
