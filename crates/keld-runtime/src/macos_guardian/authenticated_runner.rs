@@ -152,11 +152,34 @@ fn run_live_group<R: Read + AsFd>(
             source,
         ));
     }
-    if let Err(error) = terminate_attested_group(group) {
-        failures.push(error);
-    }
-    let leader_status = match child.wait() {
-        Ok(status) => status,
+    let group_signal_failed = match terminate_attested_group(group) {
+        Ok(()) => false,
+        Err(error) => {
+            failures.push(error);
+            true
+        }
+    };
+    // A failed birth-attested group signal cannot guarantee the direct Bun
+    // Child has stopped. An unconditional Child::wait on that OS error could
+    // block this fatal cleanup forever. Observe the *retained Child* once and
+    // fail closed if still live: no unverified PID signal and no new deadline.
+    // A successful native group signal retains the original wait/reap path.
+    let leader_status = match if group_signal_failed {
+        child.try_wait()
+    } else {
+        child.wait().map(Some)
+    } {
+        Ok(Some(status)) => status,
+        Ok(None) => {
+            failures.push(lifecycle_error(
+                "macOS guardian direct-child wait after refused native group signal",
+                io::Error::new(
+                    io::ErrorKind::WouldBlock,
+                    "original direct child remains live after denied group cleanup",
+                ),
+            ));
+            return Err(collapse_failures(failures));
+        }
         Err(source) => {
             failures.push(lifecycle_error("macOS guardian direct-child wait", source));
             return Err(collapse_failures(failures));
@@ -171,3 +194,7 @@ fn run_live_group<R: Read + AsFd>(
         Err(collapse_failures(failures))
     }
 }
+
+#[cfg(test)]
+#[path = "authenticated_runner/tests.rs"]
+mod tests;
