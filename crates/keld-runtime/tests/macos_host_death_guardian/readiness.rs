@@ -52,7 +52,23 @@ pub(super) fn await_ready(
     {
         let line = accept_line_before(listener, ready_deadline);
         let mut fields = line.split_whitespace();
-        match fields.next() {
+        let event = fields.next();
+        // Reject surplus fields BEFORE any role event can create a native
+        // cleanup witness, spawn the app-link peer, or mark a barrier ready.
+        // Missing required fields keep their existing field-specific errors.
+        let maximum_args = match event {
+            Some("GUARDIAN") => Some(2),
+            Some("LEADER" | "DESCENDANT" | "APP_LINK" | "REGISTERED_LINK" | "LEAKER") => Some(1),
+            Some("LINK_BOUND" | "PEER_BOUND") => Some(0),
+            _ => None,
+        };
+        if let Some(maximum_args) = maximum_args {
+            assert!(
+                fields.clone().count() <= maximum_args,
+                "unexpected trailing readiness event fields: {line}"
+            );
+        }
+        match event {
             Some("GUARDIAN") => {
                 let announced_guardian = parse_pid(fields.next(), &line);
                 let group = parse_pid(fields.next(), &line);
@@ -156,4 +172,55 @@ fn verify_ready_ownership(
         process_rss_kib(ready.guardian_pid),
         process_rss_kib(ready.leader_pid)
     );
+}
+
+#[cfg(test)]
+mod strict_event_shape_tests {
+    use super::super::support::{Fixture, send_event};
+    use super::*;
+    use std::panic::{AssertUnwindSafe, catch_unwind};
+
+    #[test]
+    fn trailing_fields_are_not_accepted_as_ready_control_events() {
+        let fixture = Fixture::new();
+        let listener = UnixListener::bind(&fixture.control).expect("own private control socket");
+        listener
+            .set_nonblocking(true)
+            .expect("nonblocking fixture event accept");
+        let host = std::process::Command::new("/usr/bin/true")
+            .spawn()
+            .expect("own harmless native host placeholder");
+        let host_pid = host.id();
+        let mut cleanup = CycleCleanup::new(host);
+
+        // FIFO completed Unix connections make the first malformed record
+        // observable without changing any shipping Guardian role. The second
+        // poison record forces an immediate distinct error on the old parser,
+        // avoiding an artificial 10-second fixture timeout as a false RED.
+        send_event(&fixture.control, "LINK_BOUND unexpected-extra-field");
+        send_event(&fixture.control, "POISON_AFTER_MALFORMED_EVENT");
+        let outcome = catch_unwind(AssertUnwindSafe(|| {
+            await_ready(
+                &listener,
+                &fixture.control,
+                host_pid,
+                Instant::now(),
+                &mut cleanup,
+                None,
+                false,
+            )
+        }));
+        let panic = outcome
+            .err()
+            .expect("malformed readiness event must be rejected");
+        let detail = panic
+            .downcast_ref::<String>()
+            .map(String::as_str)
+            .or_else(|| panic.downcast_ref::<&str>().copied())
+            .unwrap_or("non-string panic");
+        assert!(
+            detail.contains("unexpected trailing readiness event fields"),
+            "malformed first record must fail on its extra token, not on a later poison event: {detail}"
+        );
+    }
 }
