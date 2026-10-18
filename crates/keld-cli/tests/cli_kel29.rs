@@ -21,6 +21,22 @@ fn keld() -> Command {
     Command::new(keld_bin())
 }
 
+#[cfg(windows)]
+#[test]
+fn malformed_windows_utf16_cli_argv_refuses_before_command_selection() {
+    use std::os::windows::ffi::OsStringExt as _;
+
+    let malformed = std::ffi::OsString::from_wide(&[0xd800]);
+    let output = keld()
+        .arg(malformed)
+        .output()
+        .expect("spawn with a test-owned malformed Windows argument");
+    assert_eq!(output.status.code(), Some(2));
+    let stderr = String::from_utf8(output.stderr).expect("CLI reports fixed UTF-8 refusals");
+    assert!(stderr.contains("KELD-CLI-044"), "{stderr}");
+    assert!(!stderr.contains("panicked at"), "{stderr}");
+}
+
 fn empty_path_dir() -> tempfile::TempDir {
     tempfile::tempdir().expect("empty PATH dir")
 }
