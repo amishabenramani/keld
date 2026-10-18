@@ -274,6 +274,24 @@ impl WindowsLpacProfile {
         access: WindowsLpacPathAccess,
         before_write: impl FnOnce(),
     ) -> Result<(), WindowsLpacError> {
+        self.grant_path_with_before_write_shared(
+            path,
+            access,
+            FILE_SHARE_READ | FILE_SHARE_WRITE,
+            before_write,
+        )
+    }
+
+    // Keep production DELETE sharing disabled. The native adversarial test
+    // explicitly opts into DELETE sharing to require a real pathname swap,
+    // then exercises this same read/merge/write implementation on the HANDLE.
+    fn grant_path_with_before_write_shared(
+        &self,
+        path: &Path,
+        access: WindowsLpacPathAccess,
+        share_mode: u32,
+        before_write: impl FnOnce(),
+    ) -> Result<(), WindowsLpacError> {
         // Preserve the API's explicit embedded-NUL refusal before opening.
         let _ = wide_nul(path.as_os_str(), "ACL path")?;
         // This handle owns both the identity and the authority to read/write
@@ -282,7 +300,7 @@ impl WindowsLpacProfile {
         // OPEN_REPARSE_POINT permits fail-closed inspection of the final leaf.
         let original = OpenOptions::new()
             .access_mode(READ_CONTROL | WRITE_DAC | FILE_READ_ATTRIBUTES)
-            .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
+            .share_mode(share_mode)
             .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
             .open(path)
             .map_err(|error| WindowsLpacError::contract("ACL object open", error.to_string()))?;
@@ -1413,6 +1431,62 @@ mod tests {
             "the grant must apply to the original retained object even after rename"
         );
         grant.expect("an ordinary retained directory receives its intended package grant");
+    }
+
+    #[test]
+    fn grant_path_retained_handle_preserves_original_after_forced_directory_swap() {
+        use std::ffi::OsString;
+        use std::time::{SystemTime, UNIX_EPOCH};
+        use windows_sys::Win32::Storage::FileSystem::{
+            FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
+        };
+
+        let fixture = tempfile::tempdir().expect("own isolated forced-swap fixture");
+        let claimed = fixture.path().join("claimed");
+        let outsider = fixture.path().join("outsider");
+        let moved = fixture.path().join("original-moved");
+        std::fs::create_dir(&claimed).expect("create owned original");
+        std::fs::create_dir(&outsider).expect("create independent outsider");
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("positive fixture generation")
+            .as_nanos();
+        let name = OsString::from(format!("keld-forced-swap-{}-{nonce}", std::process::id()));
+        let profile = super::WindowsLpacProfile::create(&name).expect("test-owned profile SID");
+        let outsider_before = observed_dacl(&outsider);
+        let original_before = observed_dacl(&claimed);
+
+        // Unlike the production no-DELETE-share guard, this native oracle
+        // MUST replace the pathname while its original HANDLE stays open.
+        // Refusing either rename is a failure, not an acceptable green path.
+        let grant = profile.grant_path_with_before_write_shared(
+            &claimed,
+            super::WindowsLpacPathAccess::RolePrivate,
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+            || {
+                std::fs::rename(&claimed, &moved)
+                    .expect("DELETE-shared original must permit the forced rename");
+                if let Err(error) = std::fs::rename(&outsider, &claimed) {
+                    std::fs::rename(&moved, &claimed)
+                        .expect("restore owned original if outsider substitution fails");
+                    panic!("forced outsider substitution failed: {error}");
+                }
+            },
+        );
+        let outsider_after = observed_dacl(&claimed);
+        let original_after = observed_dacl(&moved);
+        std::fs::rename(&claimed, &outsider).expect("restore owned outsider");
+        std::fs::rename(&moved, &claimed).expect("restore owned original");
+
+        assert_eq!(
+            outsider_after, outsider_before,
+            "forced pathname swap must never grant the unrelated outsider's DACL"
+        );
+        assert_ne!(
+            original_after, original_before,
+            "retained HANDLE must publish the intended ACL to the renamed original"
+        );
+        grant.expect("the forced rename does not prevent a grant on the retained HANDLE");
     }
 
     fn observed_dacl(path: &std::path::Path) -> String {
