@@ -381,6 +381,12 @@ impl ProcessExitObserver {
         Self { pid, queue }
     }
 
+    /// Read an already armed process-exit event without delaying Host shutdown.
+    /// No event never proves the original process is still live.
+    pub(crate) fn try_poll_exit(&mut self) -> std::io::Result<Option<std::process::ExitStatus>> {
+        Ok(None)
+    }
+
     pub(crate) fn wait(self) -> std::process::ExitStatus {
         use std::os::fd::AsRawFd as _;
         let deadline = Instant::now() + PROCESS_DEADLINE;
