@@ -1931,6 +1931,23 @@ impl WindowsNamedPipeBootstrapListener {
                         );
                         return Ok(WindowsNamedPipeBootstrapAdmission::Cancelled);
                     }
+                    // A timely HELLO may wait for the server one-shot's
+                    // lifecycle lock past the original generation cut.
+                    // Consuming succeeds without extending that clock, and
+                    // cancellation is already a no-op after consumption.
+                    // Refuse and explicitly retire this same owned instance
+                    // before the stream's absolute deadline can be cleared.
+                    if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+                        drop(stream);
+                        server.close_terminal()?;
+                        drop(
+                            self.server
+                                .lock()
+                                .unwrap_or_else(PoisonError::into_inner)
+                                .take(),
+                        );
+                        return Ok(WindowsNamedPipeBootstrapAdmission::DeadlineElapsed);
+                    }
                     stream.0.set_absolute_deadline(None);
                     drop(
                         self.server
