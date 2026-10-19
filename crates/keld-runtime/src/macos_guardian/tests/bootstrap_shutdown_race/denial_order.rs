@@ -41,6 +41,48 @@ fn spawn_held_native_guardian(
     GuardianBootstrap::spawn_supervised(command).expect("real KGC1 Guardian")
 }
 
+fn release_failed_pre_s_observation(
+    mut held: std::os::unix::net::UnixStream,
+    gate_released: bool,
+    denial_observed: bool,
+    s_released: bool,
+    allow_s_tx: &mpsc::SyncSender<()>,
+) {
+    // Never release an un-denied Guardian into Bun startup. On early failure
+    // close the held native gate; after denial, permit PREPARE so S can drain.
+    if !gate_released && denial_observed {
+        let _ = held.write_all(b"R");
+    }
+    drop(held);
+    if !s_released {
+        let _ = allow_s_tx.try_send(());
+    }
+}
+
+fn assert_native_denial_shutdown(
+    result: Result<std::process::ExitStatus, super::super::RuntimeError>,
+    mut primary: crate::macos_guardian::GuardedPrimary,
+    bun_marker: &std::path::Path,
+    denial_visible_before_s: bool,
+) {
+    assert!(
+        !denial_visible_before_s,
+        "initial recovery denial became visible before the host queued S"
+    );
+    let status = result.expect("ordered S/KSA cannot fail before first generation");
+    assert!(status.success(), "actual Guardian orderly exit: {status:?}");
+    assert!(primary.group_pid().is_none(), "no enrolled Bun group");
+    assert!(
+        primary
+            .child
+            .try_wait()
+            .expect("real Guardian status")
+            .is_some(),
+        "host reaped actual Guardian"
+    );
+    assert!(!bun_marker.exists(), "no JS marker after host deny+S");
+}
+
 #[test]
 fn native_host_denial_is_not_visible_before_real_s_is_queued() {
     let temp = tempfile::tempdir().expect("native host denial witness");
@@ -81,11 +123,13 @@ fn native_host_denial_is_not_visible_before_real_s_is_queued() {
         (result, primary)
     });
     let mut gate_released = false;
+    let mut denial_observed = false;
     let mut s_released = false;
     let observation = catch_unwind(AssertUnwindSafe(|| {
         denied_rx
             .recv_timeout(GUARDIAN_SHUTDOWN_DEADLINE)
             .expect("real host denied initial recovery before writing S");
+        denial_observed = true;
         // Force an actual idle read while shutdown owns the recovery mutex.
         arm_idle.store(true, Ordering::Release);
         idle_rx
@@ -112,12 +156,13 @@ fn native_host_denial_is_not_visible_before_real_s_is_queued() {
         // An intentional RED must still release both native gates and join
         // the sole retained Child/worker owner before replaying the ORIGINAL
         // assertion failure. Never leave an orphan on failure-first tests.
-        if !gate_released {
-            let _ = held.write_all(b"R");
-        }
-        if !s_released {
-            let _ = allow_s_tx.try_send(());
-        }
+        release_failed_pre_s_observation(
+            held,
+            gate_released,
+            denial_observed,
+            s_released,
+            &allow_s_tx,
+        );
     }
     let joined = shutdown.join();
     let denial_visible_before_s = match observation {
@@ -130,21 +175,6 @@ fn native_host_denial_is_not_visible_before_real_s_is_queued() {
             resume_unwind(original);
         }
     };
-    let (result, mut primary) = joined.expect("host shutdown task");
-    assert!(
-        !denial_visible_before_s,
-        "initial recovery denial became visible before the host queued S"
-    );
-    let status = result.expect("ordered S/KSA cannot fail before first generation");
-    assert!(status.success(), "actual Guardian orderly exit: {status:?}");
-    assert!(primary.group_pid().is_none(), "no enrolled Bun group");
-    assert!(
-        primary
-            .child
-            .try_wait()
-            .expect("real Guardian status")
-            .is_some(),
-        "host reaped actual Guardian"
-    );
-    assert!(!bun_marker.exists(), "no JS marker after host deny+S");
+    let (result, primary) = joined.expect("host shutdown task");
+    assert_native_denial_shutdown(result, primary, &bun_marker, denial_visible_before_s);
 }
