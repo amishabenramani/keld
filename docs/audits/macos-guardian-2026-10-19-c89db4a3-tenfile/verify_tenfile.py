@@ -9,6 +9,7 @@ from __future__ import annotations
 import collections
 import csv
 import json
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -51,6 +52,23 @@ COUNTS = {
     "source-reviewed-reused": 5,
 }
 
+# Deliberately finite source-owned callsite anchors, not a machine-generated
+# semantic claim that all surrounding production/test behaviors are reviewed.
+# Every anchor is a real historically pinned source line containing a reviewed
+# operation, native selector, or a specifically documented unresolved cut.
+SOURCE_ANCHORS = {
+    "macos_guardian.rs": (128, 131, 142, 167, 206),
+    "authenticated_runner.rs": (13, 109, 132, 139, 209),
+    "process_group.rs": (196, 236, 269, 311, 410, 434, 493, 515, 536),
+    "supervised_ack.rs": (17, 26, 52, 127),
+    "process_group_failsafe.rs": (112, 150, 190, 268, 379, 393, 414, 459, 527),
+    "rejected_registration_deadline.rs": (61, 113, 173, 272, 288, 302, 328),
+    "pre_registration_host_death.rs": (49, 120, 152, 236, 284),
+    "guardian_crash_pre_registration.rs": (32, 152, 249, 253),
+    "terminal_liveness.rs": (54, 102),
+    "worker_outcome.rs": (18, 116, 195),
+}
+
 
 class Invalid(ValueError):
     """A claimed source record contradicts immutable evidence."""
@@ -86,6 +104,29 @@ def rows(path: Path) -> tuple[list[str], list[dict[str, str]]]:
     return names, values
 
 
+def check_source_ranges(repo: Path, record: dict[str, str]) -> None:
+    """Require real pinned line ranges for each named source-level claim.
+
+    This cannot prove that prose is true. It catches a falsely green audit
+    whose named native selector/cleanup branch was left OUTSIDE its citation.
+    """
+    path = record["path"]
+    descriptor = record["source_lines"]
+    match = re.fullmatch(r"([^:]+\.rs):(\d+-\d+(?:,\d+-\d+)*)", descriptor)
+    require(match is not None, f"invalid source citation syntax: {path}")
+    prefix, slices = match.groups()
+    require(path.endswith("/" + prefix) or path == prefix, f"citation names wrong source file: {path}")
+    lines = git(repo, "show", f"{SOURCE}:{path}").splitlines()
+    last = 0
+    ranges = []
+    for interval in slices.split(","):
+        begin, end = (int(n) for n in interval.split("-"))
+        require(last < begin <= end <= len(lines), f"overlap, gap order, or invalid source interval {interval}: {path}")
+        ranges.append((begin, end))
+        last = end
+    require(all(any(begin <= anchor <= end for begin, end in ranges) for anchor in SOURCE_ANCHORS[Path(path).name]), f"missing named source operation/native selector in reviewed citation: {path}")
+
+
 def verify(repo: Path = ROOT, folder: Path = HERE) -> None:
     parent = repo / PARENT_REL
     for identity in (PARENT, HIST, SOURCE):
@@ -116,6 +157,7 @@ def verify(repo: Path = ROOT, folder: Path = HERE) -> None:
             klass = "changed-overlay" if path in CHANGED else "facade" if path.endswith("macos_guardian.rs") else "ack" if path.endswith("supervised_ack.rs") else "test"
             require(record["review_class"] == klass, f"false source review class: {path}")
             require(all(record[field].strip() for field in REVIEW_COLS[4:]), f"unsubstantiated source evidence: {path}")
+            check_source_ranges(repo, record)
             require(record["blob_949"] == old["tip_blob"] == git(repo, "rev-parse", f"{HIST}:{path}"), f"incorrect historical blob: {path}")
             require(record["blob_956"] == old["blob_952"] == git(repo, "rev-parse", f"{SOURCE}:{path}"), f"incorrect source-tip blob: {path}")
             expected = "changed-since-949-pending" if path in CHANGED else "source-reviewed-limited-batch10"
@@ -130,6 +172,7 @@ def verify(repo: Path = ROOT, folder: Path = HERE) -> None:
     require(dict(classes) == COUNTS, "status histogram mismatch")
     require(summary["status_counts"] == COUNTS, "summary status counts mismatch")
     require(summary["parent_head"] == PARENT and summary["historical_949_head"] == HIST and summary["source_tip_952"] == SOURCE, "summary source identities mismatch")
+    require(summary["schema_version"] == 1 and summary["parent_pr"] == 967 and summary["parent_source_documents_unchanged"] is True, "summary provenance contract mismatch")
     require(summary["historical_paths"] == 77 and summary["source_tip_paths"] == 78, "scope size mismatch")
     require(summary["new_review_records"] == 10 and summary["unchanged_limited_reviews"] == 7 and summary["changed_source_limited_overlays"] == 3, "review counts mismatch")
     require(set(summary["changed_historical_full_review_still_pending"]) == CHANGED and summary["pending_historical_full_review"] == 42, "unresolved source rows falsely cleared")

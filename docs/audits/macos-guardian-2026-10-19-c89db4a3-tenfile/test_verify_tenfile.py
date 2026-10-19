@@ -107,6 +107,73 @@ class SourceAuditVerifierTests(unittest.TestCase):
         self.mutate_summary(lambda doc: doc.__setitem__("changed_historical_full_review_still_pending", []))
         self.assert_invalid()
 
+    def test_omitted_attested_group_termination_body_rejected(self) -> None:
+        def remove_critical_slice(values):
+            record = next(r for r in values if r["path"].endswith("/process_group.rs"))
+            record["source_lines"] = record["source_lines"].replace(",237-310", "")
+        self.mutate_csv("review_append.csv", remove_critical_slice)
+        self.assert_invalid()
+
+    def test_omitted_kgr1_constants_and_facade_report_rejected(self) -> None:
+        def remove_critical_slice(values):
+            record = next(r for r in values if r["path"].endswith("/macos_guardian.rs"))
+            record["source_lines"] = record["source_lines"].replace(",127-166", "")
+        self.mutate_csv("review_append.csv", remove_critical_slice)
+        self.assert_invalid()
+
+    def test_omitted_post_reap_eperm_native_witness_rejected(self) -> None:
+        def remove_critical_slice(values):
+            record = next(r for r in values if r["path"].endswith("/process_group_failsafe.rs"))
+            record["source_lines"] = record["source_lines"].replace(",113-201", "")
+        self.mutate_csv("review_append.csv", remove_critical_slice)
+        self.assert_invalid()
+
+    def test_omitted_authentication_reject_spawn_child_wait_rejected(self) -> None:
+        def remove_critical_slice(values):
+            record = next(r for r in values if r["path"].endswith("/authenticated_runner.rs"))
+            record["source_lines"] = record["source_lines"].replace(",110-138", "")
+        self.mutate_csv("review_append.csv", remove_critical_slice)
+        self.assert_invalid()
+
+    def test_omitted_forged_kgc1_role_citation_rejected(self) -> None:
+        def remove_critical_slice(values):
+            record = next(r for r in values if r["path"].endswith("/rejected_registration_deadline.rs"))
+            record["source_lines"] = record["source_lines"].replace(",113-171", "")
+        self.mutate_csv("review_append.csv", remove_critical_slice)
+        self.assert_invalid()
+
+    def test_omitted_host_sigkill_native_role_citation_rejected(self) -> None:
+        def remove_critical_slice(values):
+            record = next(r for r in values if r["path"].endswith("/pre_registration_host_death.rs"))
+            record["source_lines"] = record["source_lines"].replace(",121-169", "")
+        self.mutate_csv("review_append.csv", remove_critical_slice)
+        self.assert_invalid()
+
+    def test_wrong_source_prefix_rejected(self) -> None:
+        def redirect(values):
+            values[0]["source_lines"] = values[0]["source_lines"].replace("macos_guardian.rs:", "process_group.rs:")
+        self.mutate_csv("review_append.csv", redirect)
+        self.assert_invalid()
+
+    def test_unreviewed_citation_out_of_bounds_rejected(self) -> None:
+        def redirect(values):
+            record = next(r for r in values if r["path"].endswith("/supervised_ack.rs"))
+            record["source_lines"] += ",9000-9001"
+        self.mutate_csv("review_append.csv", redirect)
+        self.assert_invalid()
+
+    def test_false_parent_pr_provenance_rejected(self) -> None:
+        self.mutate_summary(lambda doc: doc.__setitem__("parent_pr", 955))
+        self.assert_invalid()
+
+    def test_false_schema_revision_rejected(self) -> None:
+        self.mutate_summary(lambda doc: doc.__setitem__("schema_version", 2))
+        self.assert_invalid()
+
+    def test_false_parent_unchanged_claim_rejected(self) -> None:
+        self.mutate_summary(lambda doc: doc.__setitem__("parent_source_documents_unchanged", False))
+        self.assert_invalid()
+
     def test_false_pending_count_rejected(self) -> None:
         self.mutate_summary(lambda doc: doc.__setitem__("pending_historical_full_review", 0))
         self.assert_invalid()
