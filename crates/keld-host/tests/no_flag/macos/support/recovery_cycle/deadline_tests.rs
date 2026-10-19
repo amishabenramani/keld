@@ -242,6 +242,48 @@ fn timely_native_hello_and_descendant_retain_exact_bytes() {
 }
 
 #[test]
+fn timely_native_records_survive_owned_peer_close_before_steady_reader_setup() {
+    let (_root, listener, address) = native_listener();
+    let (close_tx, close_rx) = mpsc::sync_channel(1);
+    let (closed_tx, closed_rx) = mpsc::sync_channel(1);
+    let controller = thread::spawn(move || {
+        let mut peer = UnixStream::connect(&address).expect("connect real Unix peer");
+        peer.set_write_timeout(Some(RESCUE_LIMIT))
+            .expect("bound native complete writer");
+        peer.write_all(HELLO).expect("write real HELLO");
+        peer.write_all(DESCENDANT).expect("write real DESCENDANT");
+        let release = close_rx.recv_timeout(RESCUE_LIMIT);
+        drop(peer);
+        let _ = closed_tx.send((Instant::now(), release));
+    });
+    let deadline = Instant::now() + Duration::from_secs(2);
+    let mut closed_at = None;
+    let result = catch_unwind(AssertUnwindSafe(|| {
+        collect_initial_control_until(&listener, "closed-peer", deadline, &mut |stage| {
+            if let NativeRecoveryStage::AfterLf { line: 1 } = stage {
+                let _ = close_tx.send(());
+                let (at, release) = closed_rx
+                    .recv_timeout(RESCUE_LIMIT)
+                    .expect("real peer closure after native DESCENDANT LF");
+                assert!(release.is_ok(), "peer waited for exact second LF");
+                closed_at = Some(at);
+            }
+        })
+    }));
+    controller.join().expect("reap test-owned closed peer");
+    assert!(
+        closed_at.is_some_and(|at| at < deadline),
+        "the real peer must close before the original clock"
+    );
+    let (accepted, hello, descendant) = result
+        .expect("native control reader must not panic")
+        .expect("both timely records remain accepted after real peer close");
+    assert_eq!(hello.as_bytes(), &HELLO[..HELLO.len() - 1]);
+    assert_eq!(descendant.as_bytes(), &DESCENDANT[..DESCENDANT.len() - 1]);
+    drop(accepted);
+}
+
+#[test]
 fn native_control_lines_bound_utf8_cap_and_eof_without_disclosing_bytes() {
     let cases = [
         (vec![0xff, b'\n'], "invalid UTF-8"),

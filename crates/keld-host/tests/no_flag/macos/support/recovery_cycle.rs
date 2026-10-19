@@ -470,8 +470,18 @@ fn collect_initial_control_until(
     observe: &mut impl FnMut(NativeRecoveryStage),
 ) -> Result<(UnixStream, String, String), String> {
     let mut stream = accept_recovery_until(listener, label, deadline, observe)?;
-    // Darwin accepted sockets may inherit O_NONBLOCK. Keep each actual read
-    // pollable; reenable blocking only after both initial records have arrived.
+    // Preserve the original socket setup ordering while the accepted peer is
+    // still alive. On Darwin setting SO_RCVTIMEO after an otherwise-complete
+    // peer has closed can fail with EINVAL; that is not a bad HELLO.
+    stream
+        .set_nonblocking(false)
+        .map_err(|error| format!("{label}: normalize T3 control stream: {error}"))?;
+    stream
+        .set_read_timeout(Some(EVENT_DEADLINE))
+        .map_err(|error| format!("{label}: T3 control deadline: {error}"))?;
+    // Native HELLO and DESCENDANT use nonblocking one-byte reads checked
+    // against the earlier absolute clock. The socket timeout installed above
+    // remains for the subsequent ordinary READY/ECHO reader.
     stream
         .set_nonblocking(true)
         .map_err(|error| format!("{label}: native control poll setup: {error}"))?;
@@ -485,9 +495,6 @@ fn collect_initial_control_until(
     stream
         .set_nonblocking(false)
         .map_err(|error| format!("{label}: normalize T3 control stream: {error}"))?;
-    stream
-        .set_read_timeout(Some(EVENT_DEADLINE))
-        .map_err(|error| format!("{label}: T3 control deadline: {error}"))?;
     if Instant::now() >= deadline {
         return Err(format!(
             "{label}: normalized recovery control exceeded original deadline"
