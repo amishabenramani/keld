@@ -123,11 +123,10 @@ pub(super) fn run_generation_host(
         // keeps KGC1 open without supplying another native record must not
         // prevent the host from joining this worker. Drain any already-ready
         // full control record first so queued CLEAR still gets validated.
-        if record.is_none()
-            && lock_recovery(recovery_decision)
-                .guardian_reaped_shutdown_at
-                .is_some()
-        {
+        let guardian_reaped_shutdown = lock_recovery(recovery_decision)
+            .guardian_reaped_shutdown_at
+            .is_some();
+        if record.is_none() && guardian_reaped_shutdown {
             let interrupted = lifecycle_error(
                 "macOS guardian generation worker after Guardian exit",
                 io::Error::new(

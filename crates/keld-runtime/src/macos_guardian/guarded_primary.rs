@@ -521,10 +521,14 @@ impl GuardedPrimary {
         // Only the retained Child terminal status proves it is safe to
         // interrupt a worker whose peer may still be the actual Guardian.
         // Give the existing EOF and CLEAR protocol its full original budget.
-        if !guardian_reaped
-            || !lock_recovery(&self.recovery_decision).shutdown_acknowledged
-            || lock_generation(&self.current_generation).is_some()
-        {
+        if !guardian_reaped {
+            return;
+        }
+        // Keep mutex acquisition disjoint. CONTROL_CLEAR takes the
+        // generation lock before recovery; retaining a recovery temporary
+        // across the generation check would invert the lock order.
+        let acknowledged = lock_recovery(&self.recovery_decision).shutdown_acknowledged;
+        if !acknowledged || lock_generation(&self.current_generation).is_some() {
             return;
         }
         while self
