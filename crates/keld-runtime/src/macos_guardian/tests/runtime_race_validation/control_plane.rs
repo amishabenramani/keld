@@ -95,8 +95,8 @@ impl Drop for ControlPlane {
 fn report_rescue_join(result: &thread::Result<Result<(), RuntimeError>>) {
     match result {
         Ok(Ok(())) => {}
-        Ok(Err(error)) => eprintln!("KEL143_RACE_RESCUE owner error: {error}"),
-        Err(error) => eprintln!("KEL143_RACE_RESCUE thread panic: {error:?}"),
+        Ok(Err(_)) => eprintln!("KEL143_RACE_RESCUE owner_error"),
+        Err(_) => eprintln!("KEL143_RACE_RESCUE worker_panic"),
     }
 }
 
