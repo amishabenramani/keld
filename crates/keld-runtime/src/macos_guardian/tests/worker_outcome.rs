@@ -11,10 +11,102 @@ use nix::unistd::Pid;
 
 use super::super::{
     CONTROL_PREPARE, CONTROL_PREPARED, GUARDIAN_SHUTDOWN_DEADLINE, GenerationControlRecord,
-    GuardedPrimary, JoinHandle, RecoveryState, RegisteredPrimaryGeneration, lock_generation,
-    lock_recovery, read_generation_control, run_generation_host, write_generation_control,
+    GuardedPrimary, JoinHandle, RecoveryState, RegisteredPrimaryGeneration, RuntimeError,
+    lock_generation, lock_recovery, read_generation_control, run_generation_host,
+    write_generation_control,
 };
 use super::test_support::NativeChildOwner;
+
+// The actual Child and generation worker are owned BEFORE the first KGC1
+// request. Every failed assertion, I/O error or unwind before PREPARED must
+// close the only native peer, reap the exact Child, and join the worker.
+// Transfer all three owners only after the authenticated control exchange.
+struct PendingGuardianWorker {
+    guardian: Option<NativeChildOwner>,
+    peer: Option<UnixStream>,
+    worker: Option<JoinHandle<Result<(), RuntimeError>>>,
+}
+
+impl Drop for PendingGuardianWorker {
+    fn drop(&mut self) {
+        // Removing the only peer ends the worker's real KGC1 reader even
+        // when a handshake assertion panics before the product handoff.
+        drop(self.peer.take());
+        // The original Child owns its PID. Never rescue via a bare PID/PGID.
+        drop(self.guardian.take());
+        if let Some(worker) = self.worker.take() {
+            let _ = worker.join();
+        }
+    }
+}
+
+// A source-visible panic before PREPARED previously dropped a bare Child and
+// detached its live KGC1 worker. Drive the same pre-transfer failure with an
+// actual native Child and socket: the pending owner must reap and join them.
+#[test]
+fn premature_guardian_prepared_failure_reaps_owned_child_and_joins_control_worker() {
+    let guardian = NativeChildOwner::new(
+        Command::new("/bin/sleep")
+            .arg("8")
+            .process_group(0)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("retain original native Guardian stand-in"),
+    );
+    let pid = i32::try_from(guardian.id()).expect("native PID fits i32");
+    assert_eq!(
+        nix::unistd::getpgid(Some(Pid::from_raw(pid)))
+            .expect("exact test group leader remains live")
+            .as_raw(),
+        pid,
+        "never operate on the harness process group"
+    );
+    let mut pending = PendingGuardianWorker {
+        guardian: Some(guardian),
+        peer: None,
+        worker: None,
+    };
+    let (control, peer) = UnixStream::pair().expect("real KGC1 peer");
+    pending.peer = Some(peer);
+    let current = Arc::new(Mutex::new(None));
+    let recovery = Arc::new(Mutex::new(RecoveryState::new()));
+    let (updates_tx, _updates_rx) = mpsc::channel();
+    let (worker_done_tx, worker_done_rx) = mpsc::sync_channel(1);
+    pending.worker = Some(thread::spawn(move || {
+        let outcome = run_generation_host(
+            super::super::generation_host::GenerationHostAdmission::new(
+                u32::try_from(pid).expect("native guardian id"),
+                Instant::now() + GUARDIAN_SHUTDOWN_DEADLINE,
+            ),
+            control,
+            &updates_tx,
+            &current,
+            &recovery,
+            None,
+            None,
+        );
+        let _ = worker_done_tx.send(());
+        outcome
+    }));
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let _pending = pending;
+        panic!("injected failure before first KGC1 PREPARED");
+    }));
+    assert!(result.is_err(), "negative panic cut did not execute");
+    worker_done_rx
+        .try_recv()
+        .expect("the owned control worker finished before the panic was caught");
+    assert_eq!(
+        nix::sys::wait::waitpid(
+            Pid::from_raw(pid),
+            Some(nix::sys::wait::WaitPidFlag::WNOHANG)
+        ),
+        Err(nix::errno::Errno::ECHILD),
+        "NativeChildOwner must reap the exact original child before unwinding returns"
+    );
+}
 
 #[test]
 fn premature_successful_generation_worker_exit_reaps_unattributed_group() {
@@ -282,19 +374,27 @@ fn poll_fatal_inspection_error_reaps_registered_group() {
 // without limit for that worker once the owned Guardian has been killed.
 #[test]
 fn guarded_primary_shutdown_bounds_worker_join_after_guardian_kill() {
-    let mut guardian = Command::new("/bin/sleep")
-        // Independently self-retire even if the test fallback cannot
-        // recover the Guardian owner after a future regression.
-        .arg("8")
-        .process_group(0)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .expect("owned long-lived guardian stand-in");
-    let writer = guardian.stdin.take().expect("owned guardian liveness pipe");
-    let ack = guardian.stdout.take().expect("owned guardian ACK pipe");
-    let native_guardian = i32::try_from(guardian.id()).expect("native Guardian PID fits");
+    // Independently self-retire if a future regression prevents the fallback
+    // from recovering the owning thread and its retained Child.
+    let guardian = NativeChildOwner::new(
+        Command::new("/bin/sleep")
+            .arg("8")
+            .process_group(0)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("owned long-lived guardian stand-in"),
+    );
+    let mut pending = PendingGuardianWorker {
+        guardian: Some(guardian),
+        peer: None,
+        worker: None,
+    };
+    let retained = pending.guardian.as_mut().expect("pending original Child");
+    let writer = retained.stdin.take().expect("owned guardian liveness pipe");
+    let ack = retained.stdout.take().expect("owned guardian ACK pipe");
+    let native_guardian = i32::try_from(retained.id()).expect("native Guardian PID fits");
     assert_eq!(
         nix::unistd::getpgid(Some(Pid::from_raw(native_guardian)))
             .expect("exact native Guardian group leader")
@@ -302,17 +402,18 @@ fn guarded_primary_shutdown_bounds_worker_join_after_guardian_kill() {
         native_guardian,
         "never target the test harness's process group"
     );
-    let (control, mut peer) = UnixStream::pair().expect("real KGC1 socket pair");
+    let (control, peer) = UnixStream::pair().expect("real KGC1 socket pair");
     peer.set_read_timeout(Some(GUARDIAN_SHUTDOWN_DEADLINE))
         .expect("bounded witness receipt");
+    pending.peer = Some(peer);
     let current_generation = Arc::new(Mutex::new(None));
     let recovery = Arc::new(Mutex::new(RecoveryState::new()));
     lock_recovery(&recovery).arm();
     let (updates_tx, updates_rx) = mpsc::channel();
     let worker_current = Arc::clone(&current_generation);
     let worker_recovery = Arc::clone(&recovery);
-    let guardian_pid = guardian.id();
-    let worker = thread::spawn(move || {
+    let guardian_pid = pending.guardian.as_ref().expect("owned Guardian").id();
+    pending.worker = Some(thread::spawn(move || {
         run_generation_host(
             super::super::generation_host::GenerationHostAdmission::new(
                 guardian_pid,
@@ -325,13 +426,29 @@ fn guarded_primary_shutdown_bounds_worker_join_after_guardian_kill() {
             None,
             None,
         )
-    });
-    write_generation_control(&mut peer, &GenerationControlRecord::new(CONTROL_PREPARE, 1))
+    }));
+    let peer = pending.peer.as_mut().expect("pending KGC1 peer");
+    write_generation_control(peer, &GenerationControlRecord::new(CONTROL_PREPARE, 1))
         .expect("send first complete KGC1 control frame");
-    let prepared = read_generation_control(&mut peer).expect("real generation host PREPARED");
+    let prepared = read_generation_control(peer).expect("real generation host PREPARED");
     assert_eq!(prepared.kind, CONTROL_PREPARED);
     assert_eq!(prepared.attempt, 1);
     lock_recovery(&recovery).shutdown_acknowledged = true;
+    // No fallible operations follow disarming the pending custody. The
+    // shipping GuardedPrimary becomes the only Child and worker owner.
+    let peer = pending
+        .peer
+        .take()
+        .expect("transfer KGC1 peer after PREPARED");
+    let worker = pending
+        .worker
+        .take()
+        .expect("transfer joined-worker authority");
+    let guardian = pending
+        .guardian
+        .as_mut()
+        .expect("transfer Child owner")
+        .take();
     let mut primary = GuardedPrimary {
         child: guardian,
         liveness_writer: Some(writer),
