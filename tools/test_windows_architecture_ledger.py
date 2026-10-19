@@ -79,6 +79,12 @@ class InclusionRule(unittest.TestCase):
         self.assertNotSelected(b"let windowsill = 1;\n")
         self.assertNotSelected(b"let mywindows_job = 1;\n")
 
+    def test_cfg_scan_requires_the_whole_windows_token(self):
+        # Inside a cfg list `windows` must be a token, not a substring of one.
+        self.assertNotSelected(b'#[cfg(feature = "swindowsx")]\n')
+        self.assertNotSelected(b"#[cfg(any(unix, mywindowsish))]\n")
+        self.assertSelected(b'#[cfg(feature = "windows-compat")]\n')
+
     def test_slice_windows_method_is_not_a_windows_reference(self):
         # `[T]::windows(n)` is a std slice method, not the platform.
         self.assertNotSelected(b"let pairs = data.windows(2).count();\n")
