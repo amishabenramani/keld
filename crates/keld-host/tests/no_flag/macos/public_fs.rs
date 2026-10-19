@@ -33,6 +33,8 @@ mod outcomes;
 mod policy_startup;
 #[path = "public_fs/preclick.rs"]
 mod preclick;
+#[path = "public_fs/private_diagnostics.rs"]
+mod private_diagnostics;
 #[path = "public_fs/process_image.rs"]
 mod process_image;
 #[path = "public_fs/project.rs"]
@@ -45,6 +47,7 @@ use outcomes::{
     assert_component_outcomes, assert_component_trace, assert_handler_attribution,
     assert_natural_outcomes, assert_page_outcomes,
 };
+use private_diagnostics::{Phase as PrivatePhase, host_exit_summary, observed_marker};
 use process_image::process_image_path;
 use project::{
     CONTENT, Exercise, Policy, PreparedLaunch, PublicFsProject, RECOVERY_AFTER_CONTENT, SENTINEL,
@@ -237,15 +240,7 @@ fn run_launch_with_descendant_quit(
                     .expect("independently attributed product family"),
             );
         }
-        eprintln!(
-            "KELD_KEL140_PUBLIC_WITNESS policy={:?} launch={launch} host={host_pid} window={:?} identities={:?} policy_sha256={} host_sha256={} reports={:?} exercise={exercise:?}",
-            fixture.policy,
-            evidence.window,
-            evidence.family,
-            prepared.digest,
-            prepared.host_digest,
-            evidence.reports,
-        );
+        eprintln!("{}", PrivatePhase::PublicWitness.marker());
     }));
     if observation_result.is_err() {
         // Capture pipes even if the host exited first. Fallback is never success.
@@ -270,10 +265,7 @@ fn run_launch_with_descendant_quit(
         &observer,
         observation_result.is_ok(),
     );
-    eprintln!(
-        "KELD_KEL140_PUBLIC_DIAGNOSTICS policy={:?} launch={launch} click={:?} reports={:?} host_output={output:?}",
-        fixture.policy, evidence.click, evidence.reports,
-    );
+    eprintln!("{}", host_exit_summary(&output, evidence.reports.len()));
     if let Err(failure) = observation_result {
         resume_unwind(failure);
     }
@@ -285,10 +277,7 @@ fn run_launch_with_descendant_quit(
         retirement::assert_after_quit(&output, &evidence, &prepared.target);
     }
     cleanup.bun_group = None;
-    eprintln!(
-        "KELD_KEL140_PUBLIC_CLEANUP launch={launch} exact_stage={} family_gone=true window_gone=true fixture_drop_pending=true",
-        stage.root().display(),
-    );
+    eprintln!("{}", PrivatePhase::PublicCleanup.marker());
     evidence
 }
 
@@ -366,8 +355,11 @@ fn record_recovery_boot(mut report: Value, journal: &mut Vec<Value>) -> Recovery
         .expect("boot report object")
         .remove("appLink");
     report["endpoint"] = json!(endpoint);
-    assert_eq!(report["phase"], "recovery-app-boot", "{report:?}");
-    eprintln!("KELD_KEL140_RECOVERY_BOOT {report}");
+    assert_eq!(
+        report["phase"], "recovery-app-boot",
+        "unexpected recovery bootstrap phase"
+    );
+    eprintln!("{}", observed_marker(&report, PrivatePhase::RecoveryBoot));
     journal.push(report);
     boot
 }
@@ -464,7 +456,7 @@ fn await_recovery_after_loss(
                         boot = Some(generation_boot);
                     }
                 }
-                _ => panic!("unexpected pending recovery observation: {report}"),
+                _ => panic!("unexpected pending recovery observation kind"),
             }
         }
         (
@@ -593,10 +585,7 @@ fn observe_recovery_actions(
         "same document; no second initial-page observation"
     );
     observer.send_recovery_command(RecoveryCommand::Quit(successor.bun));
-    eprintln!(
-        "KELD_KEL140_RECOVERY_CONSUMER host={host_pid} window={:?} first_bun={} second_bun={} input_actions=0 completed_witness=[1,2] interrupted_effect_acceptance=false blocked_syscall_acceptance=false full_kel143_acceptance=false",
-        evidence.window, first.bun, successor.bun,
-    );
+    eprintln!("{}", PrivatePhase::RecoveryConsumer.marker());
 }
 
 /// Independent old/new-root effects remain separate from reported G2 success.
@@ -733,9 +722,12 @@ try {
     let output = wait_child_output(probe, EVENT_DEADLINE);
     assert!(
         output.status.success(),
-        "server-side stale-token refusal failed: {output:?}"
+        "server-side stale-token refusal failed"
     );
-    assert_eq!(output.stdout, b"RETIRED_TOKEN_SERVER_EOF_NO_REPLY\n");
+    assert!(
+        output.stdout == b"RETIRED_TOKEN_SERVER_EOF_NO_REPLY\n",
+        "unexpected stale-token refusal protocol record"
+    );
 }
 
 fn await_recovery_page(
@@ -750,9 +742,9 @@ fn await_recovery_page(
     assert_eq!(
         report["phase"],
         format!("recovery-{}", phase.as_str()),
-        "{report}"
+        "unexpected recovery renderer phase"
     );
-    eprintln!("KELD_KEL140_RECOVERY_PAGE {report}");
+    eprintln!("{}", observed_marker(&report, PrivatePhase::RecoveryPage));
     evidence.reports.push(report.clone());
     report
 }
@@ -919,7 +911,7 @@ fn observe_component_actions(
             .reports
             .recv_timeout(EVENT_DEADLINE)
             .expect("actual public-main FS result");
-        eprintln!("KELD_KEL140_OBSERVATION {result}");
+        eprintln!("{}", observed_marker(&result, PrivatePhase::Observation));
         evidence.reports.push(result);
     }
     assert!(
@@ -1012,7 +1004,7 @@ fn await_ready(
             .reports
             .recv_timeout(deadline.saturating_duration_since(Instant::now()))
             .expect("app Ready and installed page listener observations");
-        eprintln!("KELD_KEL140_OBSERVATION {report}");
+        eprintln!("{}", observed_marker(&report, PrivatePhase::Observation));
         // Retain the observation before any identity assertion can unwind.
         evidence.reports.push(report.clone());
         if report["phase"] == "app-ready" {
@@ -1034,7 +1026,7 @@ fn await_ready(
             report["phase"] == "app-ready"
                 || report["phase"] == "page-ready"
                 || (exercise != Exercise::RendererPointer && report["phase"] == "app-result"),
-            "{report}"
+            "unexpected public application Ready/Result phase"
         );
     }
 }
@@ -1061,17 +1053,13 @@ fn assert_app_identity(
     assert_eq!(parent_process(descendant), bun);
     assert_eq!(process_group(bun), bun);
     assert_eq!(process_group(descendant), bun);
-    let executable = Command::new("/bin/ps")
+    let _executable = Command::new("/bin/ps")
         .args(["-p", &bun.to_string(), "-o", "comm="])
         .output()
         .expect("process display diagnostic");
-    eprintln!("KELD_KEL140_PROCESS_DISPLAY pid={bun} ps_output={executable:?}");
+    eprintln!("{}", PrivatePhase::ProcessDisplay.marker());
     let image = process_image_path(bun);
-    eprintln!(
-        "KELD_KEL140_PROCESS_IMAGE_MATCH pid={bun} kernel_image={} reported_image={}",
-        image.display(),
-        report["executable"]
-    );
+    eprintln!("{}", PrivatePhase::ProcessImageMatch.marker());
     assert_eq!(
         fs::canonicalize(&image).expect("kernel Bun image"),
         fs::canonicalize(report["executable"].as_str().expect("app executable"))
@@ -1091,7 +1079,10 @@ fn assert_product_quit(
     host_pid: u32,
     exercise: Exercise,
 ) {
-    assert!(output.status.success(), "{output:?}");
+    assert!(
+        output.status.success(),
+        "public application failed its expected orderly exit"
+    );
     let stderr = std::str::from_utf8(&output.stderr).expect("host diagnostic UTF-8");
     let expected_calls = match exercise {
         Exercise::RendererPointer | Exercise::RendererNativeJoint => 3,
@@ -1270,7 +1261,7 @@ impl JointReportJournal {
         } else {
             assert!(
                 JOINT_REPORT_PHASES.contains(&phase),
-                "unexpected joint report: {report}"
+                "unexpected joint report phase"
             );
             assert!(
                 self.phases.insert(phase.to_owned()),
@@ -1529,7 +1520,10 @@ fn kel143_staged_public_fs_fixture_producer() {
         "consumer retained stage before producer fallback"
     );
     while let Ok(report) = observation.reports.try_recv() {
-        eprintln!("KELD_KEL143_STAGED_FIXTURE_OBSERVATION {report}");
+        eprintln!(
+            "{}",
+            observed_marker(&report, PrivatePhase::StagedFixtureObservation)
+        );
     }
     drop(observation);
     println!(
