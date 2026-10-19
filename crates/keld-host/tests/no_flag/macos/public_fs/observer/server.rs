@@ -346,4 +346,23 @@ mod safe_observation_marker_tests {
             );
         }
     }
+
+    // Pure marker tests alone would stay green if the actual stderr callsite
+    // were changed back to printing the untrusted report. This source-binding
+    // guard deliberately covers that one callsite as well, without evaluating
+    // or publishing any private fixture data.
+    #[test]
+    fn observation_report_log_callsite_must_use_fixed_marker() {
+        let (implementation, _) = include_str!("server.rs")
+            .split_once("#[cfg(test)]\nmod safe_observation_marker_tests")
+            .expect("adjacent regression module owns the source boundary");
+        assert!(
+            implementation.contains("eprintln!(\"{}\", safe_observation_marker(&report));"),
+            "actual observation stderr callsite bypassed the fixed marker"
+        );
+        assert!(
+            !implementation.contains("KELD_KEL140_OBSERVATION {report}"),
+            "raw report interpolation must not be restored"
+        );
+    }
 }
