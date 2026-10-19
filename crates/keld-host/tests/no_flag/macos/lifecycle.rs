@@ -166,6 +166,7 @@ fn wait_orderly_host_with_native_guardian_receipt(
 mod guardian_pid_phase_tests {
     use super::{GuardianPidStage, guardian_pid_stage};
     use crate::support::PROCESS_DEADLINE;
+    use crate::support::process::ProcessExitObserver;
     use std::os::unix::process::ExitStatusExt as _;
     use std::process::{Child, Command};
     use std::thread;
@@ -204,5 +205,42 @@ mod guardian_pid_phase_tests {
         assert_eq!(before, GuardianPidStage::Present);
         assert_eq!(guardian_pid_stage(pid), GuardianPidStage::Absent);
         assert_eq!(guardian_pid_stage(0), GuardianPidStage::Unproved);
+    }
+
+    #[test]
+    fn native_kqueue_records_owned_process_exit_without_a_pid_probe() {
+        let mut child = OwnedSleep(
+            Command::new("/bin/sleep")
+                .arg("1")
+                .spawn()
+                .expect("owned native event witness"),
+        );
+        let mut observer = ProcessExitObserver::arm(child.0.id());
+        assert!(
+            observer
+                .try_poll_exit()
+                .expect("initial native event check")
+                .is_none(),
+            "the still-running owned child cannot have exited"
+        );
+        let deadline = Instant::now() + PROCESS_DEADLINE;
+        let observed = loop {
+            if let Some(status) = observer
+                .try_poll_exit()
+                .expect("read native kernel exit event")
+            {
+                break status;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "native kernel exit receipt absent before the original process deadline"
+            );
+            thread::yield_now();
+        };
+        assert!(observed.success(), "native status-zero event");
+        assert!(
+            child.0.wait().expect("reap owned native child").success(),
+            "native child is reaped by its original owner"
+        );
     }
 }
