@@ -336,8 +336,14 @@ mod safe_observation_marker_tests {
             ),
         ] {
             let marker = safe_observation_marker(&report);
-            assert!(marker == expected, "diagnostic stage must use fixed allowlisted words");
-            assert!(!marker.contains(PRIVATE), "private HTTP report escaped into diagnostics");
+            assert!(
+                marker == expected,
+                "diagnostic stage must use fixed allowlisted words"
+            );
+            assert!(
+                !marker.contains(PRIVATE),
+                "private HTTP report escaped into diagnostics"
+            );
         }
     }
 }
