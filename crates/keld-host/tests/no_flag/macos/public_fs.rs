@@ -1,7 +1,7 @@
 //! KEL-140 stock producer/public API proof. Native execution belongs to ROOT.
 //! No authority boundary change; no pending native-effect or cancellation claim.
 use crate::support::EVENT_DEADLINE;
-use crate::support::control::wait_child_output;
+use crate::support::control::{wait_child_output, wait_child_output_observing};
 use crate::support::dev_cycle::ShippingLaunchCleanup;
 use crate::support::native_window::{
     NativeWindowObserver, await_same_native_windows, native_windows,
@@ -235,10 +235,34 @@ fn run_launch_with_descendant_quit(
             descendant.observe_cooperative_exit_and_guardian_reap();
         }
     }));
-    let output = wait_child_output(
-        cleanup.cli.take().expect("capture host before unwind"),
-        EVENT_DEADLINE,
-    );
+    // Distinguish observer-owned /quit progress from Bun receiving its body
+    // or the Host acknowledging Guardian Q. Sample only while the actual
+    // child remains alive, before its existing original 20s exit assertion.
+    let mut last_live_http_quit_stage = 0_u8;
+    let host_exit = catch_unwind(AssertUnwindSafe(|| {
+        wait_child_output_observing(
+            cleanup.cli.take().expect("capture host before unwind"),
+            EVENT_DEADLINE,
+            || {
+                last_live_http_quit_stage =
+                    observer.quit_progress.load(std::sync::atomic::Ordering::Acquire);
+            },
+        )
+    }));
+    let output = host_exit.unwrap_or_else(|failure| {
+        if observation_result.is_ok() {
+            let stage = match last_live_http_quit_stage {
+                0 => "no_http_quit_observed",
+                1 => "http_quit_received",
+                2 => "observer_response_written",
+                _ => "invalid_observer_stage",
+            };
+            // Fixed phase enum only. Never disclose bodies, credentials,
+            // addresses, IDs, process output or private filesystem paths.
+            eprintln!("KELD_KEL140_NATIVE_QUIT_PHASE last_live_http_stage={stage}");
+        }
+        resume_unwind(failure)
+    });
     eprintln!(
         "KELD_KEL140_PUBLIC_DIAGNOSTICS policy={:?} launch={launch} click={:?} reports={:?} host_output={output:?}",
         fixture.policy, evidence.click, evidence.reports,
