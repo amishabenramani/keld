@@ -313,11 +313,11 @@ mod guardian_pid_phase_tests {
 
     #[test]
     fn native_kqueue_retains_nonzero_exit_status_from_owned_process() {
-        // An actual shell waits on a test-owned stdin, then exits 23.
+        // The shell's builtin read waits on test-owned stdin, then exits 23.
         // A status-zero-only or NOTE_EXIT-without-STATUS implementation fails.
         let mut child = OwnedSleep(
             Command::new("/bin/sh")
-                .args(["-c", "cat >/dev/null; exit 23"])
+                .args(["-c", "IFS= read -r line; exit 23"])
                 .stdin(Stdio::piped())
                 .stdout(Stdio::null())
                 .stderr(Stdio::null())
