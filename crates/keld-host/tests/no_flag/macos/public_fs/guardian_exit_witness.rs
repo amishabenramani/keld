@@ -112,7 +112,26 @@ mod tests {
         assert_eq!(
             witness.phase,
             ExitPhase::NoEvent,
-            "a live owned shell cannot report an exit before release"
+            "the native watcher must register without a pre-existing exit"
+        );
+        // A fabricated constant Observed must fail while the exact child is
+        // still alive and its sole stdin writer prevents the shell from
+        // leaving the blocking built-in read. Start the original bounded
+        // native witness clock before this first syscall, never renew it.
+        let deadline = Instant::now() + PROCESS_DEADLINE;
+        assert!(
+            child
+                .0
+                .try_wait()
+                .expect("inspect retained original child")
+                .is_none(),
+            "the original shell exited before the test released stdin"
+        );
+        witness.poll(deadline);
+        assert_eq!(
+            witness.phase,
+            ExitPhase::NoEvent,
+            "a live original child must not produce a native exit event"
         );
         drop(
             child
@@ -121,7 +140,6 @@ mod tests {
                 .take()
                 .expect("release only owned shell stdin"),
         );
-        let deadline = Instant::now() + PROCESS_DEADLINE;
         loop {
             witness.poll(deadline);
             if witness.phase == ExitPhase::Observed {
