@@ -234,12 +234,28 @@ fn nonblocking_native_split_observer_waits_for_actual_accepted_peer() {
         .set_nonblocking(true)
         .expect("native listener must genuinely return WouldBlock");
     let address = listener.local_addr().expect("native listener address");
+    // The real client shares the original two-second accept budget. Both
+    // connect and write must be bounded even if a broken observer never
+    // dequeues the pending native peer (or accepts no bytes).
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
     let (release_tx, release_rx) = mpsc::channel();
     let writer = thread::spawn(move || {
+        let remaining = || {
+            let left = deadline.saturating_duration_since(std::time::Instant::now());
+            assert!(
+                !left.is_zero(),
+                "native TCP writer exceeded original accept budget"
+            );
+            left
+        };
         release_rx
-            .recv_timeout(std::time::Duration::from_secs(2))
+            .recv_timeout(remaining())
             .expect("owned native client waits for first WouldBlock");
-        let mut stream = TcpStream::connect(address).expect("connect actual native TCP peer");
+        let mut stream = TcpStream::connect_timeout(&address, remaining())
+            .expect("connect actual native TCP peer");
+        stream
+            .set_write_timeout(Some(remaining()))
+            .expect("bound native TCP writer to original test budget");
         stream
             .write_all(b"W")
             .expect("send independent kernel byte");
@@ -249,7 +265,7 @@ fn nonblocking_native_split_observer_waits_for_actual_accepted_peer() {
     let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         accept_split_observation_peer_with_hooks(
             &listener,
-            std::time::Instant::now() + std::time::Duration::from_secs(2),
+            deadline,
             || {
                 polls += 1;
                 if let Some(release) = release.take() {
@@ -285,19 +301,40 @@ fn native_accepted_split_peer_cannot_cross_original_accept_deadline() {
     listener
         .set_nonblocking(true)
         .expect("nonblocking accept under test");
-    let mut client = TcpStream::connect(listener.local_addr().expect("native address"))
-        .expect("connect an independent native peer");
+    // Establish the test-owned peer with a bounded native connect/write,
+    // before starting the unchanged 200ms accept/late-ACK phase.
+    let budget = std::time::Duration::from_millis(200);
+    let setup_deadline = std::time::Instant::now() + budget;
+    let setup_remaining = || {
+        let left = setup_deadline.saturating_duration_since(std::time::Instant::now());
+        assert!(!left.is_zero(), "native TCP peer setup exceeded 200ms");
+        left
+    };
+    let mut client = TcpStream::connect_timeout(
+        &listener.local_addr().expect("native address"),
+        setup_remaining(),
+    )
+    .expect("connect an independent native peer");
+    client
+        .set_write_timeout(Some(setup_remaining()))
+        .expect("bound native client write to original setup budget");
     client
         .write_all(b"K")
         .expect("real native byte before accept");
-    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(200);
+    let deadline = std::time::Instant::now() + budget;
     let mut accepted = 0;
+    let mut native_accept_entered_at = None;
+    let mut native_accept_released_at = None;
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         accept_split_observation_peer_with_hooks(
             &listener,
             deadline,
             || {},
             |stream| {
+                // This callback executes ONLY after listener.accept() returned
+                // its actual kernel-owned stream. Capture the instant BEFORE
+                // the independent native-byte witness or delayed release.
+                native_accept_entered_at = Some(std::time::Instant::now());
                 // Native accept() can complete before the peer's first byte
                 // becomes readable on a NONBLOCKING descriptor. Normalize
                 // only this independently owned test stream, with the SAME
@@ -306,8 +343,10 @@ fn native_accepted_split_peer_cannot_cross_original_accept_deadline() {
                     .set_nonblocking(false)
                     .expect("normalize test-owned accepted socket for real byte witness");
                 stream
-                    .set_read_timeout(Some(std::time::Duration::from_millis(200)))
-                    .expect("bound real accepted TCP read by test clock");
+                    .set_read_timeout(Some(
+                        deadline.saturating_duration_since(std::time::Instant::now()),
+                    ))
+                    .expect("bound real accepted TCP read by original test clock");
                 let mut byte = [0_u8; 1];
                 let mut owned_read = stream;
                 owned_read
@@ -318,13 +357,21 @@ fn native_accepted_split_peer_cannot_cross_original_accept_deadline() {
                 while std::time::Instant::now() < deadline {
                     thread::yield_now();
                 }
+                // Separate real release-time receipt: this fixture crosses
+                // the 200ms cutoff AFTER the successful native accept.
+                native_accept_released_at = Some(std::time::Instant::now());
             },
         )
     }));
     drop(client);
-    assert_eq!(
-        accepted, 1,
-        "real native accept must complete before the late cutoff"
+    assert_eq!(accepted, 1, "one real accepted stream and native byte");
+    assert!(
+        native_accept_entered_at.expect("kernel accept callback entry witness") < deadline,
+        "real TCP accept must enter the callback BEFORE the original 200ms deadline"
+    );
+    assert!(
+        native_accept_released_at.expect("post-accept release instant") >= deadline,
+        "accepted native peer must be released AFTER the original 200ms deadline"
     );
     assert!(
         result.is_err(),
