@@ -182,6 +182,156 @@ fn respond(stream: &mut TcpStream, body: &str) {
     write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: {}\r\nAccess-Control-Allow-Origin: *\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n{body}", body.len()).expect("respond to observation");
 }
 
+/// A successful `TcpStream::connect` does not make an immediate `accept` on a
+/// NONBLOCKING listener infallible. The real Darwin listener may report
+/// `WouldBlock` until the completed peer becomes ready to dequeue. Preserve
+/// the existing `EVENT_DEADLINE`, not a larger retry budget or a sleep.
+fn accept_split_observation_peer_before(
+    listener: &TcpListener,
+    deadline: std::time::Instant,
+) -> TcpStream {
+    accept_split_observation_peer_with_hooks(listener, deadline, || {}, |_| {})
+}
+
+// The callbacks are native regression witnesses, not test-mode substitutes
+// for the kernel's actual listener.accept() result or deadline.
+fn accept_split_observation_peer_with_hooks(
+    listener: &TcpListener,
+    deadline: std::time::Instant,
+    mut on_empty: impl FnMut(),
+    mut on_accepted: impl FnMut(&TcpStream),
+) -> TcpStream {
+    loop {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "real split HTTP observation peer exceeded original accept deadline"
+        );
+        match listener.accept() {
+            Ok((stream, _)) => {
+                on_accepted(&stream);
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "late native TCP accept cannot count as timely split peer"
+                );
+                return stream;
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                on_empty();
+                thread::yield_now();
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {
+                thread::yield_now();
+            }
+            Err(error) => panic!("accept native split HTTP peer: {error}"),
+        }
+    }
+}
+
+#[test]
+fn nonblocking_native_split_observer_waits_for_actual_accepted_peer() {
+    let listener = TcpListener::bind(("127.0.0.1", 0)).expect("own native listener");
+    listener
+        .set_nonblocking(true)
+        .expect("native listener must genuinely return WouldBlock");
+    let address = listener.local_addr().expect("native listener address");
+    let (release_tx, release_rx) = mpsc::channel();
+    let writer = thread::spawn(move || {
+        release_rx
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .expect("owned native client waits for first WouldBlock");
+        let mut stream = TcpStream::connect(address).expect("connect actual native TCP peer");
+        stream
+            .write_all(b"W")
+            .expect("send independent kernel byte");
+    });
+    let mut polls = 0_u32;
+    let mut release = Some(release_tx);
+    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        accept_split_observation_peer_with_hooks(
+            &listener,
+            std::time::Instant::now() + std::time::Duration::from_secs(2),
+            || {
+                polls += 1;
+                if let Some(release) = release.take() {
+                    let _ = release.send(());
+                }
+            },
+            |_| {},
+        )
+    }));
+    // On any mutation/panic, unblock and join the sole native client owner
+    // before checking the fatal product/test outcome.
+    if let Some(release) = release.take() {
+        let _ = release.send(());
+    }
+    let client_outcome = writer.join();
+    let mut accepted = outcome.expect("real native accept must retry WouldBlock");
+    client_outcome.expect("join actual controlled TCP client");
+    prepare_stream(&accepted);
+    let mut native_byte = [0_u8; 1];
+    accepted
+        .read_exact(&mut native_byte)
+        .expect("dequeued native peer supplies real accepted bytes");
+    assert_eq!(native_byte, *b"W");
+    assert!(
+        polls >= 1,
+        "test must pass through a real WouldBlock before peer arrives"
+    );
+}
+
+#[test]
+fn native_accepted_split_peer_cannot_cross_original_accept_deadline() {
+    let listener = TcpListener::bind(("127.0.0.1", 0)).expect("own real native listener");
+    listener
+        .set_nonblocking(true)
+        .expect("nonblocking accept under test");
+    let mut client = TcpStream::connect(listener.local_addr().expect("native address"))
+        .expect("connect an independent native peer");
+    client
+        .write_all(b"K")
+        .expect("real native byte before accept");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(200);
+    let mut accepted = 0;
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        accept_split_observation_peer_with_hooks(
+            &listener,
+            deadline,
+            || {},
+            |stream| {
+                // Native accept() can complete before the peer's first byte
+                // becomes readable on a NONBLOCKING descriptor. Normalize
+                // only this independently owned test stream, with the SAME
+                // 200ms private phase limit, before proving its actual byte.
+                stream
+                    .set_nonblocking(false)
+                    .expect("normalize test-owned accepted socket for real byte witness");
+                stream
+                    .set_read_timeout(Some(std::time::Duration::from_millis(200)))
+                    .expect("bound real accepted TCP read by test clock");
+                let mut byte = [0_u8; 1];
+                let mut owned_read = stream;
+                owned_read
+                    .read_exact(&mut byte)
+                    .expect("actual accepted TCP socket reads real client byte");
+                assert_eq!(byte, *b"K");
+                accepted += 1;
+                while std::time::Instant::now() < deadline {
+                    thread::yield_now();
+                }
+            },
+        )
+    }));
+    drop(client);
+    assert_eq!(
+        accepted, 1,
+        "real native accept must complete before the late cutoff"
+    );
+    assert!(
+        result.is_err(),
+        "an accepted-but-late TCP peer may not be promoted after the original deadline"
+    );
+}
+
 #[test]
 fn accepted_observation_stream_preserves_split_header_and_body() {
     const O_NONBLOCK: std::ffi::c_int = 4; // Darwin SDK 26.5 sys/fcntl.h.
@@ -189,14 +339,13 @@ fn accepted_observation_stream_preserves_split_header_and_body() {
     listener
         .set_nonblocking(true)
         .expect("same observer accept mode");
+    let deadline = std::time::Instant::now() + EVENT_DEADLINE;
     let mut client = TcpStream::connect_timeout(
         &listener.local_addr().expect("listener address"),
         EVENT_DEADLINE,
     )
     .expect("real TCP client");
-    let (mut accepted, _) = listener
-        .accept()
-        .expect("completed TCP connection is queued");
+    let mut accepted = accept_split_observation_peer_before(&listener, deadline);
     // Force the failing starting state even on platforms that reset flags at accept.
     accepted
         .set_nonblocking(true)
