@@ -9,6 +9,16 @@ use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::{Arc, mpsc};
 use std::thread::{self, JoinHandle};
 
+// A page POST is untrusted data: its token, payload and private paths must
+// remain available to test assertions, never to diagnostic stderr.
+fn safe_observation_marker(report: &Value) -> &'static str {
+    match report["phase"].as_str() {
+        Some("page-click-start") => "KELD_KEL140_OBSERVATION phase=page_click_start",
+        Some("page-result") => "KELD_KEL140_OBSERVATION phase=page_result",
+        _ => "KELD_KEL140_OBSERVATION phase=unrecognized",
+    }
+}
+
 /// HTTP observes ordinary app/page data; the retained Quit stream owns no authority.
 pub(in crate::public_fs) struct Observation {
     pub(in crate::public_fs) port: u16,
@@ -31,7 +41,7 @@ impl Observation {
                 .reports
                 .recv_timeout(deadline.saturating_duration_since(std::time::Instant::now()))
                 .expect("actual page FS outcomes");
-            eprintln!("KELD_KEL140_OBSERVATION {report}");
+            eprintln!("{}", safe_observation_marker(&report));
             let click_start = report["phase"] == "page-click-start";
             journal.push(report);
             if click_start && !started {
@@ -300,6 +310,34 @@ impl ObserverServer {
                 thread::yield_now();
             }
             Err(error) => panic!("public FS observer accept: {error}"),
+        }
+    }
+}
+
+#[cfg(test)]
+mod safe_observation_marker_tests {
+    use super::*;
+
+    #[test]
+    fn untrusted_report_values_cannot_reach_observer_diagnostics() {
+        const PRIVATE: &str = "KELD_TEST_PRIVATE_HTTP_TOKEN_PATH_BODY_SENTINEL";
+        for (report, expected) in [
+            (
+                serde_json::json!({"phase": "page-click-start", "token": PRIVATE}),
+                "KELD_KEL140_OBSERVATION phase=page_click_start",
+            ),
+            (
+                serde_json::json!({"phase": "page-result", "body": PRIVATE}),
+                "KELD_KEL140_OBSERVATION phase=page_result",
+            ),
+            (
+                serde_json::json!({"phase": PRIVATE, "path": PRIVATE}),
+                "KELD_KEL140_OBSERVATION phase=unrecognized",
+            ),
+        ] {
+            let marker = safe_observation_marker(&report);
+            assert!(marker == expected, "diagnostic stage must use fixed allowlisted words");
+            assert!(!marker.contains(PRIVATE), "private HTTP report escaped into diagnostics");
         }
     }
 }
