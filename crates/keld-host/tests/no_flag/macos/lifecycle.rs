@@ -168,7 +168,7 @@ mod guardian_pid_phase_tests {
     use crate::support::PROCESS_DEADLINE;
     use crate::support::process::ProcessExitObserver;
     use std::os::unix::process::ExitStatusExt as _;
-    use std::process::{Child, Command};
+    use std::process::{Child, Command, Stdio};
     use std::thread;
     use std::time::Instant;
 
@@ -209,9 +209,13 @@ mod guardian_pid_phase_tests {
 
     #[test]
     fn native_kqueue_records_owned_process_exit_without_a_pid_probe() {
+        // Native cat stays alive on a test-owned stdin. This is a real
+        // OS process, and the observer is armed before its EOF release.
         let mut child = OwnedSleep(
-            Command::new("/bin/sleep")
-                .arg("1")
+            Command::new("/bin/cat")
+                .stdin(Stdio::piped())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
                 .spawn()
                 .expect("owned native event witness"),
         );
@@ -223,6 +227,7 @@ mod guardian_pid_phase_tests {
                 .is_none(),
             "the still-running owned child cannot have exited"
         );
+        drop(child.0.stdin.take().expect("release exact owned native reader"));
         let deadline = Instant::now() + PROCESS_DEADLINE;
         let observed = loop {
             if let Some(status) = observer
