@@ -3,6 +3,7 @@
 //! the worker must not observe denial without the corresponding S queued.
 use std::io::Write as _;
 use std::os::unix::net::UnixListener;
+use std::panic::{AssertUnwindSafe, catch_unwind, resume_unwind};
 use std::process::{Command, Stdio};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -17,14 +18,11 @@ use super::{
     VERIFIED_BUN_ENV, receive_held_milestone, verified_real_bun,
 };
 
-#[test]
-fn native_host_denial_is_not_visible_before_real_s_is_queued() {
-    let temp = tempfile::tempdir().expect("native host denial witness");
-    let socket = temp.path().join("post-probe.sock");
-    let bun_marker = temp.path().join("forbidden-bun-image");
-    let listener = UnixListener::bind(&socket).expect("own post-probe gate");
-    listener.set_nonblocking(true).expect("bounded accept");
-    let bun = verified_real_bun();
+fn spawn_held_native_guardian(
+    socket: &std::path::Path,
+    bun_marker: &std::path::Path,
+    bun: &std::path::Path,
+) -> GuardianBootstrap {
     let mut command = Command::new("/bin/sh");
     command
         .args([
@@ -34,13 +32,24 @@ fn native_host_denial_is_not_visible_before_real_s_is_queued() {
         ])
         .arg(std::env::current_exe().expect("native test process"))
         .args(["--exact", ROLE_TEST, "--nocapture"])
-        .env(ROLE_ENV, &bun_marker)
-        .env(VERIFIED_BUN_ENV, &bun)
-        .env(POST_PROBE_GATE_ENV, &socket)
+        .env(ROLE_ENV, bun_marker)
+        .env(VERIFIED_BUN_ENV, bun)
+        .env(POST_PROBE_GATE_ENV, socket)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::inherit());
-    let pending = GuardianBootstrap::spawn_supervised(command).expect("real KGC1 Guardian");
+    GuardianBootstrap::spawn_supervised(command).expect("real KGC1 Guardian")
+}
+
+#[test]
+fn native_host_denial_is_not_visible_before_real_s_is_queued() {
+    let temp = tempfile::tempdir().expect("native host denial witness");
+    let socket = temp.path().join("post-probe.sock");
+    let bun_marker = temp.path().join("forbidden-bun-image");
+    let listener = UnixListener::bind(&socket).expect("own post-probe gate");
+    listener.set_nonblocking(true).expect("bounded accept");
+    let bun = verified_real_bun();
+    let pending = spawn_held_native_guardian(&socket, &bun_marker, &bun);
     let (prepare_tx, prepare_rx) = mpsc::sync_channel(1);
     let (idle_tx, idle_rx) = mpsc::sync_channel(1);
     let arm_idle = Arc::new(AtomicBool::new(false));
@@ -71,33 +80,57 @@ fn native_host_denial_is_not_visible_before_real_s_is_queued() {
         let result = primary.shutdown();
         (result, primary)
     });
-    denied_rx
-        .recv_timeout(GUARDIAN_SHUTDOWN_DEADLINE)
-        .expect("real host denied initial recovery before writing S");
-    // Force one actual KGC1 idle read while the shutdown thread holds the
-    // recovery mutex. An idle cancellation check that takes that mutex
-    // blocks here, so subsequent native PREPARE can never reach its receipt.
-    arm_idle.store(true, Ordering::Release);
-    idle_rx
-        .recv_timeout(GUARDIAN_SHUTDOWN_DEADLINE)
-        .expect("actual KGC1 idle poll while recovery mutex is held");
-    // This is the deterministically falsifiable, actual shipping owner lock.
-    // Before the fix the worker could acquire it, observe deny and close KGC1
-    // before the sole Guardian liveness owner had sent S.
-    let denial_visible_before_s = recovery.try_lock().is_ok();
-    assert!(!bun_marker.exists());
-    held.write_all(b"R")
-        .expect("permit Guardian to attempt PREPARE");
-    prepare_rx
-        .recv_timeout(GUARDIAN_SHUTDOWN_DEADLINE)
-        .expect("actual host decoded a full first KGC1 PREPARE before S");
-    allow_s_tx
-        .send(())
-        .expect("release real host S while lock held");
-    sent_rx
-        .recv_timeout(GUARDIAN_SHUTDOWN_DEADLINE)
-        .expect("native host S must be flushed");
-    let (result, mut primary) = shutdown.join().expect("host shutdown task");
+    let mut gate_released = false;
+    let mut s_released = false;
+    let observation = catch_unwind(AssertUnwindSafe(|| {
+        denied_rx
+            .recv_timeout(GUARDIAN_SHUTDOWN_DEADLINE)
+            .expect("real host denied initial recovery before writing S");
+        // Force an actual idle read while shutdown owns the recovery mutex.
+        arm_idle.store(true, Ordering::Release);
+        idle_rx
+            .recv_timeout(GUARDIAN_SHUTDOWN_DEADLINE)
+            .expect("actual KGC1 idle poll while recovery mutex is held");
+        let denial_visible_before_s = recovery.try_lock().is_ok();
+        assert!(!bun_marker.exists());
+        held.write_all(b"R")
+            .expect("permit Guardian to attempt PREPARE");
+        gate_released = true;
+        prepare_rx
+            .recv_timeout(GUARDIAN_SHUTDOWN_DEADLINE)
+            .expect("actual host decoded a full first KGC1 PREPARE before S");
+        allow_s_tx
+            .send(())
+            .expect("release real host S while lock held");
+        s_released = true;
+        sent_rx
+            .recv_timeout(GUARDIAN_SHUTDOWN_DEADLINE)
+            .expect("native host S must be flushed");
+        denial_visible_before_s
+    }));
+    if observation.is_err() {
+        // An intentional RED must still release both native gates and join
+        // the sole retained Child/worker owner before replaying the ORIGINAL
+        // assertion failure. Never leave an orphan on failure-first tests.
+        if !gate_released {
+            let _ = held.write_all(b"R");
+        }
+        if !s_released {
+            let _ = allow_s_tx.try_send(());
+        }
+    }
+    let joined = shutdown.join();
+    let denial_visible_before_s = match observation {
+        Ok(value) => value,
+        Err(original) => {
+            if let Ok((_, mut primary)) = joined {
+                let reaped = primary.child.try_wait().ok().flatten().is_some();
+                eprintln!("KELD_TEST_DENIAL_PANIC_CHILD_REAPED {reaped}");
+            }
+            resume_unwind(original);
+        }
+    };
+    let (result, mut primary) = joined.expect("host shutdown task");
     assert!(
         !denial_visible_before_s,
         "initial recovery denial became visible before the host queued S"
