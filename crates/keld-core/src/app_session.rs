@@ -13849,6 +13849,109 @@ mod tests {
         guardian_thread.join().expect("guardian thread joins");
     }
 
+    /// A correlated real app-link Quit removes the primary before Guardian's
+    /// terminal result. If the Guardian then reports a shutdown failure,
+    /// the retiring reader cannot rely on its current-generation Fatal path.
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn accepted_quit_guardian_shutdown_error_wakes_ui_after_link_close() {
+        use keld_ipc::link::{AppLinkDeadlines as _, read_frame, write_frame};
+        use std::io::Read as _;
+        use std::net::Shutdown;
+        use std::os::unix::net::UnixStream;
+
+        let (server, mut client) = UnixStream::pair().expect("real primary Quit socket");
+        client
+            .set_app_link_deadlines(Some(APP_LINK_IO_DEADLINE))
+            .expect("original app-link IO bound");
+        let (window_tx, window_rx) = mpsc::channel();
+        let (guardian_tx, guardian_rx) = mpsc::channel();
+        let (entered_tx, entered_rx) = mpsc::sync_channel(1);
+        let (release_tx, release_rx) = mpsc::sync_channel(1);
+        let guardian = thread::spawn(move || {
+            match guardian_rx
+                .recv_timeout(Duration::from_secs(5))
+                .expect("Guardian accepted-Quit attribution")
+            {
+                GuardianOwnerCommand::PrepareAcceptedShutdown(reply) => {
+                    reply.send(Ok(())).expect("acknowledge accepted Quit");
+                }
+                _ => panic!("Guardian shutdown cannot precede accepted Quit"),
+            }
+            match guardian_rx
+                .recv_timeout(Duration::from_secs(5))
+                .expect("Guardian terminal shutdown")
+            {
+                GuardianOwnerCommand::Shutdown(reply) => {
+                    entered_tx.send(()).expect("retired-generation boundary reached");
+                    release_rx
+                        .recv_timeout(Duration::from_secs(5))
+                        .expect("release independent Guardian failure");
+                    reply
+                        .send(Err(String::from("owned Guardian shutdown denied")))
+                        .expect("report exact Guardian failure");
+                }
+                _ => panic!("expected original Guardian terminal shutdown"),
+            }
+        });
+        let router = PrimaryRouter::start(
+            server,
+            window_tx,
+            GuardianOwnerHandle {
+                command_tx: guardian_tx,
+            },
+            SessionShutdownState::new(),
+        )
+        .expect("real native primary router");
+        write_frame(
+            &mut client,
+            FrameKind::Call,
+            0,
+            LIFECYCLE_CHANNEL,
+            CorrelationId(1871),
+            &encode(&LifecycleRequest::Quit).expect("encode real Quit"),
+        )
+        .expect("send real correlated Quit");
+        let (header, payload) = read_frame(&mut client).expect("correlated native Quit reply");
+        assert_eq!(
+            (header.kind, header.channel, header.corr),
+            (FrameKind::Reply, LIFECYCLE_CHANNEL, CorrelationId(1871))
+        );
+        assert!(matches!(
+            decode::<LifecycleResponse>(&payload).expect("decode Quit reply"),
+            LifecycleResponse::Quit
+        ));
+        client.shutdown(Shutdown::Write).expect("Bun half-close after Quit");
+        let mut byte = [0_u8; 1];
+        assert_eq!(client.read(&mut byte).expect("real link EOF"), 0);
+        entered_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("Guardian shutdown starts only after link retirement");
+        assert_eq!(router.handle().shutdown.cause(), SESSION_LIFECYCLE_QUIT);
+        assert!(
+            !router.handle().is_current(1),
+            "the retired reader cannot publish an earlier current-generation Fatal"
+        );
+        assert!(
+            window_rx.try_recv().is_err(),
+            "no UI terminal event precedes the actual Guardian failure"
+        );
+        release_tx.send(()).expect("inject failed Guardian shutdown");
+        assert_eq!(
+            window_rx
+                .recv_timeout(Duration::from_secs(2))
+                .expect("failed Guardian shutdown must wake the live UI"),
+            AppWindowCommand::Fatal
+        );
+        assert!(window_rx.try_recv().is_err(), "exactly one terminal UI wake");
+        let error = router.shutdown().expect_err("the original failure is preserved");
+        assert!(
+            error.to_string().contains("owned Guardian shutdown denied"),
+            "{error}"
+        );
+        guardian.join().expect("test Guardian owner joins");
+    }
+
     #[test]
     #[cfg(any(target_os = "macos", target_os = "linux", windows))]
     fn generation_reader_stop_preserves_successor_and_terminal_scope() {
