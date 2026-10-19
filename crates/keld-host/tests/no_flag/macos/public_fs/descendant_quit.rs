@@ -29,20 +29,38 @@ pub(super) struct DescendantQuit {
     require_post_parent_ack: bool,
 }
 
+// Native records can contain a private token, executable path, PID or nonce.
+// A diagnostic is only a fixed phase receipt, never the record or authority.
+#[derive(Clone, Copy)]
+enum DiagnosticPhase {
+    ChildReady,
+    ChildAliveAfterBunExit,
+}
+
+fn safe_control_marker(_record: &Value, phase: DiagnosticPhase) -> String {
+    match phase {
+        DiagnosticPhase::ChildReady => "KEL118_PRODUCT_ARM child_ready",
+        DiagnosticPhase::ChildAliveAfterBunExit => "KEL118_PRODUCT_AFTER_EXIT0 alive=true",
+    }
+    .to_owned()
+}
+
 impl DescendantQuit {
     pub(super) fn bind() -> Self {
         // This changes only the harness oracle for the production-removal run.
         // The product receives the same public Quit and descendant fixture.
         let require_post_parent_ack = match std::env::var("KEL118_REQUIRE_POST_PARENT_ACK") {
             Ok(value) => {
-                assert_eq!(
-                    value, "1",
+                assert!(
+                    value == "1",
                     "negative-control oracle accepts only 1 or unset"
                 );
                 true
             }
             Err(std::env::VarError::NotPresent) => false,
-            Err(error) => panic!("negative-control oracle configuration: {error}"),
+            Err(std::env::VarError::NotUnicode(_)) => {
+                panic!("negative-control oracle configuration was not valid Unicode")
+            }
         };
         let owned = tempfile::Builder::new()
             .prefix("keld-118-")
@@ -66,7 +84,7 @@ impl DescendantQuit {
             ])
             .output()
             .expect("select existing installed Python fixture interpreter");
-        assert!(output.status.success(), "{output:?}");
+        assert!(output.status.success(), "Python interpreter probe failed");
         let python = PathBuf::from(
             std::str::from_utf8(&output.stdout)
                 .expect("Python path UTF-8")
@@ -74,8 +92,7 @@ impl DescendantQuit {
         );
         assert!(
             python.is_absolute() && python.is_file(),
-            "{}",
-            python.display()
+            "Python fixture interpreter must be an existing absolute file"
         );
         let token = fresh_nonce();
         Self {
@@ -110,22 +127,29 @@ impl DescendantQuit {
         self.writer = Some(stream.try_clone().expect("fixture control writer"));
         let mut reader = BufReader::new(stream);
         let ready = read_record(&mut reader).expect("actual descendant ready record");
-        assert_eq!(ready["phase"], "child-ready");
-        assert_eq!(ready["token"], self.token);
-        assert_eq!(ready["pid"], family.descendant);
-        assert_eq!(ready["ppid"], family.bun);
-        assert_eq!(ready["pgid"], family.bun);
-        assert_eq!(parent_process(family.descendant), family.bun);
-        assert_eq!(process_group(family.descendant), family.bun);
-        assert_eq!(
+        assert!(ready["phase"] == "child-ready", "child-ready phase missing");
+        assert!(ready["token"] == self.token, "private child token mismatch");
+        assert!(ready["pid"] == family.descendant, "child identity mismatch");
+        assert!(ready["ppid"] == family.bun, "child parent mismatch");
+        assert!(ready["pgid"] == family.bun, "child group mismatch");
+        assert!(
+            parent_process(family.descendant) == family.bun,
+            "child's kernel parent does not match Bun"
+        );
+        assert!(
+            process_group(family.descendant) == family.bun,
+            "child's kernel process group does not match Bun"
+        );
+        assert!(
             fs::canonicalize(ready["python"].as_str().expect("actual Python image"))
-                .expect("canonical Python peer image"),
-            self.python,
+                .expect("canonical Python peer image")
+                == self.python,
+            "child interpreter identity mismatch"
         );
         let bun_pipe = pipe_identity(family.bun, "1");
         let child_pipe = pipe_identity(family.descendant, "1");
-        assert_eq!(
-            bun_pipe, child_pipe,
+        assert!(
+            bun_pipe == child_pipe,
             "descendant must inherit exact Bun stdout endpoint"
         );
         self.bun_exit = Some(ProcessExitObserver::arm(family.bun));
@@ -133,10 +157,8 @@ impl DescendantQuit {
         self.child_pid = Some(family.descendant);
         self.peer = Some(reader);
         eprintln!(
-            "KEL118_PRODUCT_ARM bun={} descendant={} stdout={bun_pipe:?} python={} ready={ready}",
-            family.bun,
-            family.descendant,
-            self.python.display()
+            "{}",
+            safe_control_marker(&ready, DiagnosticPhase::ChildReady)
         );
     }
 
@@ -178,11 +200,17 @@ impl DescendantQuit {
         let observed = writer.write_all(&encoded).and_then(|()| read_record(peer));
         let alive_after_parent = match observed {
             Ok(reply) => {
-                assert_eq!(reply["phase"], "child-alive");
-                assert_eq!(reply["pid"], self.child_pid.expect("exact descendant"));
-                assert_eq!(reply["nonce"], nonce);
+                assert!(reply["phase"] == "child-alive", "child-alive phase missing");
+                assert!(
+                    reply["pid"] == self.child_pid.expect("exact descendant"),
+                    "child identity changed after Bun exit"
+                );
+                assert!(reply["nonce"] == nonce, "post-Bun child nonce mismatch");
                 assert!(reply["stdout"] == "written" || reply["stdout"] == "broken-pipe");
-                eprintln!("KEL118_PRODUCT_AFTER_EXIT0 alive=true fresh_ack={reply}");
+                eprintln!(
+                    "{}",
+                    safe_control_marker(&reply, DiagnosticPhase::ChildAliveAfterBunExit)
+                );
                 true
             }
             Err(error)
@@ -258,4 +286,53 @@ fn read_record(reader: &mut BufReader<UnixStream>) -> std::io::Result<Value> {
     }
     serde_json::from_slice(&bytes)
         .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn private_descendant_control_values_never_reach_phase_diagnostics() {
+        const PRIVATE: &str = "KELD_TEST_PRIVATE_SENTINEL_TOKEN_NONCE_ROOT_PATH";
+        let record = json!({
+            "phase": "child-alive", "token": PRIVATE, "nonce": PRIVATE,
+            "python": PRIVATE, "pid": PRIVATE, "stdout": PRIVATE
+        });
+        for (phase, expected) in [
+            (
+                DiagnosticPhase::ChildReady,
+                "KEL118_PRODUCT_ARM child_ready",
+            ),
+            (
+                DiagnosticPhase::ChildAliveAfterBunExit,
+                "KEL118_PRODUCT_AFTER_EXIT0 alive=true",
+            ),
+        ] {
+            let diagnostic = safe_control_marker(&record, phase);
+            assert!(!diagnostic.contains(PRIVATE));
+            assert!(!diagnostic.contains("nonce"));
+            assert!(!diagnostic.contains("token"));
+            assert_eq!(diagnostic, expected);
+        }
+    }
+
+    #[test]
+    fn descendant_oracle_diagnostics_do_not_interpolate_raw_control_records() {
+        let source = include_str!("descendant_quit.rs");
+        for name in ["ready", "reply"] {
+            for interpolation in [
+                format!("{{{name}}}"),
+                format!("{{{name}:?}}"),
+                format!("eprintln!(\"{{:?}}\", {name})"),
+                format!("eprintln!(\"{{}}\", {name})"),
+                format!("assert_eq!({name}["),
+            ] {
+                assert!(
+                    !source.contains(&interpolation),
+                    "raw private descendant record formatting was reintroduced"
+                );
+            }
+        }
+    }
 }
