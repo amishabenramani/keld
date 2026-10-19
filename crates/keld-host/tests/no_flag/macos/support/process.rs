@@ -381,12 +381,6 @@ impl ProcessExitObserver {
         Self { pid, queue }
     }
 
-    /// Nonblocking read of an already armed native exit event. An absent
-    /// event is not proof that the original process remains alive.
-    pub(crate) fn try_poll_exit(&mut self) -> std::io::Result<Option<std::process::ExitStatus>> {
-        Ok(None)
-    }
-
     pub(crate) fn wait(self) -> std::process::ExitStatus {
         use std::os::fd::AsRawFd as _;
         let deadline = Instant::now() + PROCESS_DEADLINE;
