@@ -90,11 +90,16 @@ fn premature_guardian_prepared_failure_reaps_owned_child_and_joins_control_worke
         let _ = worker_done_tx.send(());
         outcome
     }));
+    let cleanup_started = Instant::now();
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let _pending = pending;
         panic!("injected failure before first KGC1 PREPARED");
     }));
     assert!(result.is_err(), "negative panic cut did not execute");
+    assert!(
+        cleanup_started.elapsed() < GUARDIAN_SHUTDOWN_DEADLINE,
+        "panic cleanup kept the original KGC1 reader waiting through its five-second deadline"
+    );
     worker_done_rx
         .try_recv()
         .expect("the owned control worker finished before the panic was caught");
@@ -372,8 +377,7 @@ fn poll_fatal_inspection_error_reaps_registered_group() {
 // The control worker remains alive while a native KGC1 peer keeps its
 // descriptor open after PREPARE. The real shutdown transaction must not wait
 // without limit for that worker once the owned Guardian has been killed.
-#[test]
-fn guarded_primary_shutdown_bounds_worker_join_after_guardian_kill() {
+fn prepared_guardian_worker_fixture() -> (GuardedPrimary, UnixStream) {
     // Independently self-retire if a future regression prevents the fallback
     // from recovering the owning thread and its retained Child.
     let guardian = NativeChildOwner::new(
@@ -449,7 +453,7 @@ fn guarded_primary_shutdown_bounds_worker_join_after_guardian_kill() {
         .as_mut()
         .expect("transfer Child owner")
         .take();
-    let mut primary = GuardedPrimary {
+    let primary = GuardedPrimary {
         child: guardian,
         liveness_writer: Some(writer),
         quit_ack_reader: ack,
@@ -462,6 +466,12 @@ fn guarded_primary_shutdown_bounds_worker_join_after_guardian_kill() {
         shutdown_sent: None,
         shutdown_denial_fence: None,
     };
+    (primary, peer)
+}
+
+#[test]
+fn guarded_primary_shutdown_bounds_worker_join_after_guardian_kill() {
+    let (mut primary, peer) = prepared_guardian_worker_fixture();
     let (result_tx, result_rx) = mpsc::sync_channel(1);
     let shutdown_owner = thread::spawn(move || {
         let result = primary.shutdown();
