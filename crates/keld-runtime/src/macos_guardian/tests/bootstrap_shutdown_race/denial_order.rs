@@ -5,6 +5,7 @@ use std::io::Write as _;
 use std::os::unix::net::UnixListener;
 use std::process::{Command, Stdio};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::thread;
 use std::time::Instant;
@@ -41,6 +42,8 @@ fn native_host_denial_is_not_visible_before_real_s_is_queued() {
         .stderr(Stdio::inherit());
     let pending = GuardianBootstrap::spawn_supervised(command).expect("real KGC1 Guardian");
     let (prepare_tx, prepare_rx) = mpsc::sync_channel(1);
+    let (idle_tx, idle_rx) = mpsc::sync_channel(1);
+    let arm_idle = Arc::new(AtomicBool::new(false));
     let (never_registered_tx, _never_registered_rx) = mpsc::sync_channel(1);
     let (_never_release_tx, never_release_rx) = mpsc::channel();
     let mut primary = pending
@@ -51,6 +54,7 @@ fn native_host_denial_is_not_visible_before_real_s_is_queued() {
                 entered: never_registered_tx,
                 release: never_release_rx,
                 received_prepare: Some(prepare_tx),
+                received_idle: Some((Arc::clone(&arm_idle), idle_tx)),
                 received_spawned: None,
             },
         )
@@ -70,6 +74,13 @@ fn native_host_denial_is_not_visible_before_real_s_is_queued() {
     denied_rx
         .recv_timeout(GUARDIAN_SHUTDOWN_DEADLINE)
         .expect("real host denied initial recovery before writing S");
+    // Force one actual KGC1 idle read while the shutdown thread holds the
+    // recovery mutex. An idle cancellation check that takes that mutex
+    // blocks here, so subsequent native PREPARE can never reach its receipt.
+    arm_idle.store(true, Ordering::Release);
+    idle_rx
+        .recv_timeout(GUARDIAN_SHUTDOWN_DEADLINE)
+        .expect("actual KGC1 idle poll while recovery mutex is held");
     // This is the deterministically falsifiable, actual shipping owner lock.
     // Before the fix the worker could acquire it, observe deny and close KGC1
     // before the sole Guardian liveness owner had sent S.
