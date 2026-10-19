@@ -119,6 +119,31 @@ pub(super) fn run_generation_host(
             }
             Err(error) => return Err(error),
         };
+        // After the retained OS Child has a terminal status, a peer that
+        // keeps KGC1 open without supplying another native record must not
+        // prevent the host from joining this worker. Drain any already-ready
+        // full control record first so queued CLEAR still gets validated.
+        if record.is_none()
+            && lock_recovery(recovery_decision)
+                .guardian_reaped_shutdown_at
+                .is_some()
+        {
+            let interrupted = lifecycle_error(
+                "macOS guardian generation worker after Guardian exit",
+                io::Error::new(
+                    io::ErrorKind::Interrupted,
+                    "original Guardian was reaped before native control peer closed",
+                ),
+            );
+            // A PREPARED but not REGISTERED lease can still own a native
+            // admission listener. Revoke it rather than detaching its worker.
+            if let Some(lease) = state.lease.take()
+                && let Err(cleanup) = lease.revoke(RevocationCause::Shutdown)
+            {
+                return Err(collapse_failures(vec![interrupted, cleanup]));
+            }
+            return Err(interrupted);
+        }
         if first_record_pending {
             if Instant::now() >= admission.first_record_deadline {
                 // A fully buffered late frame is not accepted after the

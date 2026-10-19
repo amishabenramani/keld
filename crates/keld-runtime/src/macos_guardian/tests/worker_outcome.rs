@@ -1,16 +1,18 @@
 // Unexpected generation-worker completion is not an attributed shutdown.
 // The host must fail closed and retire its still-registered native process group.
+use std::os::unix::net::UnixStream;
 use std::os::unix::process::CommandExt as _;
 use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use nix::unistd::Pid;
 
 use super::super::{
-    GUARDIAN_SHUTDOWN_DEADLINE, GuardedPrimary, JoinHandle, RecoveryState,
-    RegisteredPrimaryGeneration, lock_generation, lock_recovery,
+    CONTROL_PREPARE, CONTROL_PREPARED, GUARDIAN_SHUTDOWN_DEADLINE, GenerationControlRecord,
+    GuardedPrimary, JoinHandle, RecoveryState, RegisteredPrimaryGeneration, lock_generation,
+    lock_recovery, read_generation_control, run_generation_host, write_generation_control,
 };
 use super::test_support::NativeChildOwner;
 
@@ -272,5 +274,114 @@ fn poll_fatal_inspection_error_reaps_registered_group() {
     assert!(
         lock_generation(&current_generation).is_none(),
         "failed guardian inspection retained stale group authority"
+    );
+}
+
+// The control worker remains alive while a native KGC1 peer keeps its
+// descriptor open after PREPARE. The real shutdown transaction must not wait
+// without limit for that worker once the owned Guardian has been killed.
+#[test]
+fn guarded_primary_shutdown_bounds_worker_join_after_guardian_kill() {
+    let mut guardian = Command::new("/bin/sleep")
+        // Independently self-retire even if the test fallback cannot
+        // recover the Guardian owner after a future regression.
+        .arg("8")
+        .process_group(0)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("owned long-lived guardian stand-in");
+    let writer = guardian.stdin.take().expect("owned guardian liveness pipe");
+    let ack = guardian.stdout.take().expect("owned guardian ACK pipe");
+    let native_guardian = i32::try_from(guardian.id()).expect("native Guardian PID fits");
+    assert_eq!(
+        nix::unistd::getpgid(Some(Pid::from_raw(native_guardian)))
+            .expect("exact native Guardian group leader")
+            .as_raw(),
+        native_guardian,
+        "never target the test harness's process group"
+    );
+    let (control, mut peer) = UnixStream::pair().expect("real KGC1 socket pair");
+    peer.set_read_timeout(Some(GUARDIAN_SHUTDOWN_DEADLINE))
+        .expect("bounded witness receipt");
+    let current_generation = Arc::new(Mutex::new(None));
+    let recovery = Arc::new(Mutex::new(RecoveryState::new()));
+    lock_recovery(&recovery).arm();
+    let (updates_tx, updates_rx) = mpsc::channel();
+    let worker_current = Arc::clone(&current_generation);
+    let worker_recovery = Arc::clone(&recovery);
+    let guardian_pid = guardian.id();
+    let worker = thread::spawn(move || {
+        run_generation_host(
+            super::super::generation_host::GenerationHostAdmission::new(
+                guardian_pid,
+                Instant::now() + GUARDIAN_SHUTDOWN_DEADLINE,
+            ),
+            control,
+            &updates_tx,
+            &worker_current,
+            &worker_recovery,
+            None,
+            None,
+        )
+    });
+    write_generation_control(&mut peer, &GenerationControlRecord::new(CONTROL_PREPARE, 1))
+        .expect("send first complete KGC1 control frame");
+    let prepared = read_generation_control(&mut peer).expect("real generation host PREPARED");
+    assert_eq!(prepared.kind, CONTROL_PREPARED);
+    assert_eq!(prepared.attempt, 1);
+    lock_recovery(&recovery).shutdown_acknowledged = true;
+    let mut primary = GuardedPrimary {
+        child: guardian,
+        liveness_writer: Some(writer),
+        quit_ack_reader: ack,
+        current_generation,
+        recovery_decision: recovery,
+        updates_rx,
+        worker: Some(worker),
+        shutdown_attributed: true, // Synthetic Guardian cannot emit S/KSA.
+        shutdown_failed: false,
+        shutdown_sent: None,
+        shutdown_denial_fence: None,
+    };
+    let (result_tx, result_rx) = mpsc::sync_channel(1);
+    let shutdown_owner = thread::spawn(move || {
+        let result = primary.shutdown();
+        result_tx
+            .send((result, primary))
+            .expect("return original Guardian owner to test parent");
+    });
+
+    // An independent retained native socket peer deliberately stays open
+    // past the original five-second shutdown budget. Only then release it,
+    // so a failed regression still joins and reaps every owned resource.
+    let bounded = result_rx
+        .recv_timeout(GUARDIAN_SHUTDOWN_DEADLINE + Duration::from_millis(200))
+        .ok();
+    let met_deadline = bounded.is_some();
+    drop(peer);
+    let (result, mut primary) = match bounded {
+        Some(value) => value,
+        None => result_rx
+            .recv_timeout(GUARDIAN_SHUTDOWN_DEADLINE)
+            .expect("socket release unblocks original owned worker"),
+    };
+    shutdown_owner
+        .join()
+        .expect("owned shutdown caller returns");
+    let guardian_status = primary
+        .child
+        .try_wait()
+        .expect("observe exact owned Guardian child after teardown");
+    assert!(guardian_status.is_some(), "native child was not reaped");
+    assert!(primary.worker.is_none(), "generation worker still unjoined");
+    assert!(
+        result.is_err(),
+        "forced Guardian kill cannot be a clean exit"
+    );
+    assert!(
+        met_deadline,
+        "Guardian shutdown exceeded its original five-second budget while the real KGC1 control worker was held by a live native socket"
     );
 }
