@@ -100,7 +100,7 @@ impl RecoveryObserver {
             assert!(self.quits.insert(pid, stream).is_none());
             assert!(self.quits.len() <= 2);
         } else {
-            panic!("unexpected recovery fixture route {path}");
+            panic!("unexpected recovery fixture route");
         }
         self.respond_ready();
         None
@@ -125,3 +125,7 @@ impl RecoveryObserver {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "recovery/route_privacy_tests.rs"]
+mod route_privacy_tests;

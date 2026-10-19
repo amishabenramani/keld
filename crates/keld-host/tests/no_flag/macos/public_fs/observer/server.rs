@@ -287,7 +287,7 @@ impl ObserverServer {
                         self.send.send(report).expect("pending handler observation");
                     }
                 }
-                None => panic!("unexpected public FS observation route {path}"),
+                None => panic!("unexpected public FS observation route"),
             },
         }
     }
