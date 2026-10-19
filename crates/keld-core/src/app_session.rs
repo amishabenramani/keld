@@ -7063,6 +7063,14 @@ impl PrimaryRouterHandle {
     }
 
     fn finish_tail(&self, phase: &'static str) -> Result<(), HostAppError> {
+        #[cfg(target_os = "macos")]
+        self.guardian.shutdown_and_wait().inspect_err(|_| {
+            // The accepted Quit already removed the primary generation.
+            // Its reader cannot send current-generation Fatal on this error.
+            // Preserve the typed Guardian failure while waking the native UI.
+            let _ = self.window_commands.send(AppWindowCommand::Fatal);
+        })?;
+        #[cfg(not(target_os = "macos"))]
         self.guardian.shutdown_and_wait()?;
         #[cfg(target_os = "macos")]
         if let Some(auth) = &self.auth {
@@ -13883,7 +13891,9 @@ mod tests {
                 .expect("Guardian terminal shutdown")
             {
                 GuardianOwnerCommand::Shutdown(reply) => {
-                    entered_tx.send(()).expect("retired-generation boundary reached");
+                    entered_tx
+                        .send(())
+                        .expect("retired-generation boundary reached");
                     release_rx
                         .recv_timeout(Duration::from_secs(5))
                         .expect("release independent Guardian failure");
@@ -13921,7 +13931,9 @@ mod tests {
             decode::<LifecycleResponse>(&payload).expect("decode Quit reply"),
             LifecycleResponse::Quit
         ));
-        client.shutdown(Shutdown::Write).expect("Bun half-close after Quit");
+        client
+            .shutdown(Shutdown::Write)
+            .expect("Bun half-close after Quit");
         let mut byte = [0_u8; 1];
         assert_eq!(client.read(&mut byte).expect("real link EOF"), 0);
         entered_rx
@@ -13936,15 +13948,22 @@ mod tests {
             window_rx.try_recv().is_err(),
             "no UI terminal event precedes the actual Guardian failure"
         );
-        release_tx.send(()).expect("inject failed Guardian shutdown");
+        release_tx
+            .send(())
+            .expect("inject failed Guardian shutdown");
         assert_eq!(
             window_rx
                 .recv_timeout(Duration::from_secs(2))
                 .expect("failed Guardian shutdown must wake the live UI"),
             AppWindowCommand::Fatal
         );
-        assert!(window_rx.try_recv().is_err(), "exactly one terminal UI wake");
-        let error = router.shutdown().expect_err("the original failure is preserved");
+        assert!(
+            window_rx.try_recv().is_err(),
+            "exactly one terminal UI wake"
+        );
+        let error = router
+            .shutdown()
+            .expect_err("the original failure is preserved");
         assert!(
             error.to_string().contains("owned Guardian shutdown denied"),
             "{error}"
