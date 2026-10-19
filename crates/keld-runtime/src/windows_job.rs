@@ -1100,7 +1100,8 @@ impl keld_ipc::WindowsLifecyclePeerPin for WindowsProcessPeer {
 /// connect-back", *Acceptance*): only the exact process object that the owner
 /// launched and still retains may claim. A process ID identifies a process only
 /// until that process exits, so the binding compares kernel objects. Dropping
-/// this value drops the child, which terminates a process it has not reaped.
+/// this value drops the child, which terminates a process it has neither reaped
+/// nor detached ([`Self::detach`]).
 ///
 /// The record pairs the child with its creation time, so the child is never lent
 /// mutably: [`Self::child`] is a shared borrow of a type without interior
@@ -1195,6 +1196,52 @@ impl WindowsLaunchedProcess {
         self.child.terminate(exit_code)
     }
 
+    /// Keeps the released candidate: step 8 of the `PerUserDirect` accept order
+    /// (KEL-53 §4 "Candidate release after commit", *Order* and *Launch-record
+    /// detach*). Closes the record's process handle without terminating the
+    /// child and returns its identity for the exit log; the record and the
+    /// census are consumed.
+    ///
+    /// `census` is the witness that [`WindowsHostDeathJob::release_for_exit`]
+    /// returned, which is callable only with a [`WindowsReleasedAttempt`]: by
+    /// type the detach follows both clears, and because the census is neither
+    /// `Clone` nor `Copy` nor constructible outside this crate, one census
+    /// admits one detach. The witness is consumed, not read: its proof is the
+    /// two clears that produced it. Only the host's census is accepted; the
+    /// Machine-UAC helper, which releases the attempt Job alone, has no detach
+    /// here.
+    ///
+    /// # Errors
+    ///
+    /// Refuses, at run time, a child that was never resumed: it is not a
+    /// released candidate but a suspended process this record still owns, so
+    /// the record drops with the refusal and terminates it, as it does on every
+    /// other unwind today. That check reads the spent resume, not the type.
+    #[allow(clippy::needless_pass_by_value)] // the witness is spent by the move: through a reference one census would admit any number of detaches
+    pub fn detach(
+        self,
+        census: WindowsExitCensus,
+    ) -> Result<WindowsDetachedLaunch, WindowsHostJobError> {
+        // Spent, not read: the witness proves the two clears that produced it.
+        let WindowsExitCensus { .. } = census;
+        if !self.child.is_resumed() {
+            return Err(WindowsHostJobError::contract(
+                "launch record detach",
+                "the child was never resumed, so it is a suspended process this record owns, not a released candidate; terminated",
+            ));
+        }
+        let Self {
+            child,
+            creation_time,
+        } = self;
+        let process_id = child.id();
+        child.detach();
+        Ok(WindowsDetachedLaunch {
+            process_id,
+            creation_time,
+        })
+    }
+
     /// Binds a connected claimant to this exact launch.
     ///
     /// `claimant` is the process that the connected pipe's client process ID
@@ -1237,6 +1284,95 @@ impl WindowsLaunchedProcess {
                 source,
             }
         })
+    }
+
+    /// Waits on the retained launch handle for at most `timeout` and reports
+    /// whether it signaled, so the launched process has exited (KEL-53 §4
+    /// *Margin and deadlines*: the claim wait is bounded by the deadline and by
+    /// the launch handle). This is the watcher's primitive: a thread that holds
+    /// a shared borrow of the record waits here while the record's owner runs
+    /// the claim wait, and on `true` drives the attempt endpoint's claim
+    /// canceller.
+    ///
+    /// Like [`Self::has_exited`] it consumes nothing: it neither reaps nor
+    /// terminates the child, leaves the retained handle open, and may be asked
+    /// any number of times, from any thread, through the shared borrow; the
+    /// record is `Sync`:
+    ///
+    /// ```
+    /// fn is_sync<T: Sync>() {}
+    /// is_sync::<keld_runtime::windows_job::WindowsLaunchedProcess>();
+    /// ```
+    ///
+    /// It waits on the kernel object the record retains, never on a process
+    /// ID, so a reused ID cannot be observed; and it borrows the record, so a
+    /// watcher cannot outlive the record's detach or drop and holds no handle
+    /// of its own:
+    ///
+    /// ```compile_fail,E0521
+    /// fn watch(launched: &keld_runtime::windows_job::WindowsLaunchedProcess) {
+    ///     std::thread::spawn(move || {
+    ///         launched.wait_until_exited(std::time::Duration::from_millis(50))
+    ///     });
+    /// }
+    /// ```
+    ///
+    /// The wait is bounded and finite, never `INFINITE`, and nothing but the
+    /// handle or the timeout ends it: a watcher that must also end when the
+    /// wait it serves has ended loops on short slices and reads its stop
+    /// condition between them, so it outlives that end by at most one slice.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if `timeout` does not fit the monotonic clock or
+    /// Windows cannot wait on the retained launch handle.
+    pub fn wait_until_exited(&self, timeout: Duration) -> Result<bool, WindowsHostJobError> {
+        let deadline = Instant::now().checked_add(timeout).ok_or_else(|| {
+            WindowsHostJobError::contract(
+                "launch handle wait",
+                "the timeout does not fit the monotonic clock",
+            )
+        })?;
+        wait_handle_bounded(
+            self.child.process_handle().as_raw_handle().cast(),
+            deadline,
+            "launch handle wait",
+        )
+    }
+}
+
+/// The released candidate by identity only, after
+/// [`WindowsLaunchedProcess::detach`] (KEL-53 §4 "Candidate release after
+/// commit", *Launch-record detach*): the process ID and creation time for the
+/// exit log. It holds no handle, so dropping it ends nothing, and nothing can
+/// wait on, bind or terminate the candidate through it:
+///
+/// ```compile_fail,E0599
+/// use std::os::windows::io::AsRawHandle as _;
+/// fn raw(detached: &keld_runtime::windows_job::WindowsDetachedLaunch) {
+///     let _ = detached.as_raw_handle();
+/// }
+/// ```
+#[derive(Debug, PartialEq, Eq)]
+pub struct WindowsDetachedLaunch {
+    process_id: u32,
+    creation_time: u64,
+}
+
+impl WindowsDetachedLaunch {
+    /// The process ID that process creation reported for the candidate. It
+    /// names the candidate only until it exits (see
+    /// [`WindowsSuspendedChild::id`]); the host holds no handle to pin it.
+    #[must_use]
+    pub const fn process_id(&self) -> u32 {
+        self.process_id
+    }
+
+    /// The creation time read from the launch handle when the candidate was
+    /// recorded, which with the process ID identifies the exact process.
+    #[must_use]
+    pub const fn creation_time(&self) -> u64 {
+        self.creation_time
     }
 }
 
@@ -2926,18 +3062,62 @@ const JOB_PROCESS_ID_LIST_GROWTH_SLACK: usize = 16;
 /// it that often is refused rather than queried without end.
 const JOB_PROCESS_ID_LIST_GROWTH_LIMIT: u32 = 8;
 
+/// One snapshot of a Job hierarchy's process-ID list.
+#[derive(Debug)]
+struct WindowsJobProcessIdSnapshot {
+    /// Every ID the kernel listed: the members it considers in the Job at the
+    /// instant of the query. Complete on success; an exited member is omitted
+    /// only after its handle is signaled and every thread of it has stopped.
+    ids: Vec<u32>,
+    /// `NumberOfAssignedProcesses` of the same query. It exceeds `ids.len()` for
+    /// one lock release while a member leaves the Job; it is never a buffer
+    /// size.
+    assigned: u32,
+}
+
+impl WindowsJobProcessIdSnapshot {
+    /// Whether the kernel's assigned count and its list agree.
+    ///
+    /// Every census caller MUST require this before it treats a snapshot as clean,
+    /// the Machine-UAC census of S12 included: a disagreement names a membership
+    /// change in flight (KEL-270 finding F54), so the snapshot is retaken under the
+    /// caller's deadline, never refused and never accepted.
+    fn is_settled(&self) -> bool {
+        usize::try_from(self.assigned).is_ok_and(|assigned| assigned == self.ids.len())
+    }
+}
+
+/// Words of the process-ID list record that precede the ID array. The record is
+/// two u32 counts followed by the `ULONG_PTR` ID array, so a usize buffer holds
+/// it at the alignment it requires and the IDs start at a whole-word offset.
+const JOB_PROCESS_ID_LIST_HEADER_WORDS: usize =
+    std::mem::offset_of!(JOBOBJECT_BASIC_PROCESS_ID_LIST, ProcessIdList)
+        / std::mem::size_of::<usize>();
+const _: () = assert!(
+    std::mem::offset_of!(JOBOBJECT_BASIC_PROCESS_ID_LIST, ProcessIdList)
+        % std::mem::size_of::<usize>()
+        == 0
+);
+
 /// Lists the IDs of the live processes in one Job hierarchy: the process-ID
 /// lister of KEL-53 §5 (slice S6b3), which the host-death census uses and the
 /// Machine-UAC census of S12 reuses.
 ///
 /// The list is a snapshot. A member can exit, and its ID be reused, after the
 /// call returns, so callers bind each ID to a process handle and check that
-/// process's Job membership before acting on it. A list shorter than the
-/// assigned count is retaken with a larger buffer.
+/// process's Job membership before acting on it.
+///
+/// The buffer grows and the query is retaken only on the kernel's own "too
+/// small" signal: a query that fails with `ERROR_MORE_DATA` (the header is
+/// written, so the assigned count sizes the next buffer), or one that succeeds
+/// with a full buffer. A successful list shorter than its buffer is complete.
+/// `assigned > ids.len()` names a member whose exit the kernel has not finished
+/// accounting; it is not a truncated list, and a larger buffer cannot change it
+/// (KEL-270 finding F54).
 fn list_job_process_ids(
     raw_job: HANDLE,
     phase: &'static str,
-) -> Result<Vec<u32>, WindowsHostJobError> {
+) -> Result<WindowsJobProcessIdSnapshot, WindowsHostJobError> {
     list_job_process_ids_from(raw_job, JOB_PROCESS_ID_LIST_INITIAL_IDS, phase)
 }
 
@@ -2947,45 +3127,56 @@ fn list_job_process_ids_from(
     raw_job: HANDLE,
     initial_ids: usize,
     phase: &'static str,
-) -> Result<Vec<u32>, WindowsHostJobError> {
-    // The record is two u32 counts followed by the ULONG_PTR ID array, so a
-    // usize buffer holds it at the alignment it requires and the IDs start at a
-    // whole-word offset.
-    const HEADER_WORDS: usize =
-        std::mem::offset_of!(JOBOBJECT_BASIC_PROCESS_ID_LIST, ProcessIdList)
-            / std::mem::size_of::<usize>();
-    const _: () = assert!(
-        std::mem::offset_of!(JOBOBJECT_BASIC_PROCESS_ID_LIST, ProcessIdList)
-            % std::mem::size_of::<usize>()
-            == 0
-    );
+) -> Result<WindowsJobProcessIdSnapshot, WindowsHostJobError> {
+    list_job_process_ids_with(initial_ids, phase, |buffer| {
+        query_job_process_id_list(raw_job, buffer)
+    })
+}
+
+/// One `QueryInformationJobObject` of the process-ID list into `buffer`, which
+/// holds the record header and the ID array.
+fn query_job_process_id_list(raw_job: HANDLE, buffer: &mut [usize]) -> io::Result<()> {
+    let bytes = u32::try_from(std::mem::size_of_val(&*buffer)).map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "process-ID list buffer exceeds u32",
+        )
+    })?;
+    // SAFETY: the caller retains the live Job handle; `buffer` is writable,
+    // usize-aligned storage of exactly `bytes`, which holds the record header
+    // and the IDs; the API writes within that size and retains no pointer.
+    let queried = unsafe {
+        QueryInformationJobObject(
+            raw_job,
+            JobObjectBasicProcessIdList,
+            buffer.as_mut_ptr().cast(),
+            bytes,
+            std::ptr::null_mut(),
+        )
+    };
+    if queried == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+/// [`list_job_process_ids`] with the query as a parameter. Production passes
+/// [`query_job_process_id_list`]; the tests inject the kernel's outcomes. The
+/// query writes the record into the buffer it is given: `Err(ERROR_MORE_DATA)`
+/// with the header written when the buffer is too small, any other error as the
+/// OS reports it.
+fn list_job_process_ids_with(
+    initial_ids: usize,
+    phase: &'static str,
+    mut query: impl FnMut(&mut [usize]) -> io::Result<()>,
+) -> Result<WindowsJobProcessIdSnapshot, WindowsHostJobError> {
     let mut capacity = initial_ids.max(1);
     for _ in 0..JOB_PROCESS_ID_LIST_GROWTH_LIMIT {
-        let mut buffer = vec![0_usize; HEADER_WORDS + capacity];
-        let bytes = u32::try_from(std::mem::size_of_val(buffer.as_slice())).map_err(|_| {
-            WindowsHostJobError::contract(phase, "process-ID list buffer exceeds u32")
-        })?;
-        // SAFETY: the caller retains the live Job handle; `buffer` is writable,
-        // usize-aligned storage of exactly `bytes`, which holds the record header
-        // and `capacity` IDs; the API writes within that size and retains no
-        // pointer.
-        let queried = unsafe {
-            QueryInformationJobObject(
-                raw_job,
-                JobObjectBasicProcessIdList,
-                buffer.as_mut_ptr().cast(),
-                bytes,
-                std::ptr::null_mut(),
-            )
-        };
-        let short_buffer = if queried == 0 {
-            let source = io::Error::last_os_error();
-            if source.raw_os_error() != Some(ERROR_MORE_DATA.cast_signed()) {
-                return Err(WindowsHostJobError { phase, source });
-            }
-            true
-        } else {
-            false
+        let mut buffer = vec![0_usize; JOB_PROCESS_ID_LIST_HEADER_WORDS + capacity];
+        let short_buffer = match query(&mut buffer) {
+            Ok(()) => false,
+            Err(source) if source.raw_os_error() == Some(ERROR_MORE_DATA.cast_signed()) => true,
+            Err(source) => return Err(WindowsHostJobError { phase, source }),
         };
         // SAFETY: `buffer` starts with at least the record's size in initialized
         // bytes at the alignment the record requires; the read copies the header
@@ -3008,21 +3199,25 @@ fn list_job_process_ids_from(
                 "the Job reported more process IDs than the snapshot buffer holds",
             ));
         }
-        if short_buffer || listed < assigned {
+        if short_buffer || listed == capacity {
             capacity = assigned
                 .max(capacity.saturating_mul(2))
                 .saturating_add(JOB_PROCESS_ID_LIST_GROWTH_SLACK);
             continue;
         }
-        return buffer
+        let ids = buffer
             .iter()
-            .skip(HEADER_WORDS)
+            .skip(JOB_PROCESS_ID_LIST_HEADER_WORDS)
             .take(listed)
             .map(|&id| {
                 u32::try_from(id)
                     .map_err(|_| WindowsHostJobError::contract(phase, "process ID exceeds u32"))
             })
-            .collect();
+            .collect::<Result<Vec<u32>, _>>()?;
+        return Ok(WindowsJobProcessIdSnapshot {
+            ids,
+            assigned: header.NumberOfAssignedProcesses,
+        });
     }
     Err(WindowsHostJobError::contract(
         phase,
@@ -3545,6 +3740,7 @@ impl WindowsHostDeathJob {
             raw_job,
             released.handle.as_raw_handle().cast(),
             deadline,
+            || list_job_process_ids(raw_job, "host-death census snapshot"),
             open_member,
         )?;
         clear_job_kill_on_close(raw_job, "host-death Job release")?;
@@ -3555,18 +3751,88 @@ impl WindowsHostDeathJob {
 /// Witness of one host-death census (KEL-53 §4 "Candidate release after
 /// commit", *Census and policy*): what the final clean snapshot showed and what
 /// the census did on the way there.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+///
+/// It is also the proof that [`WindowsLaunchedProcess::detach`] takes by value
+/// (*Launch-record detach*). Only [`WindowsHostDeathJob::release_for_exit`]
+/// constructs it, after the attempt-Job clear its argument witnesses and the
+/// host-death clear it performs, and it is neither `Clone` nor `Copy`, so one
+/// census admits one detach. Outside this crate it cannot be built:
+///
+/// ```compile_fail,E0451
+/// let forged = keld_runtime::windows_job::WindowsExitCensus {
+///     family: 1,
+///     terminated: 0,
+///     snapshots: 1,
+/// };
+/// ```
+///
+/// nor cloned:
+///
+/// ```compile_fail,E0277
+/// fn twice(census: &keld_runtime::windows_job::WindowsExitCensus) {
+///     let _copy: keld_runtime::windows_job::WindowsExitCensus = Clone::clone(census);
+/// }
+/// ```
+///
+/// nor spent twice. The example that compiles detaches one record with one
+/// census; the one below it differs only in the second `detach` of the same
+/// census, which pins every other part of the snippet, and rustdoc checks the
+/// error code on nightly builds only:
+///
+/// ```no_run
+/// use keld_runtime::windows_job::{WindowsExitCensus, WindowsLaunchedProcess};
+/// fn detach(record: WindowsLaunchedProcess, census: WindowsExitCensus) {
+///     let _ = record.detach(census);
+/// }
+/// ```
+///
+/// ```compile_fail,E0382
+/// use keld_runtime::windows_job::{WindowsExitCensus, WindowsLaunchedProcess};
+/// fn detach(
+///     first: WindowsLaunchedProcess,
+///     second: WindowsLaunchedProcess,
+///     census: WindowsExitCensus,
+/// ) {
+///     let _ = first.detach(census);
+///     let _ = second.detach(census);
+/// }
+/// ```
+#[derive(Debug, PartialEq, Eq)]
 pub struct WindowsExitCensus {
     /// Members of the released family in the final snapshot: processes in both
     /// the host-death Job and the released attempt Job, the host excluded.
-    pub family: u32,
+    family: u32,
     /// Members outside the family that the census terminated through the handles
     /// it opened, over every snapshot. A member found already exited is not
     /// counted; the next snapshot no longer lists it.
-    pub terminated: u32,
+    terminated: u32,
     /// Snapshots of the host-death Job's process-ID list, the final clean one
     /// included.
-    pub snapshots: u32,
+    snapshots: u32,
+}
+
+impl WindowsExitCensus {
+    /// Members of the released family in the final snapshot: processes in both
+    /// the host-death Job and the released attempt Job, the host excluded.
+    #[must_use]
+    pub const fn family(&self) -> u32 {
+        self.family
+    }
+
+    /// Members outside the family that the census terminated through the handles
+    /// it opened, over every snapshot. A member found already exited is not
+    /// counted; the next snapshot no longer lists it.
+    #[must_use]
+    pub const fn terminated(&self) -> u32 {
+        self.terminated
+    }
+
+    /// Snapshots of the host-death Job's process-ID list, the final clean one
+    /// included.
+    #[must_use]
+    pub const fn snapshots(&self) -> u32 {
+        self.snapshots
+    }
 }
 
 /// The rights the census needs on one listed member: classification through
@@ -3605,6 +3871,7 @@ fn exit_census(
     host_death_job: HANDLE,
     attempt_job: HANDLE,
     deadline: Instant,
+    mut snapshot_ids: impl FnMut() -> Result<WindowsJobProcessIdSnapshot, WindowsHostJobError>,
     mut open_member: impl FnMut(u32) -> io::Result<OwnedHandle>,
 ) -> Result<WindowsExitCensus, WindowsHostJobError> {
     let own_process_id = std::process::id();
@@ -3612,12 +3879,15 @@ fn exit_census(
     let mut snapshots = 0_u32;
     loop {
         snapshots = snapshots.saturating_add(1);
-        let listed = list_job_process_ids(host_death_job, "host-death census snapshot")?;
+        let snapshot = snapshot_ids()?;
+        // The kernel's count and list agree except while a membership change is in
+        // flight (KEL-270 F54); such a snapshot is retaken under the deadline, like
+        // one with an exited or reused ID, and is never a refusal.
+        let mut clean = snapshot.is_settled();
         let mut family = 0_u32;
-        let mut clean = true;
         let mut terminating = Vec::new();
         let mut denied = Vec::new();
-        for process_id in listed {
+        for process_id in snapshot.ids {
             if process_id == own_process_id {
                 continue;
             }
@@ -3687,8 +3957,9 @@ fn exit_census(
             return Err(WindowsHostJobError::contract(
                 "host-death census",
                 format!(
-                    "the deadline passed with a member outside the released family still in the \
-                     host-death Job after {snapshots} snapshot(s); not released"
+                    "the deadline passed with a member outside the released family or in \
+                     transition still in the host-death Job after {snapshots} snapshot(s); \
+                     not released"
                 ),
             ));
         }
@@ -4451,7 +4722,9 @@ mod tests {
     use windows_sys::Win32::Foundation::{ERROR_ACCESS_DENIED, ERROR_INVALID_HANDLE};
     use windows_sys::Win32::System::JobObjects::AssignProcessToJobObject;
     use windows_sys::Win32::System::RemoteDesktop::ProcessIdToSessionId;
-    use windows_sys::Win32::System::Threading::{DETACHED_PROCESS, PROCESS_CREATE_PROCESS};
+    use windows_sys::Win32::System::Threading::{
+        DETACHED_PROCESS, GetProcessHandleCount, PROCESS_CREATE_PROCESS,
+    };
 
     const HELPER_ENV: &str = "KELD_WINDOWS_JOB_ASSIGNMENT_HELPER";
     const QF1_HELPER_ENDPOINT_ENV: &str = "KELD_TEST_QF1_ENDPOINT";
@@ -5083,6 +5356,23 @@ mod tests {
         query_job_limit_flags(query.as_raw_handle().cast()).expect("read Job limit flags back")
     }
 
+    /// The number of handles in this process's own table: the handle census of
+    /// §7 d5, taken on each side of the one detach.
+    fn own_handle_count() -> u32 {
+        let mut count = 0_u32;
+        // SAFETY: the pseudo-handle from `GetCurrentProcess` is always valid and
+        // carries full access, which covers the `PROCESS_QUERY_INFORMATION`
+        // right `GetProcessHandleCount` needs; the count is writable storage
+        // for the call.
+        assert_ne!(
+            unsafe { GetProcessHandleCount(GetCurrentProcess(), &raw mut count) },
+            0,
+            "count this process's handles: {}",
+            io::Error::last_os_error()
+        );
+        count
+    }
+
     /// Opens one process as the census does but without `PROCESS_TERMINATE`: the
     /// straggler seam of §7 r5, a member whose termination is denied and whose
     /// handle therefore stays unsignaled.
@@ -5359,7 +5649,9 @@ mod tests {
     /// suspended and assigned before its first instruction, then takes the §4
     /// release path or one of the row's controls, reporting every flag read-back
     /// over the test's listener. It exits through `process::exit`, as no
-    /// destructor may terminate a released candidate.
+    /// destructor may terminate a released candidate, except in the two
+    /// `orderly-exit` modes, which `return` so that every local, the launch
+    /// record included, drops.
     #[test]
     #[ignore = "private subprocess entry point"]
     #[allow(clippy::too_many_lines)] // one host fixture whose modes share launch and reporting
@@ -5540,7 +5832,9 @@ mod tests {
                 writeln!(
                     report,
                     "CENSUS family={} terminated={} snapshots={}",
-                    census.family, census.terminated, census.snapshots
+                    census.family(),
+                    census.terminated(),
+                    census.snapshots()
                 )
                 .expect("report the census");
                 writeln!(report, "{}", flags("FLAGS")).expect("report flags");
@@ -5572,6 +5866,48 @@ mod tests {
                 // holds only while this host is alive: wait for the go-ahead.
                 await_go(&mut report);
             }
+            "orderly-exit" | "orderly-exit-undetached" => {
+                // §7 "8, 9 (launch-record detach)": the §4 order through both
+                // clears, then step 8, the detach, and step 9 as a return, not
+                // `process::exit`: every local of this fixture drops. The
+                // undetached variant is the row's d2 control: it skips step 8,
+                // so the record's drop terminates the released candidate.
+                let released = attempt.release_family().expect("release the attempt Job");
+                let census = host_job
+                    .release_for_exit(&released, Instant::now() + RELEASE_WAIT)
+                    .expect("release the host-death Job after the census");
+                writeln!(
+                    report,
+                    "CENSUS family={} terminated={} snapshots={}",
+                    census.family(),
+                    census.terminated(),
+                    census.snapshots()
+                )
+                .expect("report the census");
+                writeln!(report, "{}", flags("FLAGS")).expect("report flags");
+                if mode == "orderly-exit" {
+                    let creation_time = launched.creation_time;
+                    // §7 d5: the handle census of this host's own table on each
+                    // side of the one detach; nothing else opens or closes a
+                    // handle between the two counts.
+                    let handles_before = own_handle_count();
+                    let detached = launched
+                        .detach(census)
+                        .expect("detach the released candidate");
+                    let handles_after = own_handle_count();
+                    assert_eq!(
+                        detached.creation_time(),
+                        creation_time,
+                        "the detached identity is the launch record's"
+                    );
+                    writeln!(
+                        report,
+                        "DETACHED pid={} handles_before={handles_before} handles_after={handles_after}",
+                        detached.process_id()
+                    )
+                    .expect("report the detach");
+                }
+            }
             _ => {
                 let released = attempt.release_family().expect("release the attempt Job");
                 writeln!(report, "{}", flags("RELEASED_ATTEMPT")).expect("report flags");
@@ -5581,7 +5917,9 @@ mod tests {
                 writeln!(
                     report,
                     "CENSUS family={} terminated={} snapshots={}",
-                    census.family, census.terminated, census.snapshots
+                    census.family(),
+                    census.terminated(),
+                    census.snapshots()
                 )
                 .expect("report the census");
                 writeln!(report, "{}", flags("FLAGS")).expect("report flags");
@@ -5593,6 +5931,11 @@ mod tests {
         let _ = report.shutdown(std::net::Shutdown::Both);
         drop(report);
         drop(reaped_primary);
+        if mode.starts_with("orderly-exit") {
+            // The exit in order: the remaining locals drop here, and the test
+            // harness ends the process as any orderly host would end.
+            return;
+        }
         std::process::exit(0);
     }
 
@@ -6024,6 +6367,107 @@ mod tests {
         drop(candidate);
     }
 
+    // KEL-270 T4d S6b4: the launch-record detach (KEL-53 §4 "Candidate release
+    // after commit", *Launch-record detach*; §7 row "8, 9 (launch-record
+    // detach)"), in the same stand-in processes.
+
+    #[test]
+    fn a_released_candidate_survives_the_launcher_dropping_its_record_in_an_orderly_exit() {
+        // §7 d1: after both clears the host exits in order, every local dropped,
+        // the launch record included, and the released candidate's handle stays
+        // unsignaled. Regression for S6b3 review P2-2 (design item F50): the
+        // record's drop terminated the candidate the two clears had released.
+        let (mut host, candidate, mut candidate_report) = start_release_cell("orderly-exit");
+        let census = host.report.next("CENSUS ");
+        assert!(report_count(&census, "family") >= 1, "{census}");
+        let flags = host.report.next("FLAGS ");
+        assert_eq!(report_flags(&flags, "attempt"), 0, "{flags}");
+        assert_eq!(report_flags(&flags, "host"), 0, "{flags}");
+        let detached = host.report.next("DETACHED ");
+        assert_eq!(report_count(&detached, "pid"), candidate.pid, "{detached}");
+        host.wait();
+        assert!(
+            !candidate.exited_now(),
+            "the released candidate's handle is signaled: the launcher's exit in order ended it"
+        );
+        assert!(
+            candidate_report.ping(),
+            "the released candidate must answer after the launcher's orderly exit"
+        );
+    }
+
+    #[test]
+    fn dropping_an_undetached_record_after_both_clears_still_ends_the_candidate() {
+        // §7 d2, negative control: the same orderly exit without step 8 leaves
+        // the candidate's handle signaled, so the row detects a build that drops
+        // the record without `detach`, and the undetached Drop still terminates.
+        let (mut host, candidate, _report) = start_release_cell("orderly-exit-undetached");
+        let flags = host.report.next("FLAGS ");
+        assert_eq!(report_flags(&flags, "attempt"), 0, "{flags}");
+        assert_eq!(report_flags(&flags, "host"), 0, "{flags}");
+        host.wait();
+        candidate.assert_exited_within(
+            RELEASE_WAIT,
+            "candidate whose record was dropped undetached after both clears",
+        );
+    }
+
+    #[test]
+    fn detach_refuses_a_never_resumed_child_and_terminates_it_as_today() {
+        // §7 d3: the refusal is a run-time check of the spent resume, not of the
+        // witness, which this module can forge and which nothing outside the
+        // crate can (d4). A suspended process ends only by termination, so its
+        // signaled handle is the refusal's termination: the record's drop, as
+        // today.
+        let launched =
+            WindowsLaunchedProcess::record(same_token_exit_command()).expect("record the launch");
+        let child = ObservedProcess::open(launched.child().id());
+        assert!(
+            !child.exited_now(),
+            "the suspended child is alive before the refusal"
+        );
+        let refusal = launched
+            .detach(WindowsExitCensus {
+                family: 1,
+                terminated: 0,
+                snapshots: 1,
+            })
+            .expect_err("a never-resumed child has no detach");
+        let text = refusal.to_string();
+        assert!(
+            text.contains("KELD-RUNTIME-014")
+                && text.contains("launch record detach")
+                && text.contains("never resumed"),
+            "{text}"
+        );
+        child.assert_exited_within(RELEASE_WAIT, "the refused never-resumed child");
+    }
+
+    #[test]
+    fn after_the_detach_the_host_holds_no_handle_to_the_candidate() {
+        // §7 d5: a handle census of the host's own table on each side of the one
+        // detach shows exactly one handle fewer, the record's process handle
+        // (the thread handle closed at the resume), and the detached identity
+        // names the candidate. The type supplies the rest: `WindowsDetachedLaunch`
+        // has no handle to yield (its `compile_fail` doctest), so after this
+        // point nothing in the host can wait on, bind or terminate the candidate.
+        let (mut host, candidate, mut candidate_report) = start_release_cell("orderly-exit");
+        let detached = host.report.next("DETACHED ");
+        assert_eq!(report_count(&detached, "pid"), candidate.pid, "{detached}");
+        let before = report_count(&detached, "handles_before");
+        let after = report_count(&detached, "handles_after");
+        assert_eq!(
+            after + 1,
+            before,
+            "the detach must close exactly the record's process handle: {detached}"
+        );
+        host.wait();
+        assert!(
+            candidate_report.ping(),
+            "the candidate must outlive the host that detached it"
+        );
+    }
+
     #[test]
     fn release_family_refuses_an_attempt_job_without_an_admitted_host() {
         let attempt = WindowsProcessJob::create().expect("create the attempt Job");
@@ -6062,6 +6506,14 @@ mod tests {
         // the deadline as a kill switch. When an exited member leaves the list
         // relative to its handle's signal is the kernel's ordering, not this
         // test's, so a list taken straight after `wait` proves nothing.
+        //
+        // What this cell guards (KEL-270 F54): against the real kernel, the lister
+        // returns exactly the Job's members from three initial capacities. A
+        // success truncated at capacity 1 or 2 is not caught here but by the
+        // lister's full-buffer retake
+        // (`the_process_id_lister_retakes_a_success_that_filled_the_buffer`); only
+        // a truncation below capacity would fail this cell. Capacities 1, 2 and 32
+        // take the ERROR_MORE_DATA path twice and the plain path once.
         let job = WindowsProcessJob::create().expect("create a kill-on-close Job");
         let raw = job.handle.as_raw_handle().cast();
         let completion_port = create_job_completion_port(raw)
@@ -6080,8 +6532,9 @@ mod tests {
         let mut expected: Vec<u32> = occupants.iter().map(Child::id).collect();
         expected.sort_unstable();
         for initial in [1, 2, JOB_PROCESS_ID_LIST_INITIAL_IDS] {
-            let mut listed =
-                list_job_process_ids_from(raw, initial, "test list").expect("list the Job");
+            let mut listed = list_job_process_ids_from(raw, initial, "test list")
+                .expect("list the Job")
+                .ids;
             listed.sort_unstable();
             assert_eq!(listed, expected, "initial capacity {initial}");
         }
@@ -6092,10 +6545,216 @@ mod tests {
         job.wait_for_active_zero(&completion_port, Instant::now() + RELEASE_WAIT)
             .expect("the Job reaches zero active processes once its occupants exited");
         assert_eq!(
-            list_job_process_ids(raw, "test list").expect("list the empty Job"),
+            list_job_process_ids(raw, "test list")
+                .expect("list the empty Job")
+                .ids,
             Vec::<u32>::new(),
             "a Job at zero active processes lists no process"
         );
+    }
+
+    /// Writes one process-ID list record into a lister buffer, as the kernel
+    /// does: the two counts, then `ids` from the first array slot. `listed` is
+    /// `ids.len()`; `assigned` is whatever the case reports.
+    fn write_process_id_record(buffer: &mut [usize], assigned: u32, ids: &[u32]) {
+        assert!(
+            buffer.len() > JOB_PROCESS_ID_LIST_HEADER_WORDS + ids.len().saturating_sub(1),
+            "the lister's buffer must hold the header and the IDs"
+        );
+        let listed = u32::try_from(ids.len()).expect("a small ID count");
+        let record = buffer
+            .as_mut_ptr()
+            .cast::<JOBOBJECT_BASIC_PROCESS_ID_LIST>();
+        // SAFETY: `buffer` is usize-aligned, writable storage holding at least the
+        // record header (asserted above); the two writes stay inside it and keep
+        // no pointer.
+        unsafe {
+            (&raw mut (*record).NumberOfAssignedProcesses).write(assigned);
+            (&raw mut (*record).NumberOfProcessIdsInList).write(listed);
+        }
+        for (slot, id) in buffer
+            .iter_mut()
+            .skip(JOB_PROCESS_ID_LIST_HEADER_WORDS)
+            .zip(ids)
+        {
+            *slot = usize::try_from(*id).expect("a u32 ID fits usize");
+        }
+    }
+
+    #[test]
+    fn a_member_leaving_the_job_does_not_exhaust_the_snapshot_retakes() {
+        // KEL-270 F54: while a member leaves the Job the kernel reports one more
+        // assigned process than it lists, with success and room to spare. That
+        // state is not a short buffer, and no larger buffer changes it, so the
+        // lister returns what it listed at once instead of retaking until its
+        // growth limit refuses a healthy release. The injected query freezes the
+        // window that a descheduled exiting thread holds open on the real kernel.
+        let mut calls = 0_u32;
+        let snapshot = list_job_process_ids_with(32, "test list", |buffer| {
+            calls += 1;
+            write_process_id_record(buffer, 4, &[10, 11, 12]);
+            Ok(())
+        })
+        .expect("a member in transition must not refuse the snapshot");
+        assert_eq!(calls, 1, "a complete list is not retaken");
+        assert_eq!(snapshot.ids, [10, 11, 12]);
+        assert_eq!(snapshot.assigned, 4);
+    }
+
+    #[test]
+    fn the_process_id_lister_grows_on_error_more_data_and_reads_the_full_list() {
+        // Control for the F54 fix: a too-small buffer is the kernel's
+        // ERROR_MORE_DATA with the header written, and `assigned` sizes the retake.
+        let wanted: Vec<u32> = (100..140).collect();
+        let mut capacities = Vec::new();
+        let snapshot = list_job_process_ids_with(4, "test list", |buffer| {
+            let capacity = buffer.len() - JOB_PROCESS_ID_LIST_HEADER_WORDS;
+            capacities.push(capacity);
+            if capacity < wanted.len() {
+                write_process_id_record(buffer, 40, &wanted[..capacity]);
+                return Err(io::Error::from_raw_os_error(ERROR_MORE_DATA.cast_signed()));
+            }
+            write_process_id_record(buffer, 40, &wanted);
+            Ok(())
+        })
+        .expect("the list grows to fit");
+        assert_eq!(capacities.len(), 2, "{capacities:?}");
+        assert_eq!(capacities[0], 4);
+        assert!(capacities[1] >= 40, "{capacities:?}");
+        assert_eq!(snapshot.ids, wanted);
+        assert_eq!(snapshot.assigned, 40);
+    }
+
+    #[test]
+    fn the_process_id_lister_growth_limit_still_bounds_genuine_growth() {
+        // Control for the F54 fix: a Job that outruns every buffer is refused after
+        // the growth limit, not queried without end.
+        let mut calls = 0_u32;
+        let refusal = list_job_process_ids_with(4, "test list", |buffer| {
+            calls += 1;
+            let capacity = buffer.len() - JOB_PROCESS_ID_LIST_HEADER_WORDS;
+            let ids = vec![7_u32; capacity];
+            write_process_id_record(
+                buffer,
+                u32::try_from(capacity + 1).expect("a small count"),
+                &ids,
+            );
+            Err(io::Error::from_raw_os_error(ERROR_MORE_DATA.cast_signed()))
+        })
+        .expect_err("a Job that outgrows every buffer must be refused");
+        assert_eq!(calls, JOB_PROCESS_ID_LIST_GROWTH_LIMIT);
+        assert!(refusal.to_string().contains("outgrew"), "{refusal}");
+    }
+
+    #[test]
+    fn the_process_id_lister_retakes_a_success_that_filled_the_buffer() {
+        // The lister's defensive rule: a success whose list fills the buffer is
+        // retaken with a larger one, because the kernel could not then have shown
+        // whether the list was cut. The second query is the one that settles it.
+        let wanted: Vec<u32> = (200..204).collect();
+        let mut capacities = Vec::new();
+        let snapshot = list_job_process_ids_with(4, "test list", |buffer| {
+            let capacity = buffer.len() - JOB_PROCESS_ID_LIST_HEADER_WORDS;
+            capacities.push(capacity);
+            let listed = capacity.min(wanted.len());
+            write_process_id_record(buffer, 4, &wanted[..listed]);
+            Ok(())
+        })
+        .expect("the retake settles the list");
+        assert_eq!(capacities.len(), 2, "{capacities:?}");
+        assert_eq!(capacities[0], 4);
+        assert!(capacities[1] > 4, "{capacities:?}");
+        assert_eq!(snapshot.ids, wanted);
+        assert_eq!(snapshot.assigned, 4);
+    }
+
+    /// Two plain Jobs, `outer` standing for the host-death Job and `inner` for the
+    /// released attempt Job nested under it, and two occupants assigned to `outer`
+    /// and then to `inner`: a released family of two, with no console host
+    /// behind the test's back.
+    fn nested_family_of_two() -> (WindowsProcessJob, WindowsProcessJob, Vec<Child>) {
+        let outer = WindowsProcessJob::create().expect("create the host-death stand-in Job");
+        let inner = WindowsProcessJob::create().expect("create the attempt stand-in Job");
+        let occupants: Vec<Child> = (0..2).map(|_| spawn_blocking_descendant()).collect();
+        for occupant in &occupants {
+            for job in [&outer, &inner] {
+                // SAFETY: both handles are live; the occupant is a test-owned
+                // fixture assigned to test-owned Jobs for the duration of the test.
+                assert_ne!(
+                    unsafe {
+                        AssignProcessToJobObject(
+                            job.handle.as_raw_handle().cast(),
+                            occupant.as_raw_handle().cast(),
+                        )
+                    },
+                    0,
+                    "assign an occupant: {}",
+                    io::Error::last_os_error()
+                );
+            }
+        }
+        (outer, inner, occupants)
+    }
+
+    #[test]
+    fn a_snapshot_whose_count_and_list_disagree_is_retaken_not_refused() {
+        // KEL-270 F54: a snapshot whose assigned count exceeds its list names a
+        // member still leaving the Job. It is not clean, and the census retakes it
+        // under the deadline; the next snapshot, in which count and list agree, is
+        // the clean one.
+        let (outer, inner, mut occupants) = nested_family_of_two();
+        let mut ids = vec![std::process::id()];
+        ids.extend(occupants.iter().map(Child::id));
+        let mut taken = 0_u32;
+        let census = exit_census(
+            outer.handle.as_raw_handle().cast(),
+            inner.handle.as_raw_handle().cast(),
+            Instant::now() + RELEASE_WAIT,
+            || {
+                taken += 1;
+                Ok(WindowsJobProcessIdSnapshot {
+                    ids: ids.clone(),
+                    assigned: if taken == 1 { 4 } else { 3 },
+                })
+            },
+            open_census_member,
+        )
+        .expect("a member in transition must not refuse the census");
+        assert_eq!(census.snapshots(), 2, "{census:?}");
+        assert_eq!(census.family(), 2, "{census:?}");
+        assert_eq!(census.terminated(), 0, "{census:?}");
+        for occupant in &mut occupants {
+            occupant.kill().expect("end an occupant");
+            occupant.wait().expect("reap an occupant");
+        }
+    }
+
+    #[test]
+    fn a_job_that_never_settles_is_refused_at_the_deadline_naming_the_transition() {
+        // Negative control for the cell above: with every snapshot reporting one
+        // more assigned process than it lists, the cross-check alone keeps the
+        // census from a clean snapshot, and the deadline is the only refusal.
+        let (outer, inner, mut occupants) = nested_family_of_two();
+        let mut ids = vec![std::process::id()];
+        ids.extend(occupants.iter().map(Child::id));
+        let refusal = exit_census(
+            outer.handle.as_raw_handle().cast(),
+            inner.handle.as_raw_handle().cast(),
+            Instant::now() + Duration::from_millis(200),
+            || {
+                Ok(WindowsJobProcessIdSnapshot {
+                    ids: ids.clone(),
+                    assigned: 4,
+                })
+            },
+            open_census_member,
+        )
+        .expect_err("a Job that never settles must be refused at the deadline");
+        assert!(refusal.to_string().contains("in transition"), "{refusal}");
+        for occupant in &mut occupants {
+            occupant.kill().expect("end an occupant");
+            occupant.wait().expect("reap an occupant");
+        }
     }
 
     #[test]

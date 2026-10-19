@@ -26,7 +26,19 @@ Principal identity is authenticated **link metadata**, not a frame payload field
 destination supervisor mints a role principal, creates the listener/token, spawns that
 role and binds the accepted link to the principal before dispatch. A frame cannot select,
 forge or upgrade its role. KEL-70's live generic supervisor does not yet perform this
-binding; v0's token proves possession only.
+binding; the `HELLO` token itself proves possession only.
+
+**Current primary app-link identity (KEL-97):** Runtime's authenticated
+`BoundRoleGeneration` retains its canonical owner and generation; Core keeps
+that principal in the accepted primary row and reader context. Primary admission
+rejects another role owner. Before decoding a Bun-to-Host unprivileged Echo
+request, Core requires the current attempt and principal, the same reader-stop
+instance, and a running session and reader. A retired or mismatched context is
+inert before decoding or replying. macOS qualification exercises actual guardian
+retirement and a G2 public-FS successor result, with exact bytes and a scoped
+Guard denial that leaves the outside file unchanged. That successor proof does
+not claim an outbound app Echo result, renderer continuity, OS containment or
+role grants; the full named-role `RoleRegistry` composition remains Target.
 
 **Destination role-instance contract (KEL-75):** a role instance is the host-owned
 pair `(declared role, fresh generation)`. It is never inferred from a PID, listener
@@ -131,8 +143,21 @@ connection, under the landed per-connection deadline clamped to the claim deadli
 reads the client's process ID and session, `KELD-AH1`, the claim writer's
 identification-level token and the retained process pin that the caller's claimant
 policy returns, disconnects and re-arms on any refusal, and consumes its one-shot
-before `KELD-AR1`. After `KELD-AR1` the owner reads `KELD-AB1` and `KELD-AY1` by
-position, decides the health window (30 seconds plus a margin G, which the caller
+before `KELD-AR1`. The claim wait ends without a claimant at the claim deadline
+(`KELD-IPC-018`) or when the endpoint's claim canceller, a `Send` handle taken before
+the wait that the owner's watcher on its retained launch handle drives, ends it
+(`KELD-IPC-028`); both close the endpoint. The cancel and the one-shot are serialised
+on the instance:
+- A cancel that acts before the one-shot is taken refuses it. This includes a cancel
+  already in flight when the owner reaches the one-shot. No `KELD-AR1` is then sent,
+  and the claimant reads end of file.
+- A cancel after the one-shot is a no-op that aborts none of the accepted channel's
+  I/O.
+- The app-link bootstrap listener follows the same rule. A `shutdown` in flight at
+  admission's one-shot yields `Cancelled`, never an authenticated stream that has been
+  aborted.
+
+After `KELD-AR1` the owner reads `KELD-AB1` and `KELD-AY1` by position, decides the health window (30 seconds plus a margin G, which the caller
 passes until KEL-53 §6 S6c fixes it from its measurement) as a state machine over an
 injected clock, and then either writes `KELD-AK1` accepted and waits for the
 candidate's end of file before it closes, or writes `KELD-AK1` rolled back once without
@@ -360,7 +385,8 @@ schema language, ship `@keld/schema` or live `keld gen`, or replace runtime vali
 static, append-only table owned by `keld-ipc` (name, `u16` id, receive-policy class,
 guard reference); id `0` stays reserved for `HELLO`, and ids are never renumbered or
 reused. TypeScript constants are generated from it by the KEL-98 generator. It is live
-since X05-T4 (#597): `keld_ipc::channel_table` holds echo = 1, fs = 2 and lifecycle = 3,
+since X05-T4 (#597): `keld_ipc::channel_table` holds echo = 1, fs = 2, lifecycle = 3
+and the KEL-89 auth allocation = 4,
 every production id derives from it, the TypeScript ids are a generated, drift-checked
 region of `transport.ts`, and the wire is unchanged. Handshake-time name resolution and
 full `keld gen` emission remain destination work that needs a `HELLO` change, a protocol
