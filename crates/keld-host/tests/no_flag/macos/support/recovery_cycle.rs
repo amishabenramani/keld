@@ -123,7 +123,7 @@ impl RecoveryCycle {
             Ok(successor) => successor,
             Err(error) => {
                 let output = self.wait_host();
-                panic!("{error}; host output: {output:?}");
+                panic!("{}", replacement_control_failure_summary(&error, &output));
             }
         };
         successor.expect_ready_and_echoes();
@@ -257,6 +257,31 @@ impl Drop for RecoveryCycle {
             let _ = signal_process_group("-KILL", *group);
         }
     }
+}
+
+/// Recovery admission is a fixture failure, never permission to dump raw
+/// Host stdout/stderr or private control fields into test diagnostics.
+/// This category is a fixed diagnostic hint, not an IPC or process authority.
+fn replacement_control_failure_summary(error: &str, output: &Output) -> String {
+    let category = if error.contains("HELLO") {
+        "hello"
+    } else if error.contains("DESCENDANT") {
+        "descendant"
+    } else if error.contains("accept") || error.contains("connect") {
+        "accept"
+    } else if error.contains("normaliz") {
+        "normalize"
+    } else if error.contains("deadline") {
+        "deadline"
+    } else {
+        "unclassified"
+    };
+    format!(
+        "recovery replacement unavailable error_category={category} host_success={} stdout_bytes={} stderr_bytes={}",
+        output.status.success(),
+        output.stdout.len(),
+        output.stderr.len()
+    )
 }
 
 pub(crate) struct RecoveryGeneration {
@@ -506,3 +531,7 @@ fn collect_initial_control_until(
 #[cfg(test)]
 #[path = "recovery_cycle/deadline_tests.rs"]
 mod deadline_tests;
+
+#[cfg(test)]
+#[path = "recovery_cycle/private_diagnostics_tests.rs"]
+mod private_diagnostics_tests;
