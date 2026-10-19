@@ -92,7 +92,6 @@ impl Drop for ControlPlane {
     }
 }
 
-
 fn report_rescue_join(result: &thread::Result<Result<(), RuntimeError>>) {
     match result {
         Ok(Ok(())) => {}
@@ -101,10 +100,26 @@ fn report_rescue_join(result: &thread::Result<Result<(), RuntimeError>>) {
     }
 }
 
+pub(super) fn await_initial_registration(
+    supervisor: &Supervisor,
+    current: &Mutex<Option<RegisteredPrimaryGeneration>>,
+) -> u32 {
+    let pid = match supervisor.recv_event(COLLECTION) {
+        Some(crate::SupervisorEvent::Started { pid, attempt: 1 }) => pid,
+        Some(event) => panic!("unexpected initial enrollment event: {event:?}"),
+        None => panic!("actual initial group registration absent"),
+    };
+    assert_eq!(
+        lock_generation(current).map(|generation| generation.group_pid),
+        Some(pid)
+    );
+    pid
+}
+
 #[cfg(test)]
 mod private_diagnostic_tests {
-    use super::report_rescue_join;
     use super::RuntimeError;
+    use super::report_rescue_join;
     use std::io;
     use std::process::Command;
 
@@ -124,7 +139,10 @@ mod private_diagnostic_tests {
             return;
         }
         let output = Command::new(std::env::current_exe().expect("test runner executable"))
-            .args(["rescue_worker_stderr_uses_only_fixed_categories", "--nocapture"])
+            .args([
+                "rescue_worker_stderr_uses_only_fixed_categories",
+                "--nocapture",
+            ])
             .env("KELD_PRIVATE_RESCUE_CHILD", "1")
             .output()
             .expect("run the owned diagnostic child");
@@ -140,20 +158,4 @@ mod private_diagnostic_tests {
             "both terminal results need fixed diagnostic categories"
         );
     }
-}
-
-pub(super) fn await_initial_registration(
-    supervisor: &Supervisor,
-    current: &Mutex<Option<RegisteredPrimaryGeneration>>,
-) -> u32 {
-    let pid = match supervisor.recv_event(COLLECTION) {
-        Some(crate::SupervisorEvent::Started { pid, attempt: 1 }) => pid,
-        Some(event) => panic!("unexpected initial enrollment event: {event:?}"),
-        None => panic!("actual initial group registration absent"),
-    };
-    assert_eq!(
-        lock_generation(current).map(|generation| generation.group_pid),
-        Some(pid)
-    );
-    pid
 }
