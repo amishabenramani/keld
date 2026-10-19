@@ -13863,9 +13863,9 @@ mod tests {
     /// later Guardian shutdown after the test proves primary retirement.
     #[cfg(target_os = "macos")]
     fn fail_guardian_after_real_quit(
-        commands: Receiver<GuardianOwnerCommand>,
-        entered: SyncSender<()>,
-        release: Receiver<()>,
+        commands: &Receiver<GuardianOwnerCommand>,
+        entered: &SyncSender<()>,
+        release: &Receiver<()>,
     ) {
         match commands
             .recv_timeout(Duration::from_secs(5))
@@ -13915,7 +13915,7 @@ mod tests {
         let (entered_tx, entered_rx) = mpsc::sync_channel(1);
         let (release_tx, release_rx) = mpsc::sync_channel(1);
         let guardian = thread::spawn(move || {
-            fail_guardian_after_real_quit(guardian_rx, entered_tx, release_rx);
+            fail_guardian_after_real_quit(&guardian_rx, &entered_tx, &release_rx);
         });
         let router = PrimaryRouter::start(
             server,
