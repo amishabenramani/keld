@@ -1,7 +1,7 @@
 //! Installed-package refusals (KEL-254 A3 AC2/AC11, T3 Part B): signature success alone
 //! never admits installed mode, and an installation never boots a host whose verified
-//! publisher or app id differs from the protected record (`KELD-UPDATE-020`, the
-//! keld-update signer rule since KEL-270 T4d S9a).
+//! publisher or app id differs from the protected record (provenance `KELD-UPDATE-003`
+//! for app-ID mismatch, or signer rule `KELD-UPDATE-020` since KEL-270 T4d S9a).
 //!
 //! Each launch is lease-less, as a user starts the app, from a fresh per-run
 //! installation (`support::installed`). These rows are native controls of the installed
@@ -67,22 +67,31 @@ fn kel254_installed_host_under_another_recorded_publisher_is_refused() {
 }
 
 #[test]
-#[ignore = "requires KELD_KEL254_SIGNED_HOST_FOREIGN_APP (the fixture-app host signed with keld.app-id/v1:dev.keld.other) and KELD_KEL254_INSTALLER_FIXTURE"]
+#[ignore = "requires KELD_KEL254_SIGNED_HOST_A_P1, KELD_KEL254_SIGNED_HOST_FOREIGN_APP (the other-app host signed with keld.app-id/v1:dev.keld.other) and KELD_KEL254_INSTALLER_FIXTURE"]
 fn kel254_installed_host_signed_for_another_app_is_refused() {
     let fixture = ProductFixture::new();
+    // Install app A first. Installing the foreign-signed image directly would
+    // record its own app ID and would not construct an identity mismatch.
     let installed = InstalledApp::install(
         &fixture.project,
-        &fixture_env("KELD_KEL254_SIGNED_HOST_FOREIGN_APP"),
+        &fixture_env(SIGNED_HOST_A_P1),
         &fixture_env(INSTALLER_ENV),
     );
+    // Model a substituted but otherwise valid Authenticode image under the
+    // installed app A record. The real host must reject app B before resources.
+    std::fs::copy(
+        Path::new(&fixture_env("KELD_KEL254_SIGNED_HOST_FOREIGN_APP")),
+        installed.host(),
+    )
+    .expect("substitute another signed app's image into the selected host slot");
     let output = installed
         .command()
         .output()
         .expect("launch the installed host");
     let stderr = refused_before_resources(&output);
-    assert!(stderr.contains("KELD-UPDATE-020"), "{stderr}");
+    assert!(stderr.contains("KELD-UPDATE-003"), "{stderr}");
     let mismatch = format!(
-        "records app id `{}`, not the verified `{FOREIGN_SIGNED_APP_ID}`",
+        "protected provenance `app.id` mismatch: expected `{FOREIGN_SIGNED_APP_ID}`, found `{}`",
         installed.recorded_app_id()
     );
     assert!(stderr.contains(&mismatch), "{stderr}");
