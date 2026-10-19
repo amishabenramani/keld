@@ -32,14 +32,14 @@ REVIEW_FIELDS = (
 # anchors insist that critical native survival/cleanup and own-time cuts are
 # present in citations; they do not claim semantically exhaustive source read.
 REVIEWED = {
-    TEST_ROOT + "retained_ack.rs": (48, 52, 93, 166, 175, 225, 254, 275, 287, 299, 330),
+    TEST_ROOT + "retained_ack.rs": (48, 52, 93, 166, 175, 225, 254, 275, 287, 299, 330, 341, 347, 352),
     TEST_ROOT + "retained_ack/dual_death.rs": (19, 65, 82, 90, 101, 106, 115),
     TEST_ROOT + "retained_ack/escaped_descendant.rs": (23, 71, 125, 128, 133, 157, 162),
-    TEST_ROOT + "retained_ack/escaped_descendant/cleanup_tests.rs": (59, 98, 141, 168, 198, 235, 266, 278, 337, 360),
-    TEST_ROOT + "retained_ack/observers.rs": (17, 35, 46, 53, 68, 77, 80, 95, 102, 106),
-    TEST_ROOT + "guardian_crash_pre_registration/cleanup_authority.rs": (16, 69, 97, 127, 155),
-    TEST_ROOT + "pre_registration_host_death/cleanup_authority.rs": (15, 82, 103, 125),
-    TEST_ROOT + "runtime_race_validation/ownership_races.rs": (43, 116, 146, 208, 231, 234, 238),
+    TEST_ROOT + "retained_ack/escaped_descendant/cleanup_tests.rs": (59, 98, 141, 168, 198, 235, 266, 278, 331, 337, 360),
+    TEST_ROOT + "retained_ack/observers.rs": (17, 35, 46, 53, 68, 77, 80, 88, 95, 102, 106),
+    TEST_ROOT + "guardian_crash_pre_registration/cleanup_authority.rs": (16, 69, 97, 127, 148, 155),
+    TEST_ROOT + "pre_registration_host_death/cleanup_authority.rs": (15, 82, 103, 125, 126),
+    TEST_ROOT + "runtime_race_validation/ownership_races.rs": (43, 116, 146, 156, 183, 195, 198, 203, 208, 231, 234, 238),
 }
 SOURCE_LINES = re.compile(r"([^:]+\.rs):(\d+-\d+(?:,\d+-\d+)*)")
 

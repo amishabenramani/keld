@@ -138,6 +138,48 @@ class EightFileEvidenceTests(unittest.TestCase):
         self.edit_csv("review_append.csv", shrink)
         self.must_fail()
 
+    def test_native_bun_image_and_both_kgr1_selectors_cannot_be_omitted(self) -> None:
+        def shrink(rows):
+            row = next(r for r in rows if r["path"].endswith("/retained_ack.rs"))
+            row["source_lines"] = row["source_lines"].replace("311-354", "311-330")
+        self.edit_csv("review_append.csv", shrink)
+        self.must_fail()
+
+    def test_host_group_second_member_sigkill_evidence_cannot_be_omitted(self) -> None:
+        def shrink(rows):
+            row = next(r for r in rows if r["path"].endswith("/cleanup_tests.rs"))
+            row["source_lines"] = row["source_lines"].replace("277-336", "277-278")
+        self.edit_csv("review_append.csv", shrink)
+        self.must_fail()
+
+    def test_group_gone_deadline_cannot_be_omitted(self) -> None:
+        def shrink(rows):
+            row = next(r for r in rows if r["path"].endswith("/retained_ack/observers.rs"))
+            row["source_lines"] = row["source_lines"].replace("77-94", "77-80")
+        self.edit_csv("review_append.csv", shrink)
+        self.must_fail()
+
+    def test_original_guardian_group_sigkill_native_status_cannot_be_omitted(self) -> None:
+        def shrink(rows):
+            row = next(r for r in rows if r["path"].endswith("/guardian_crash_pre_registration/cleanup_authority.rs"))
+            row["source_lines"] = row["source_lines"].replace("127-153", "127-127")
+        self.edit_csv("review_append.csv", shrink)
+        self.must_fail()
+
+    def test_second_unrelated_native_child_survival_cannot_be_omitted(self) -> None:
+        def shrink(rows):
+            row = next(r for r in rows if r["path"].endswith("/pre_registration_host_death/cleanup_authority.rs"))
+            row["source_lines"] = row["source_lines"].replace("102-127", "102-125")
+        self.edit_csv("review_append.csv", shrink)
+        self.must_fail()
+
+    def test_actual_provisioned_native_listener_and_denial_lock_cannot_be_omitted(self) -> None:
+        def shrink(rows):
+            row = next(r for r in rows if r["path"].endswith("/ownership_races.rs"))
+            row["source_lines"] = row["source_lines"].replace("116-207", "116-146")
+        self.edit_csv("review_append.csv", shrink)
+        self.must_fail()
+
     def test_dual_death_pre_rescue_native_survivor_required(self) -> None:
         def remove_survivor(rows):
             row = next(r for r in rows if r["path"].endswith("/dual_death.rs"))
