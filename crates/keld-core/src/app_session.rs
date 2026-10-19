@@ -13859,6 +13859,42 @@ mod tests {
         guardian_thread.join().expect("guardian thread joins");
     }
 
+    /// Native test controller: acknowledge one real Quit, then fail only the
+    /// later Guardian shutdown after the test proves primary retirement.
+    #[cfg(target_os = "macos")]
+    fn fail_guardian_after_real_quit(
+        commands: Receiver<GuardianOwnerCommand>,
+        entered: SyncSender<()>,
+        release: Receiver<()>,
+    ) {
+        match commands
+            .recv_timeout(Duration::from_secs(5))
+            .expect("Guardian accepted-Quit attribution")
+        {
+            GuardianOwnerCommand::PrepareAcceptedShutdown(reply) => {
+                reply.send(Ok(())).expect("acknowledge accepted Quit");
+            }
+            _ => panic!("Guardian shutdown cannot precede accepted Quit"),
+        }
+        match commands
+            .recv_timeout(Duration::from_secs(5))
+            .expect("Guardian terminal shutdown")
+        {
+            GuardianOwnerCommand::Shutdown(reply) => {
+                entered
+                    .send(())
+                    .expect("retired-generation boundary reached");
+                release
+                    .recv_timeout(Duration::from_secs(5))
+                    .expect("release independent Guardian failure");
+                reply
+                    .send(Err(String::from("owned Guardian shutdown denied")))
+                    .expect("report exact Guardian failure");
+            }
+            _ => panic!("expected original Guardian terminal shutdown"),
+        }
+    }
+
     /// A correlated real app-link Quit removes the primary before Guardian's
     /// terminal result. If the Guardian then reports a shutdown failure,
     /// the retiring reader cannot rely on its current-generation Fatal path.
@@ -13879,32 +13915,7 @@ mod tests {
         let (entered_tx, entered_rx) = mpsc::sync_channel(1);
         let (release_tx, release_rx) = mpsc::sync_channel(1);
         let guardian = thread::spawn(move || {
-            match guardian_rx
-                .recv_timeout(Duration::from_secs(5))
-                .expect("Guardian accepted-Quit attribution")
-            {
-                GuardianOwnerCommand::PrepareAcceptedShutdown(reply) => {
-                    reply.send(Ok(())).expect("acknowledge accepted Quit");
-                }
-                _ => panic!("Guardian shutdown cannot precede accepted Quit"),
-            }
-            match guardian_rx
-                .recv_timeout(Duration::from_secs(5))
-                .expect("Guardian terminal shutdown")
-            {
-                GuardianOwnerCommand::Shutdown(reply) => {
-                    entered_tx
-                        .send(())
-                        .expect("retired-generation boundary reached");
-                    release_rx
-                        .recv_timeout(Duration::from_secs(5))
-                        .expect("release independent Guardian failure");
-                    reply
-                        .send(Err(String::from("owned Guardian shutdown denied")))
-                        .expect("report exact Guardian failure");
-                }
-                _ => panic!("expected original Guardian terminal shutdown"),
-            }
+            fail_guardian_after_real_quit(guardian_rx, entered_tx, release_rx);
         });
         let router = PrimaryRouter::start(
             server,
