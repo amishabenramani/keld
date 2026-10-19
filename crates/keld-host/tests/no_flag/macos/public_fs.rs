@@ -334,11 +334,6 @@ fn run_launch_with_causal_receipt(
         observation_result.is_ok(),
         body_receipt.as_deref_mut(),
     );
-    // Require the independent Bun-authored *native* receipt, not the
-    // observer's response-written phase or an untrusted Host log string.
-    if let Some(receipt) = body_receipt.as_ref() {
-        receipt.assert_verified();
-    }
     eprintln!(
         "KELD_KEL140_PUBLIC_DIAGNOSTICS policy={:?} launch={launch} click={:?} reports={:?} host_output={output:?}",
         fixture.policy, evidence.click, evidence.reports,
@@ -348,6 +343,11 @@ fn run_launch_with_causal_receipt(
     }
     if let Err(failure) = descendant_result {
         resume_unwind(failure);
+    }
+    // Require the independent Bun-authored *native* receipt, not the
+    // observer's response-written phase or an untrusted Host log string.
+    if let Some(receipt) = body_receipt.as_ref() {
+        receipt.assert_verified();
     }
     assert_product_quit(&output, &evidence, stage.root(), host_pid, exercise);
     if exercise == Exercise::PublicAppRetirement {
