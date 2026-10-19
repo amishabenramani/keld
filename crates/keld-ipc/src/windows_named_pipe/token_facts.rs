@@ -337,7 +337,7 @@ pub(super) fn validate_sid_in_token_buffer(
     let declared_size = SID_HEADER_BYTES + count * std::mem::size_of::<u32>();
     if declared_size > available {
         return Err(io::Error::other(
-            "token SID extends beyond the returned buffer",
+            "token SID declared subauthorities exceed returned token bytes",
         ));
     }
     // SAFETY: the complete declared SID is now inside the live returned

@@ -122,6 +122,35 @@ fn sid_header_must_be_bounded_before_win32_sid_validation() {
     }
 }
 
+/// A complete SID header is still invalid for Win32 inspection when its
+/// `SubAuthorityCount` names more DWORDs than the OS returned. The complete
+/// initialized backing array makes the missing precheck independently
+/// falsifiable without any out-of-allocation read in a disposable mutant.
+#[test]
+fn sid_declared_subauthorities_require_the_original_returned_span() {
+    let header_and_two_rids: [u8; 16] = [
+        1, 2, 0, 0, 0, 0, 0, 5, // S-1-5, with two subauthorities
+        21, 0, 0, 0, 22, 0, 0, 0,
+    ];
+    let mut bytes = [0_u8; 4 * std::mem::size_of::<usize>()];
+    bytes[..header_and_two_rids.len()].copy_from_slice(&header_and_two_rids);
+    let words = bytes
+        .chunks_exact(std::mem::size_of::<usize>())
+        .map(|word| usize::from_ne_bytes(word.try_into().expect("native word")))
+        .collect::<Vec<_>>();
+    let sid = words.as_ptr().cast::<u8>().cast_mut().cast();
+    assert_eq!(
+        validate_sid_in_token_buffer(&words, 16, sid).expect("complete valid SID"),
+        16
+    );
+    let error = validate_sid_in_token_buffer(&words, 12, sid)
+        .expect_err("one missing returned RID must refuse before Win32 inspection");
+    assert_eq!(
+        error.to_string(),
+        "token SID declared subauthorities exceed returned token bytes"
+    );
+}
+
 /// The anonymous logon token belongs to the well-known anonymous logon session
 /// (winnt.h `ANONYMOUS_LOGON_LUID` is `{ 0x3e6, 0x0 }`) and its user is
 /// ANONYMOUS LOGON (S-1-5-7), so the reader reports the queried token's own
