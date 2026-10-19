@@ -43,6 +43,29 @@ fn hello_flag_after_unknown_argument_never_selects_hello_window() {
     assert!(!stderr.contains("KELD-WV-008"), "{stderr}");
 }
 
+#[cfg(windows)]
+#[test]
+fn repeated_hello_command_is_refused_before_webview_setup() {
+    // The original parser accepted a second --hello as an ordinary hello
+    // option. The trailing unknown argument makes that buggy path terminate
+    // without opening a GUI, so the failure-first test is bounded.
+    let output = Command::new(env!("CARGO_BIN_EXE_keld-host"))
+        .args(["--hello", "--hello", "--not-a-keld-option"])
+        .output()
+        .expect("run host with repeated diagnostic role command");
+    assert_eq!(output.status.code(), Some(2));
+    let stderr = String::from_utf8(output.stderr).expect("fixed diagnostic refusal is UTF-8");
+    assert!(
+        stderr.contains("KELD-CLI-044: unknown host argument"),
+        "{stderr}"
+    );
+    assert!(!stderr.contains("unknown hello flag"), "{stderr}");
+    assert!(
+        !stderr.contains("--not-a-keld-option"),
+        "the second role command must be refused before reading later options: {stderr}"
+    );
+}
+
 #[test]
 fn unknown_argument_is_cli_044_before_boot_selection() {
     let output = Command::new(env!("CARGO_BIN_EXE_keld-host"))

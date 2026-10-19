@@ -139,12 +139,13 @@ fn main() {
     }
 }
 
-// Windows must not treat --hello in an argument's value position as a
-// command. That would bypass the normal no-argument host boot grammar and
-// could create a GUI from an out-of-position flag.
+// Windows admits exactly one argv1 --hello command. A duplicate --hello
+// after argv1 is not a title option or a second diagnostic command: it
+// falls through to the ordinary fail-closed host argument refusal.
 #[cfg(windows)]
 fn host_hello_requested(args: &[String]) -> bool {
     args.get(1).is_some_and(|arg| arg == "--hello")
+        && !args.iter().skip(2).any(|arg| arg == "--hello")
 }
 
 // Preserve the current Mac/Linux hello handling under their separate owners.
@@ -534,6 +535,33 @@ fn reopen_validated_entry(
         ));
     }
     Ok(reopened)
+}
+
+#[cfg(all(test, windows))]
+mod windows_hello_command_tests {
+    use super::host_hello_requested;
+
+    #[test]
+    fn only_one_argv1_hello_is_a_diagnostic_command() {
+        let command = |suffix: &[&str]| {
+            ["keld-host", "--hello"]
+                .into_iter()
+                .chain(suffix.iter().copied())
+                .map(String::from)
+                .collect::<Vec<_>>()
+        };
+        assert!(host_hello_requested(&command(&[])));
+        assert!(host_hello_requested(&command(&["--title=Acme"])));
+        assert!(!host_hello_requested(&command(&["--hello"])));
+        assert!(!host_hello_requested(&command(&[
+            "--title=Acme",
+            "--hello"
+        ])));
+        assert!(!host_hello_requested(&command(&[
+            "--hello",
+            "--not-a-keld-option"
+        ])));
+    }
 }
 
 #[cfg(all(test, target_os = "macos"))]
