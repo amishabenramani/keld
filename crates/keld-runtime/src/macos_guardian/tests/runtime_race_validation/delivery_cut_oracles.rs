@@ -95,7 +95,6 @@ fn run_delivery_cut(cut: DeliveryCut) {
     assert_observation(cut, &observation, began);
 }
 
-
 #[derive(Clone, Copy)]
 enum NativePrefixProbeStage {
     BeforeNativeProbe,
@@ -258,12 +257,10 @@ fn timely_real_native_prefix_consumption_still_completes() {
             }
         }
         NativePrefixProbeStage::AfterNativeProbe(0) => observed_zero.set(true),
-        NativePrefixProbeStage::BeforeNativeProbe | NativePrefixProbeStage::AfterNativeProbe(_) => {}
+        NativePrefixProbeStage::BeforeNativeProbe | NativePrefixProbeStage::AfterNativeProbe(_) => {
+        }
     });
-    assert_eq!(
-        reader.join().expect("join owned native consumer"),
-        *b"DATA"
-    );
+    assert_eq!(reader.join().expect("join owned native consumer"), *b"DATA");
     assert!(
         observed_positive.get() && observed_zero.get(),
         "actual native FIONREAD must change from positive to zero"
