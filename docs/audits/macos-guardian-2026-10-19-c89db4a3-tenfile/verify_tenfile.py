@@ -59,9 +59,9 @@ COUNTS = {
 SOURCE_ANCHORS = {
     "macos_guardian.rs": (128, 131, 142, 167, 206),
     "authenticated_runner.rs": (13, 109, 132, 139, 209),
-    "process_group.rs": (196, 236, 269, 311, 410, 434, 493, 515, 536),
-    "supervised_ack.rs": (17, 26, 52, 127),
-    "process_group_failsafe.rs": (112, 150, 190, 268, 379, 393, 414, 459, 527),
+    "process_group.rs": (196, 236, 269, 311, 410, 434, 469, 493, 515, 536),
+    "supervised_ack.rs": (17, 26, 52, 127, 155, 185, 205),
+    "process_group_failsafe.rs": (112, 150, 190, 268, 379, 393, 409, 414, 459, 527),
     "rejected_registration_deadline.rs": (61, 113, 173, 272, 288, 302, 328),
     "pre_registration_host_death.rs": (49, 120, 152, 236, 284),
     "guardian_crash_pre_registration.rs": (32, 152, 249, 253),

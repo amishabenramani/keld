@@ -128,6 +128,27 @@ class SourceAuditVerifierTests(unittest.TestCase):
         self.mutate_csv("review_append.csv", remove_critical_slice)
         self.assert_invalid()
 
+    def test_omitted_post_probe_eperm_deadline_guard_citation_rejected(self) -> None:
+        def shrink_cited_body(values):
+            record = next(r for r in values if r["path"].endswith("/process_group.rs"))
+            record["source_lines"] = record["source_lines"].replace(",311-480", ",311-434")
+        self.mutate_csv("review_append.csv", shrink_cited_body)
+        self.assert_invalid()
+
+    def test_omitted_stale_group_outsider_alive_assertion_rejected(self) -> None:
+        def shrink_cited_body(values):
+            record = next(r for r in values if r["path"].endswith("/process_group_failsafe.rs"))
+            record["source_lines"] = record["source_lines"].replace(",380-413", ",380-393")
+        self.mutate_csv("review_append.csv", shrink_cited_body)
+        self.assert_invalid()
+
+    def test_omitted_native_supervised_ack_test_body_rejected(self) -> None:
+        def shrink_cited_body(values):
+            record = next(r for r in values if r["path"].endswith("/supervised_ack.rs"))
+            record["source_lines"] = record["source_lines"].replace(",127-208", ",127-127")
+        self.mutate_csv("review_append.csv", shrink_cited_body)
+        self.assert_invalid()
+
     def test_omitted_authentication_reject_spawn_child_wait_rejected(self) -> None:
         def remove_critical_slice(values):
             record = next(r for r in values if r["path"].endswith("/authenticated_runner.rs"))
