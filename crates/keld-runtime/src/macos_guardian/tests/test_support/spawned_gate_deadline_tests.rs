@@ -12,8 +12,22 @@ use std::time::{Duration, Instant};
 const GATE_CUT: Duration = Duration::from_millis(750);
 const ENTRY_LIMIT: Duration = Duration::from_millis(500);
 const RESCUE_LIMIT: Duration = Duration::from_secs(2);
-const RECORD_PREFIX: &[u8] = b"SPAWNED 54321 65432";
-const RECORD: &[u8] = b"SPAWNED 54321 65432\n";
+const FIXTURE_GROUP: i32 = 54_321;
+const FIXTURE_GUARDIAN: u32 = 65_432;
+
+fn native_record() -> (i32, Vec<u8>, Vec<u8>) {
+    // Keep the synthetic numeric record distinct from the test runner's
+    // actual PGID so the unchanged parser cannot fail on an accidental match.
+    let group = if nix::unistd::getpgrp().as_raw() == FIXTURE_GROUP {
+        FIXTURE_GROUP + 1
+    } else {
+        FIXTURE_GROUP
+    };
+    let prefix = format!("SPAWNED {group} {FIXTURE_GUARDIAN}").into_bytes();
+    let mut complete = prefix.clone();
+    complete.push(b'\n');
+    (group, prefix, complete)
+}
 
 fn native_listener() -> (tempfile::TempDir, UnixListener, PathBuf) {
     // Short owner-private Darwin socket path; never contact a product listener.
@@ -48,6 +62,7 @@ fn assert_expected_panic(result: std::thread::Result<(UnixStream, i32, u32)>, ex
 #[test]
 fn actual_native_accept_after_original_clock_cannot_authorize_gate() {
     let (_directory, listener, address) = native_listener();
+    let (_, _, record) = native_record();
     let deadline = Instant::now() + GATE_CUT;
     let (before_tx, before_rx) = mpsc::sync_channel(1);
     let (release_tx, release_rx) = mpsc::sync_channel(1);
@@ -61,7 +76,7 @@ fn actual_native_accept_after_original_clock_cannot_authorize_gate() {
             thread::yield_now();
         }
         let published_at = Instant::now();
-        let sent = write_native_record(&address, RECORD);
+        let sent = write_native_record(&address, &record);
         let _ = release_tx.send(());
         (entered, published_at, sent)
     });
@@ -104,6 +119,8 @@ fn actual_native_accept_after_original_clock_cannot_authorize_gate() {
 #[test]
 fn actual_native_lf_after_original_clock_cannot_authorize_gate() {
     let (_directory, listener, address) = native_listener();
+    let (_, prefix, _) = native_record();
+    let prefix_len = prefix.len();
     let deadline = Instant::now() + GATE_CUT;
     let (before_lf_tx, before_lf_rx) = mpsc::sync_channel(1);
     let (release_tx, release_rx) = mpsc::sync_channel(1);
@@ -114,8 +131,7 @@ fn actual_native_lf_after_original_clock_cannot_authorize_gate() {
         let mut peer = UnixStream::connect(&address).expect("connect real Unix LF writer");
         peer.set_write_timeout(Some(RESCUE_LIMIT))
             .expect("bounded Unix writer");
-        peer.write_all(RECORD_PREFIX)
-            .expect("send real native prefix");
+        peer.write_all(&prefix).expect("send real native prefix");
         let entered = before_lf_rx.recv_timeout(ENTRY_LIMIT);
         // Return both the receipt and a real postclock native LF write,
         // even if the native observer has already rejected the record.
@@ -135,7 +151,7 @@ fn actual_native_lf_after_original_clock_cannot_authorize_gate() {
                 let _ = accepted_tx.send(Instant::now());
             }
             SpawnedGateStage::BeforeByte { received }
-                if received == RECORD_PREFIX.len() && !paused_before_lf =>
+                if received == prefix_len && !paused_before_lf =>
             {
                 paused_before_lf = true;
                 let _ = before_lf_tx.send(Instant::now());
@@ -174,7 +190,8 @@ fn actual_native_lf_after_original_clock_cannot_authorize_gate() {
 fn timely_native_gate_record_retains_exact_positive_numeric_fields() {
     let (_directory, listener, address) = native_listener();
     // Only a synthetic numeric line; no process is created or signaled.
-    write_native_record(&address, RECORD).expect("timely complete Unix PID record");
+    let (expected_group, _, record) = native_record();
+    write_native_record(&address, &record).expect("timely complete Unix PID record");
     let deadline = Instant::now() + Duration::from_secs(2);
     let (mut accepted_at, mut lf_at) = (None, None);
     let (peer, group, guardian) =
@@ -183,8 +200,8 @@ fn timely_native_gate_record_retains_exact_positive_numeric_fields() {
             SpawnedGateStage::AfterByte { byte: b'\n' } => lf_at = Some(Instant::now()),
             _ => {}
         });
-    assert_eq!(group, 54321);
-    assert_eq!(guardian, 65432);
+    assert_eq!(group, expected_group);
+    assert_eq!(guardian, FIXTURE_GUARDIAN);
     assert!(accepted_at.is_some_and(|time| time < deadline));
     assert!(lf_at.is_some_and(|time| time < deadline));
     drop(peer);
