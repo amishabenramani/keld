@@ -87,16 +87,28 @@ mod tests {
             identity: "->0xHOST".to_owned(),
         }];
         let pairs = application_socket_pairs(&host_rows, &bun_rows, PRIVATE);
-        assert!(pairs.len() == 1, "actual connected peer relation must still match");
+        assert!(
+            pairs.len() == 1,
+            "actual connected peer relation must still match"
+        );
         let diagnostic = safe_socket_census_marker(&host_rows, &bun_rows, &pairs);
         assert!(
             diagnostic
                 == "KELD_KEL140_APPLICATION_SOCKET_CENSUS host_fd_count=1 bun_fd_count=1 connected_pairs=1",
             "diagnostic must contain counts only"
         );
-        assert!(!diagnostic.contains(PRIVATE), "private endpoint leaked into diagnostic");
-        assert!(!diagnostic.contains("0xHOST"), "kernel socket identity leaked");
-        assert!(!diagnostic.contains("0xBUN"), "kernel socket identity leaked");
+        assert!(
+            !diagnostic.contains(PRIVATE),
+            "private endpoint leaked into diagnostic"
+        );
+        assert!(
+            !diagnostic.contains("0xHOST"),
+            "kernel socket identity leaked"
+        );
+        assert!(
+            !diagnostic.contains("0xBUN"),
+            "kernel socket identity leaked"
+        );
     }
 
     #[test]
@@ -104,7 +116,10 @@ mod tests {
         let (implementation, _) = include_str!("application_link.rs")
             .split_once("#[cfg(test)]\nmod tests")
             .expect("source-binding regression owns adjacent test boundary");
-        let compact: String = implementation.chars().filter(|char| !char.is_whitespace()).collect();
+        let compact: String = implementation
+            .chars()
+            .filter(|char| !char.is_whitespace())
+            .collect();
         assert!(
             compact.contains(
                 "eprintln!(\"{}\",safe_socket_census_marker(&host_rows,&bun_rows,&pairs));"
