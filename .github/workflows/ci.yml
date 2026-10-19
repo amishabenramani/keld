@@ -93,6 +93,12 @@ jobs:
           fi
           python3 -B tools/test_import_guard.py --repo . \
             --base "$KELD_IMPORT_BASE_SHA" --head "$KELD_IMPORT_HEAD_SHA"
+      # Unit tests for the report-only source-budget tool. The report stays
+      # advisory, but its classifier must not change silently (#738 review).
+      - name: Source budget tool tests
+        run: |
+          python3 -B tools/test_source_census.py
+          python3 -B tools/test_source_budget_report.py
       # The agent playbook router and unsafe-coverage inventory reads crates/*.rs
       # as well as AGENTS and .agents files, so it runs here, where every diff
       # reaches it (#650; it was local-only before).
