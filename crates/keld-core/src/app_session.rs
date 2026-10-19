@@ -7065,10 +7065,12 @@ impl PrimaryRouterHandle {
     fn finish_tail(&self, phase: &'static str) -> Result<(), HostAppError> {
         #[cfg(target_os = "macos")]
         self.guardian.shutdown_and_wait().inspect_err(|_| {
-            // The accepted Quit already removed the primary generation.
-            // Its reader cannot send current-generation Fatal on this error.
-            // Preserve the typed Guardian failure while waking the native UI.
-            let _ = self.window_commands.send(AppWindowCommand::Fatal);
+            // An accepted lifecycle Quit already removed the primary.
+            // Its retired reader cannot send current-generation Fatal.
+            // CLI lease-loss already has a separate terminal-error notifier.
+            if self.shutdown.cause() == SESSION_LIFECYCLE_QUIT {
+                let _ = self.window_commands.send(AppWindowCommand::Fatal);
+            }
         })?;
         #[cfg(not(target_os = "macos"))]
         self.guardian.shutdown_and_wait()?;
