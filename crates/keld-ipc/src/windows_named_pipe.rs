@@ -2202,6 +2202,15 @@ mod cancellation_tests {
         // SAFETY: the server still owns this pipe HANDLE; flags is writable.
         let valid_before = unsafe { GetHandleInformation(raw.cast(), &raw mut flags) } != 0;
 
+        // The parked read must already have released io_issue; otherwise the
+        // close below would block behind it. Fail instead of hanging.
+        if server.inner.io_issue.try_lock().is_err() {
+            release_tx
+                .send(())
+                .expect("release the reader before failing");
+            reader.join().expect("native reader joined");
+            panic!("a pending ReadFile still holds io_issue at its completion wait");
+        }
         // io_issue is free, so the terminal close is not held behind the read:
         // it cancels the pending I/O and drops the server's HANDLE reference
         // while the read has not yet observed its completion.
@@ -2210,7 +2219,8 @@ mod cancellation_tests {
             .inspect_owned_pipe(|owned| Ok(owned.as_raw_handle()))
             .is_err();
         // SAFETY: GetHandleInformation only queries the exact captured HANDLE
-        // value; a freed value fails with ERROR_INVALID_HANDLE.
+        // value and writes the live `flags`; a freed, not yet reused value fails
+        // with ERROR_INVALID_HANDLE. No ownership transfer or dereference occurs.
         let valid_while_pending = unsafe { GetHandleInformation(raw.cast(), &raw mut flags) } != 0;
 
         release_tx
