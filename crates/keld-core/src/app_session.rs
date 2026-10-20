@@ -1,5 +1,31 @@
 //! Validated no-flag application boot and host-owned primary session (KEL-96).
 
+#[cfg(any(target_os = "macos", target_os = "linux", windows, test))]
+mod boot_contract;
+mod error;
+pub use self::error::HostAppError;
+#[cfg(all(test, any(target_os = "macos", windows)))]
+use self::error::startup_resource_snapshot;
+
+#[cfg(all(test, windows))]
+use self::boot_contract::decode_digest;
+#[cfg(any(target_os = "macos", target_os = "linux", windows, test))]
+use self::boot_contract::{boot_error, parse_boot_bytes, target_error};
+
+#[cfg(target_os = "macos")]
+mod macos_profile_selection;
+#[cfg(all(test, target_os = "macos"))]
+use self::macos_profile_selection::MacValidatedAppIdentity;
+#[cfg(target_os = "macos")]
+use self::macos_profile_selection::macos_profile_selection;
+#[cfg(all(target_os = "macos", feature = "profile-test-hooks", debug_assertions))]
+use self::macos_profile_selection::verified_macos_app_identity;
+#[cfg(all(
+    target_os = "macos",
+    any(test, all(feature = "profile-test-hooks", debug_assertions))
+))]
+use self::macos_profile_selection::{macos_identity_error, select_macos_profile_mode_with};
+
 #[cfg(target_os = "macos")]
 mod auth_router;
 #[cfg(target_os = "macos")]
@@ -49,23 +75,18 @@ use std::thread::{self, JoinHandle};
 #[cfg(any(target_os = "macos", target_os = "linux", windows))]
 use std::time::{Duration, Instant};
 
-#[cfg(any(target_os = "macos", target_os = "linux", windows, test))]
-use serde::Deserialize;
-
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 use nix::fcntl::{FcntlArg, FdFlag, OFlag, fcntl};
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 use nix::sys::stat::{SFlag, fstat};
 
-#[cfg(target_os = "macos")]
-use crate::macos_profile_identity::verified_current_process_signing_info;
-#[cfg(target_os = "macos")]
-use getrandom::fill as fill_os_random;
+#[cfg(test)]
+use keld_guard::ManifestError;
+use keld_guard::Principal;
 #[cfg(any(target_os = "macos", target_os = "linux", windows))]
 use keld_guard::verified_manifest::VerifiedManifest;
 #[cfg(any(target_os = "macos", target_os = "linux", windows))]
 use keld_guard::verified_manifest::load_verified_manifest;
-use keld_guard::{ManifestError, Principal};
 #[cfg(windows)]
 use keld_guard::{VerifiedWindowsImage, WindowsAuthenticodeError, WindowsAuthenticodeImage};
 #[cfg(any(target_os = "macos", target_os = "linux", windows))]
@@ -104,8 +125,10 @@ use keld_runtime::primary::{BoundPrimaryGeneration, PrimaryRoleEvent, RoleOwner,
 use keld_runtime::primary::{PrimaryRecoveryGate, PrimaryRoleConfig, PrimaryRoleSupervisor};
 #[cfg(target_os = "linux")]
 use keld_runtime::primary::{PrimaryRecoveryGate, PrimaryRoleConfig, PrimaryRoleSupervisor};
-#[cfg(target_os = "macos")]
-use keld_wv::profile::EphemeralProfile;
+#[cfg(windows)]
+use keld_wv::ProfileIdentity;
+#[cfg(any(windows, all(test, target_os = "macos")))]
+use keld_wv::WebProfileSelection;
 #[cfg(target_os = "linux")]
 use keld_wv::webkitgtk::WebKitGtkEngine;
 #[cfg(windows)]
@@ -119,10 +142,6 @@ use keld_wv::wkwebview::{
 use keld_wv::{AppWindowCommand, AppWindowEvent};
 #[cfg(any(target_os = "macos", target_os = "linux", windows))]
 use keld_wv::{NavTarget, WebviewSpec, WvError};
-#[cfg(any(target_os = "macos", windows))]
-use keld_wv::{ProfileIdentity, WebProfileSelection};
-#[cfg(target_os = "macos")]
-use sha2::{Digest as _, Sha256};
 #[cfg(all(test, windows))]
 use windows_sys::Win32::Foundation::GetHandleInformation;
 #[cfg(windows)]
@@ -1303,312 +1322,6 @@ struct RetainedMacSession {
     _renderer: RendererDispatch,
     _commands: Sender<AppWindowCommand>,
     guard: Option<GuardSnapshot>,
-}
-
-/// Typed no-flag host boot/session failure.
-pub struct HostAppError {
-    code: &'static str,
-    phase: &'static str,
-    detail: String,
-    fix: &'static str,
-    resources: StartupResourceSnapshot,
-    #[cfg(any(target_os = "macos", target_os = "linux", windows))]
-    manifest_source: Option<Box<ManifestError>>,
-}
-
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-struct StartupResourceSnapshot {
-    listener: u32,
-    child: u32,
-    window: u32,
-}
-
-impl HostAppError {
-    fn new(
-        code: &'static str,
-        phase: &'static str,
-        detail: impl Into<String>,
-        fix: &'static str,
-    ) -> Self {
-        Self {
-            code,
-            phase,
-            detail: detail.into(),
-            fix,
-            resources: startup_resource_snapshot(),
-            #[cfg(any(target_os = "macos", target_os = "linux", windows))]
-            manifest_source: None,
-        }
-    }
-
-    #[cfg(any(target_os = "macos", target_os = "linux", windows))]
-    fn manifest(source: ManifestError) -> Self {
-        let code = source.code();
-        let detail = source.to_string();
-        Self {
-            code,
-            phase: "permissions manifest preflight",
-            detail,
-            fix: "Apply the keld-guard correction above, rebuild the staged boot artifact, and relaunch.",
-            resources: startup_resource_snapshot(),
-            manifest_source: Some(Box::new(source)),
-        }
-    }
-
-    #[cfg(any(target_os = "macos", target_os = "linux", windows))]
-    fn fs_prepare(source: &FsPrepareError) -> Self {
-        Self::new(
-            source.code(),
-            "filesystem broker preflight",
-            source.to_string(),
-            "Correct the filesystem scopes in keld.permissions.jsonc, rebuild the staged boot artifact, and relaunch.",
-        )
-    }
-
-    #[cfg(any(target_os = "macos", target_os = "linux", windows))]
-    fn io(code: &'static str, phase: &'static str, source: &io::Error, fix: &'static str) -> Self {
-        Self::new(code, phase, source.to_string(), fix)
-    }
-
-    /// Stable registered diagnostic code.
-    #[must_use]
-    pub const fn code(&self) -> &'static str {
-        self.code
-    }
-}
-
-impl fmt::Display for HostAppError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "{}: no-flag host failed during {} — {}. {} \
-             [startup-resource-attempts listener={} child={} window={}]",
-            self.code,
-            self.phase,
-            self.detail,
-            self.fix,
-            self.resources.listener,
-            self.resources.child,
-            self.resources.window,
-        )
-    }
-}
-
-impl fmt::Debug for HostAppError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("HostAppError")
-            .field("code", &self.code)
-            .field("phase", &self.phase)
-            .field("detail", &self.detail)
-            .field("resources", &self.resources)
-            .field("manifest_source", &{
-                #[cfg(any(target_os = "macos", target_os = "linux", windows))]
-                {
-                    self.manifest_source.as_ref()
-                }
-                #[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
-                {
-                    Option::<&ManifestError>::None
-                }
-            })
-            .finish_non_exhaustive()
-    }
-}
-
-impl std::error::Error for HostAppError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        #[cfg(any(target_os = "macos", target_os = "linux", windows))]
-        {
-            self.manifest_source
-                .as_ref()
-                .map(|source| source.as_ref() as &(dyn std::error::Error + 'static))
-        }
-        #[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
-        {
-            None
-        }
-    }
-}
-
-fn startup_resource_snapshot() -> StartupResourceSnapshot {
-    #[cfg(any(target_os = "macos", target_os = "linux", windows))]
-    {
-        StartupResourceSnapshot {
-            listener: LISTENER_ATTEMPTS.load(Ordering::Acquire),
-            child: CHILD_ATTEMPTS.load(Ordering::Acquire),
-            window: WINDOW_ATTEMPTS.load(Ordering::Acquire),
-        }
-    }
-    #[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
-    {
-        StartupResourceSnapshot::default()
-    }
-}
-
-#[cfg(any(target_os = "macos", target_os = "linux", windows, test))]
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct BootDocument {
-    schema: u8,
-    name: String,
-    entry: String,
-    renderer: String,
-    permissions: PermissionsDocument,
-    /// Optional schema-v1 operator auth carrier. This is deserialized only;
-    /// Native remains the sole owner of profile filtering and semantic checks.
-    #[serde(
-        default,
-        deserialize_with = "keld_native::auth::deserialize_auth_configuration"
-    )]
-    auth: AuthConfiguration,
-}
-
-#[cfg(any(target_os = "macos", target_os = "linux", windows, test))]
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct PermissionsDocument {
-    file: String,
-    content_sha256: String,
-}
-
-#[cfg(any(target_os = "macos", target_os = "linux", windows, test))]
-struct ParsedBoot {
-    name: String,
-    entry: PathBuf,
-    renderer: PathBuf,
-    permissions_digest: [u8; 32],
-    auth_configuration: AuthConfiguration,
-}
-
-#[cfg(any(target_os = "macos", target_os = "linux", windows, test))]
-fn parse_boot_bytes(bytes: &[u8]) -> Result<ParsedBoot, HostAppError> {
-    if bytes.len() > MAX_BOOT_BYTES {
-        return Err(boot_error(
-            "keld.boot.json exceeds the 64 KiB limit",
-            "Regenerate a bounded schema-v1 boot descriptor.",
-        ));
-    }
-    let text = std::str::from_utf8(bytes).map_err(|source| {
-        boot_error(
-            format!("keld.boot.json is not UTF-8: {source}"),
-            "Write the descriptor as strict UTF-8 JSON.",
-        )
-    })?;
-    let document: BootDocument = serde_json::from_str(text).map_err(|source| {
-        boot_error(
-            format!("strict schema-v1 JSON was rejected: {source}"),
-            "Remove duplicate/unknown fields and regenerate keld.boot.json schema 1.",
-        )
-    })?;
-    if document.schema != 1 {
-        return Err(boot_error(
-            format!("unsupported schema {}", document.schema),
-            "Regenerate keld.boot.json with schema 1.",
-        ));
-    }
-    if document.name.is_empty() {
-        return Err(boot_error(
-            "name must be a non-empty string",
-            "Set the reviewed project name before compiling the boot descriptor.",
-        ));
-    }
-    let entry = validate_relative_path("entry", &document.entry)?;
-    let renderer = validate_relative_path("renderer", &document.renderer)?;
-    if document.permissions.file != PERMISSIONS_FILE {
-        return Err(boot_error(
-            format!(
-                "permissions.file must be the literal {PERMISSIONS_FILE}, found {}",
-                document.permissions.file
-            ),
-            "Regenerate the descriptor with the fixed permissions filename.",
-        ));
-    }
-    let permissions_digest = decode_digest(&document.permissions.content_sha256)?;
-    Ok(ParsedBoot {
-        name: document.name,
-        entry,
-        renderer,
-        permissions_digest,
-        auth_configuration: document.auth,
-    })
-}
-
-#[cfg(any(target_os = "macos", target_os = "linux", windows, test))]
-fn boot_error(detail: impl Into<String>, fix: &'static str) -> HostAppError {
-    HostAppError::new("KELD-CORE-035", "boot descriptor validation", detail, fix)
-}
-
-#[cfg(any(target_os = "macos", target_os = "linux", windows, test))]
-fn target_error(kind: &'static str, detail: impl Into<String>) -> HostAppError {
-    HostAppError::new(
-        "KELD-CORE-036",
-        "staged target validation",
-        format!("{kind}: {}", detail.into()),
-        "Regenerate the owner-private stage with readable regular files and no symlinks.",
-    )
-}
-
-#[cfg(any(target_os = "macos", target_os = "linux", windows, test))]
-fn validate_relative_path(kind: &'static str, value: &str) -> Result<PathBuf, HostAppError> {
-    if value.is_empty()
-        || value.contains('\\')
-        || value.contains(':')
-        || value
-            .split('/')
-            .any(|part| part.is_empty() || matches!(part, "." | ".."))
-    {
-        return Err(target_error(
-            kind,
-            "path is not a portable project-relative path",
-        ));
-    }
-    let path = Path::new(value);
-    for component in path.components() {
-        if !matches!(component, Component::Normal(_)) {
-            return Err(target_error(
-                kind,
-                "path contains a root, prefix, dot, or dot-dot",
-            ));
-        }
-    }
-    Ok(path.to_path_buf())
-}
-
-#[cfg(any(target_os = "macos", target_os = "linux", windows, test))]
-fn decode_digest(value: &str) -> Result<[u8; 32], HostAppError> {
-    let Some(hex) = value.strip_prefix(DIGEST_PREFIX) else {
-        return Err(boot_error(
-            "permissions.content_sha256 must start with sha256:",
-            "Regenerate the exact lowercase SHA-256 descriptor value.",
-        ));
-    };
-    if hex.len() != 64
-        || !hex
-            .as_bytes()
-            .iter()
-            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(byte))
-    {
-        return Err(boot_error(
-            "permissions.content_sha256 must contain 64 lowercase hexadecimal digits",
-            "Regenerate the exact lowercase SHA-256 descriptor value.",
-        ));
-    }
-    let mut digest = [0_u8; 32];
-    for (index, chunk) in hex.as_bytes().as_chunks::<2>().0.iter().enumerate() {
-        let text = std::str::from_utf8(chunk).map_err(|source| {
-            boot_error(
-                format!("digest encoding is invalid: {source}"),
-                "Regenerate the exact lowercase SHA-256 descriptor value.",
-            )
-        })?;
-        digest[index] = u8::from_str_radix(text, 16).map_err(|source| {
-            boot_error(
-                format!("digest encoding is invalid: {source}"),
-                "Regenerate the exact lowercase SHA-256 descriptor value.",
-            )
-        })?;
-    }
-    Ok(digest)
 }
 
 #[cfg(any(target_os = "macos", target_os = "linux"))]
@@ -2844,113 +2557,6 @@ fn run_app(
         }
     })
     .map_err(HostRunFailure::from)
-}
-
-#[cfg(target_os = "macos")]
-const MACOS_PUBLISHER_SCOPE_DOMAIN: &[u8] = b"keld.publisher.macos/v1\0";
-
-#[cfg(target_os = "macos")]
-#[derive(Debug)]
-struct MacValidatedAppIdentity {
-    #[cfg(all(feature = "profile-test-hooks", debug_assertions))]
-    team_identifier: Box<str>,
-    publisher_scope: [u8; 32],
-    signing_identifier: Box<str>,
-    profile_identity: ProfileIdentity,
-}
-
-#[cfg(target_os = "macos")]
-impl MacValidatedAppIdentity {
-    fn from_verified_parts(
-        team_identifier: &str,
-        signing_identifier: &str,
-    ) -> Result<Self, HostAppError> {
-        if team_identifier.len() != 10
-            || !team_identifier
-                .bytes()
-                .all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit())
-        {
-            return Err(macos_identity_error(
-                "the validated code signature has no canonical 10-character Team Identifier",
-            ));
-        }
-        let mut publisher_hasher = Sha256::new();
-        publisher_hasher.update(MACOS_PUBLISHER_SCOPE_DOMAIN);
-        publisher_hasher.update(team_identifier.as_bytes());
-        let publisher_digest = publisher_hasher.finalize();
-        let mut publisher_scope = [0_u8; 32];
-        publisher_scope.copy_from_slice(&publisher_digest);
-        let profile_identity = ProfileIdentity::from_host_verified_parts(
-            publisher_scope,
-            signing_identifier,
-        )
-        .map_err(|source| {
-            macos_identity_error(format!(
-                "the validated code-signing identifier is not a canonical Keld app id: {source}"
-            ))
-        })?;
-        Ok(Self {
-            #[cfg(all(feature = "profile-test-hooks", debug_assertions))]
-            team_identifier: team_identifier.into(),
-            publisher_scope,
-            signing_identifier: signing_identifier.into(),
-            profile_identity,
-        })
-    }
-
-    fn into_profile_selection(self) -> Result<WebProfileSelection, HostAppError> {
-        debug_assert_eq!(
-            ProfileIdentity::from_host_verified_parts(
-                self.publisher_scope,
-                &self.signing_identifier,
-            ),
-            Ok(self.profile_identity)
-        );
-        WebProfileSelection::persistent(Some(self.profile_identity))
-            .map_err(|source| macos_identity_error(source.to_string()))
-    }
-}
-
-#[cfg(target_os = "macos")]
-fn select_macos_profile_mode_with(
-    has_authenticated_dev_lease: bool,
-    release_identity: impl FnOnce() -> Result<MacValidatedAppIdentity, HostAppError>,
-) -> Result<WebProfileSelection, HostAppError> {
-    if has_authenticated_dev_lease {
-        let mut launch_nonce = [0_u8; 32];
-        fill_os_random(&mut launch_nonce)
-            .map_err(|source| macos_identity_error(format!("host randomness failed: {source}")))?;
-        let profile = EphemeralProfile::from_host_random(launch_nonce)
-            .map_err(|source| macos_identity_error(source.to_string()))?;
-        return Ok(WebProfileSelection::ephemeral_dev(profile));
-    }
-    release_identity()?.into_profile_selection()
-}
-
-#[cfg(target_os = "macos")]
-fn macos_profile_selection(
-    dev_lease: Option<&DevHostLease>,
-) -> Result<WebProfileSelection, HostAppError> {
-    select_macos_profile_mode_with(dev_lease.is_some(), verified_macos_app_identity)
-}
-
-#[cfg(target_os = "macos")]
-fn verified_macos_app_identity() -> Result<MacValidatedAppIdentity, HostAppError> {
-    let signing_info = verified_current_process_signing_info().map_err(macos_identity_error)?;
-    MacValidatedAppIdentity::from_verified_parts(
-        &signing_info.team_identifier,
-        &signing_info.signing_identifier,
-    )
-}
-
-#[cfg(target_os = "macos")]
-fn macos_identity_error(detail: impl Into<String>) -> HostAppError {
-    HostAppError::new(
-        "KELD-WV-009",
-        "macOS authenticated app identity",
-        detail,
-        "Launch a validly signed macOS app with a canonical signed identifier, or use `keld dev` for a fresh nonpersistent profile.",
-    )
 }
 
 /// Reports only facts read from this process after successful Security.framework validation.
