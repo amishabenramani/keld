@@ -74,6 +74,12 @@ const LIFECYCLE_ATTEMPT_HANDOFF_LEN: usize = 8 + 1 + 32 + 32 + 8 + 8;
 const LIFECYCLE_ATTEMPT_ACK_LEN: usize = 8 + 32 + 32 + 4;
 const LIFECYCLE_QUERY_HANDOFF_LEN: usize = 8 + 1 + 32 + 32 + 8;
 
+mod lifecycle_frames;
+use lifecycle_frames::{
+    encode_lifecycle_attempt_ack, encode_lifecycle_attempt_handoff, encode_lifecycle_query_handoff,
+    encode_lifecycle_query_receipt,
+};
+
 /// Result of the cleanup helper's private launcher pipe.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WindowsCleanupReleaseSignal {
@@ -2781,70 +2787,11 @@ fn open_lifecycle_transfer_target(
     }
 }
 
-fn encode_lifecycle_attempt_handoff(
-    binding: WindowsLifecycleBinding,
-    remote_job: usize,
-    remote_lease: usize,
-) -> Result<[u8; LIFECYCLE_ATTEMPT_HANDOFF_LEN], WindowsHostJobError> {
-    let remote_job = u64::try_from(remote_job).map_err(|_| {
-        WindowsHostJobError::contract(
-            "lifecycle attempt handoff record",
-            "remote Job handle exceeds the wire integer width",
-        )
-    })?;
-    let remote_lease = u64::try_from(remote_lease).map_err(|_| {
-        WindowsHostJobError::contract(
-            "lifecycle attempt handoff record",
-            "remote lease handle exceeds the wire integer width",
-        )
-    })?;
-    let mut record = [0_u8; LIFECYCLE_ATTEMPT_HANDOFF_LEN];
-    record[..8].copy_from_slice(b"KELD-HO1");
-    record[8] = WindowsLifecyclePurpose::CoordinatorToKeeper as u8;
-    record[9..41].copy_from_slice(binding.attempt_id());
-    record[41..73].copy_from_slice(binding.lifecycle_channel_id());
-    record[73..81].copy_from_slice(&remote_job.to_le_bytes());
-    record[81..89].copy_from_slice(&remote_lease.to_le_bytes());
-    Ok(record)
-}
-
 fn terminate_incomplete_lifecycle_keeper(reason: &str) -> ! {
     eprintln!(
         "KELD-RUNTIME-014: malformed or incomplete one-shot keeper handoff ({reason}); terminating so unknown remote handles close"
     );
     std::process::abort();
-}
-
-fn encode_lifecycle_query_handoff(
-    binding: WindowsLifecycleBinding,
-    remote_query: usize,
-) -> Result<[u8; LIFECYCLE_QUERY_HANDOFF_LEN], WindowsHostJobError> {
-    let remote_query = u64::try_from(remote_query).map_err(|_| {
-        WindowsHostJobError::contract(
-            "lifecycle successor query offer",
-            "remote query handle exceeds the wire integer width",
-        )
-    })?;
-    let mut record = [0_u8; LIFECYCLE_QUERY_HANDOFF_LEN];
-    record[..8].copy_from_slice(b"KELD-QO1");
-    record[8] = WindowsLifecyclePurpose::KeeperToSuccessor as u8;
-    record[9..41].copy_from_slice(binding.attempt_id());
-    record[41..73].copy_from_slice(binding.lifecycle_channel_id());
-    record[73..81].copy_from_slice(&remote_query.to_le_bytes());
-    Ok(record)
-}
-
-fn encode_lifecycle_query_receipt(
-    magic: [u8; 8],
-    binding: WindowsLifecycleBinding,
-    active_processes: u32,
-) -> [u8; LIFECYCLE_ATTEMPT_ACK_LEN] {
-    let mut receipt = [0_u8; LIFECYCLE_ATTEMPT_ACK_LEN];
-    receipt[..8].copy_from_slice(&magic);
-    receipt[8..40].copy_from_slice(binding.attempt_id());
-    receipt[40..72].copy_from_slice(binding.lifecycle_channel_id());
-    receipt[72..76].copy_from_slice(&active_processes.to_le_bytes());
-    receipt
 }
 
 fn terminate_lifecycle_transfer_target(
@@ -3010,18 +2957,6 @@ fn attenuate_keeper_activation_lease(
         ));
     }
     Ok(reduced)
-}
-
-fn encode_lifecycle_attempt_ack(
-    binding: WindowsLifecycleBinding,
-    active_processes: u32,
-) -> [u8; LIFECYCLE_ATTEMPT_ACK_LEN] {
-    let mut acknowledgement = [0_u8; LIFECYCLE_ATTEMPT_ACK_LEN];
-    acknowledgement[..8].copy_from_slice(b"KELD-HR1");
-    acknowledgement[8..40].copy_from_slice(binding.attempt_id());
-    acknowledgement[40..72].copy_from_slice(binding.lifecycle_channel_id());
-    acknowledgement[72..76].copy_from_slice(&active_processes.to_le_bytes());
-    acknowledgement
 }
 
 fn process_token_facts(
@@ -3297,7 +3232,6 @@ mod tests {
     use std::net::{TcpListener, TcpStream};
     use std::os::windows::io::AsHandle as _;
     use std::os::windows::process::CommandExt as _;
-    use std::path::Path;
     use std::path::PathBuf;
     use std::process::{Command, Stdio};
     use std::sync::atomic::{AtomicU32, Ordering};
@@ -5448,108 +5382,6 @@ mod tests {
 
     mod claimant_binding;
 
-    /// A same-token `cmd.exe /d /c exit 7`, created suspended and not recorded.
-    fn same_token_exit_command() -> WindowsSuspendedChild {
-        let system32 = system32();
-        let environment: Vec<(OsString, OsString)> = ["SystemRoot", "WINDIR"]
-            .into_iter()
-            .filter_map(|key| std::env::var_os(key).map(|value| (OsString::from(key), value)))
-            .collect();
-        WindowsSuspendedChild::spawn_same_token(
-            &system32.join("cmd.exe"),
-            &[
-                OsString::from("/d"),
-                OsString::from("/c"),
-                OsString::from("exit 7"),
-            ],
-            &environment,
-            &system32,
-        )
-        .expect("create a same-token child suspended")
-    }
-
-    #[test]
-    fn a_membership_proof_must_name_both_the_process_id_and_the_creation_time() {
-        // Seam-injected: forged proofs that each match one of the two facts.
-        let mut launched =
-            WindowsLaunchedProcess::record(same_token_exit_command()).expect("record the launch");
-        let process_id = launched.child().id();
-        let creation_time = launched.creation_time;
-        for forged in [
-            WindowsJobMembership {
-                process_id,
-                creation_time: creation_time ^ 1,
-            },
-            WindowsJobMembership {
-                process_id: process_id ^ 4,
-                creation_time,
-            },
-        ] {
-            let refusal = launched
-                .resume(&forged)
-                .expect_err("a proof that matches only one fact refuses");
-            assert!(
-                refusal
-                    .to_string()
-                    .contains("the attempt-Job membership proof names another process"),
-                "{forged:?}: {refusal}"
-            );
-            assert!(
-                !launched.has_exited().expect("query the launch"),
-                "{forged:?}: the refused launch stays suspended"
-            );
-        }
-        let mut job = WindowsProcessJob::create().expect("create an attempt Job");
-        let membership = job
-            .assign_child(launched.child())
-            .expect("assign the launch");
-        launched
-            .resume(&membership)
-            .expect("the real proof resumes the launch");
-        assert_eq!(launched.wait(10_000).expect("the launch exits"), 7);
-    }
-
-    #[test]
-    fn a_launch_record_names_only_a_never_resumed_child() {
-        let mut child = same_token_exit_command();
-        child
-            .resume_held()
-            .expect("spend the resume below the launch record");
-        let refusal = WindowsLaunchedProcess::record(child)
-            .expect_err("a resumed child has no launch record");
-        assert!(
-            refusal.to_string().contains(
-                "the child was already resumed, so its Job membership can no longer precede its first instruction"
-            ),
-            "{refusal}"
-        );
-    }
-
-    #[test]
-    fn suspended_child_owns_the_sole_resume_thread_call() {
-        // KEL-53 §5 reuse decision: one suspended-child type owns the only
-        // primary-thread resume, so a later launch path cannot add a second one.
-        // It counts the identifier, not one call spelling: an alias or a
-        // qualified path must still name it, so the import and the one call
-        // are the only two occurrences.
-        let needle = concat!("Resume", "Thread");
-        let mut calls = Vec::new();
-        let mut pending = vec![Path::new(env!("CARGO_MANIFEST_DIR")).join("src")];
-        while let Some(directory) = pending.pop() {
-            for entry in std::fs::read_dir(&directory).expect("list a source directory") {
-                let path = entry.expect("read a source entry").path();
-                if path.is_dir() {
-                    pending.push(path);
-                } else if path.extension().is_some_and(|extension| extension == "rs") {
-                    let source = std::fs::read_to_string(&path).expect("read a source file");
-                    let count = source.matches(needle).count();
-                    if count != 0 {
-                        let name = path.file_name().expect("file name").to_string_lossy();
-                        calls.push((name.into_owned(), count));
-                    }
-                }
-            }
-        }
-        assert_eq!(calls, vec![("windows_lpac.rs".to_owned(), 2)]);
-    }
+    mod suspended_launch;
+    use suspended_launch::same_token_exit_command;
 }
