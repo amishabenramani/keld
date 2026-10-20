@@ -353,6 +353,14 @@ fn public_launch_witness_private_data_never_reaches_stderr() {
         0,
         "no raw inline witness logging may bypass the privacy reporter"
     );
+    let pre_quit = body
+        .split_once("\n    if observation_result.is_err() {")
+        .expect("pre-Quit observation boundary")
+        .0;
+    assert!(
+        !pre_quit.contains("eprintln!("),
+        "no pre-Quit inline diagnostic may bypass the checked reporter"
+    );
 }
 
 fn run_launch_with_causal_receipt(
