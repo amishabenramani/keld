@@ -236,13 +236,14 @@ ci-router-test:
 hooks-test:
     tools/hooks_test.sh
 
-# Format the workspace in place. `cargo fmt` never visits `include!`d files, so
-# tools/fmt_included.sh formats those (and the `mod` files under them) too.
+# Format the workspace in place. `cargo fmt` never visits `include!`d files or
+# `#[path]` mods declared inside macro bodies, so tools/fmt_included.sh formats
+# those (and the `mod` files under them) too.
 fmt:
     cargo fmt --all
     tools/fmt_included.sh
 
-# CI gate: formatting, including `include!`d test files (#834).
+# CI gate: formatting, including `include!`d and macro-body `#[path]` files (#834, #1055).
 fmt-check:
     cargo fmt --all --check
     tools/fmt_included.sh test
