@@ -291,21 +291,23 @@ fn rename_relative(
     let buffer_size = required.max(size_of::<FILE_RENAME_INFORMATION>());
     let size = u32::try_from(buffer_size).map_err(io::Error::other)?;
     let mut storage = vec![0_u64; buffer_size.div_ceil(size_of::<u64>())];
+    let name_length = u32::try_from(name_bytes).map_err(io::Error::other)?;
     let info = storage.as_mut_ptr().cast::<FILE_RENAME_INFORMATION>();
-    let info_value = FILE_RENAME_INFORMATION {
-        Anonymous: FILE_RENAME_INFORMATION_0 {
-            ReplaceIfExists: replace,
-        },
-        RootDirectory: parent.as_raw_handle().cast(),
-        FileNameLength: u32::try_from(name_bytes).map_err(io::Error::other)?,
-        FileName: [0],
-    };
     // SAFETY: storage is writable, 8-byte aligned and large enough for the
     // complete FILE_RENAME_INFORMATION header, the checked UTF-16 name and a trailing
-    // zero. The pointers target this one owned buffer, which stays live through
-    // the synchronous NtSetInformationFile call.
+    // zero. Each field is written in place through `addr_of_mut!`, so no whole-struct
+    // copy overwrites the zero-filled padding or terminator with undefined bytes:
+    // every byte of the buffer is initialized. The union is set through its full
+    // 32-bit `Flags` member (on little-endian Windows targets the BOOLEAN
+    // `ReplaceIfExists` aliases its low byte), so its high bytes are zero rather
+    // than undefined. The pointers target this one owned buffer, which stays live
+    // through the synchronous NtSetInformationFile call.
     unsafe {
-        ptr::write(info, info_value);
+        ptr::addr_of_mut!((*info).Anonymous).write(FILE_RENAME_INFORMATION_0 {
+            Flags: u32::from(replace),
+        });
+        ptr::addr_of_mut!((*info).RootDirectory).write(parent.as_raw_handle().cast());
+        ptr::addr_of_mut!((*info).FileNameLength).write(name_length);
         ptr::copy_nonoverlapping(
             destination_name.as_ptr(),
             ptr::addr_of_mut!((*info).FileName).cast::<u16>(),
