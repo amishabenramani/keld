@@ -42,14 +42,23 @@ const FLOOR: Duration = Duration::from_secs(5);
 /// The watcher's slice: it reads its stop condition between bounded waits, so it outlives
 /// the wait it serves by at most one slice.
 const SLICE: Duration = Duration::from_millis(50);
-/// "At once": the bound on the handle mechanism's latency, from the call that ends the
-/// candidate to the owner's return. S6c2b measured it over twenty runs of this file
+/// "At once": the bound on the handle mechanism's latency, from the return of the call
+/// that ends the candidate to the owner's return. That call, `terminate_and_wait`,
+/// returns only once the candidate's family has exited, so from its return the launch
+/// handle is signaled and only the handle mechanism remains. The call's own duration is
+/// the OS's process-kill latency, which is unbounded under load and is not the property:
+/// a hosted runner spent 260 ms from the call to the owner's return, and 0 ms of it after
+/// the call returned. S6c2b measured the whole span over twenty runs of this file
 /// while the full `keld-runtime` suite ran concurrently as load (its evidence record,
 /// `flake-load1.log`, on this machine: maximum 5 ms, median 1 ms); four times that
 /// maximum is 20 ms, and the bound takes the rule's floor instead, sixteen default
 /// timer ticks (16 x 15.625 ms), for a loaded two-core runner. It stays twenty times
-/// below [`FLOOR`], so the negative control still separates the two mechanisms.
+/// below [`FLOOR`] (checked at compile time below), so the negative control still
+/// separates the two mechanisms.
 const AT_ONCE: Duration = Duration::from_millis(250);
+// "At once" must stay well below the floor, or a wait that ends at the floor could pass
+// as one that ends at once.
+const _: () = assert!(AT_ONCE.as_millis() * 20 <= FLOOR.as_millis());
 /// `TerminateJobObject`'s exit code in `WindowsProcessJob::terminate_and_wait`.
 const JOB_TERMINATION_EXIT: u32 = 1;
 
@@ -231,9 +240,12 @@ fn a_candidate_killed_after_its_resume_ends_the_claim_wait_at_once_through_its_l
         launched.has_exited().expect("query the launch"),
         "the launch handle is signaled"
     );
+    // Measured from the kill's return, when the candidate is known dead: the kill call's
+    // own latency belongs to the OS, not to the claim wait (see [`AT_ONCE`]).
     assert!(
-        from_kill_call < AT_ONCE,
-        "at once, not at the floor: {from_kill_call:?}"
+        from_kill_return < AT_ONCE,
+        "at once once the candidate is dead, not at the floor: {from_kill_return:?} \
+         after the kill returned ({from_kill_call:?} after the kill call)"
     );
     assert_eq!(
         launched.wait(10_000).expect("reap the killed candidate"),
@@ -304,14 +316,14 @@ fn without_the_handle_watcher_a_killed_candidate_ends_the_claim_wait_only_at_the
     let endpoint = own_endpoint();
     let started = Instant::now();
     let (owner, ended) = spawn_owner(endpoint, started + FLOOR);
-    let kill_called_at = Instant::now();
     job.terminate_and_wait(launched.child(), KILL_SWITCH)
         .expect("end the candidate family");
+    let kill_returned_at = Instant::now();
     let ended_at = ended
         .recv_timeout(KILL_SWITCH)
         .expect("the claim wait ends within the kill switch");
     let outcome = join_owner(owner);
-    let from_kill_call = ended_at.duration_since(kill_called_at);
+    let from_kill_return = ended_at.saturating_duration_since(kill_returned_at);
     assert!(
         launched.has_exited().expect("query the launch"),
         "the launch handle is signaled, and nothing watched it"
@@ -324,7 +336,12 @@ fn without_the_handle_watcher_a_killed_candidate_ends_the_claim_wait_only_at_the
         ended_at.duration_since(started) >= FLOOR,
         "at the floor, not before"
     );
-    assert!(from_kill_call >= AT_ONCE, "not at once: {from_kill_call:?}");
+    // The same origin as the handle cell: from the kill's return, when the candidate is
+    // known dead.
+    assert!(
+        from_kill_return >= AT_ONCE,
+        "not at once: {from_kill_return:?} after the kill returned"
+    );
     assert_eq!(
         launched.wait(10_000).expect("reap the killed candidate"),
         JOB_TERMINATION_EXIT
