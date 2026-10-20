@@ -1976,29 +1976,23 @@ mod cancellation_tests {
         );
     }
 
-    /// Native failure-first: a terminal close must not invalidate a pipe
-    /// HANDLE already borrowed by an in-flight reader before `ReadFile` starts.
-    #[expect(
-        clippy::too_many_lines,
-        reason = "the Win32 source-HANDLE pin and terminal-close interleaving remain observable in one bounded scenario"
-    )]
-    #[test]
-    fn terminal_close_keeps_borrowed_stream_handle_live_until_read_is_observed() {
-        use std::io::Read as _;
-        use std::os::windows::io::AsRawHandle as _;
-        use std::sync::{PoisonError, mpsc};
-        use std::thread;
-
-        use crate::bootstrap::{TestConsumeGate, random_test_locator};
-        use windows_sys::Win32::Foundation::GetHandleInformation;
-
+    /// Warms the native bind/accept/close path first: the first pipe/ACL lookup
+    /// can initialize process-wide OS caches, so the returned handle census then
+    /// counts only the caller's race. Returns that census, a real server accepted
+    /// by a silent client, the client, and the server stream.
+    fn warmed_silent_server_stream(
+        tag: &str,
+    ) -> (
+        u32,
+        super::WindowsNamedPipeServer,
+        super::WindowsNamedPipeStream,
+        super::WindowsNamedPipeStream,
+    ) {
         use super::{WaitOutcome, WindowsNamedPipeServer, process_handle_count};
+        use crate::bootstrap::random_test_locator;
 
-        // The first native pipe/ACL lookup can initialize process-wide OS
-        // caches. Warm the same bind/accept/close path before measuring leaks;
-        // the comparison then counts only this adversarial race's handles.
         let warm_endpoint = format!(
-            r"\\.\pipe\keld-gh910-warm-{}",
+            r"\\.\pipe\keld-gh910-{tag}-warm-{}",
             random_test_locator().expect("fresh native warmup pipe")
         );
         let warm_server = WindowsNamedPipeServer::bind(&warm_endpoint).expect("warm native server");
@@ -2016,7 +2010,7 @@ mod cancellation_tests {
 
         let baseline = process_handle_count().expect("warmed-up kernel handle count");
         let endpoint = format!(
-            r"\\.\pipe\keld-gh910-close-{}",
+            r"\\.\pipe\keld-gh910-{tag}-{}",
             random_test_locator().expect("fresh native pipe identity")
         );
         let server = WindowsNamedPipeServer::bind(&endpoint).expect("bind named pipe");
@@ -2027,7 +2021,25 @@ mod cancellation_tests {
                 .expect("real server accepted silent client"),
             WaitOutcome::Ready
         );
-        let mut stream = server.stream().expect("live server stream");
+        let stream = server.stream().expect("live server stream");
+        (baseline, server, client, stream)
+    }
+
+    /// Native failure-first: a terminal close must not invalidate a pipe
+    /// HANDLE already borrowed by an in-flight reader before `ReadFile` starts.
+    #[test]
+    fn terminal_close_keeps_borrowed_stream_handle_live_until_read_is_observed() {
+        use std::io::Read as _;
+        use std::os::windows::io::AsRawHandle as _;
+        use std::sync::{PoisonError, mpsc};
+        use std::thread;
+
+        use crate::bootstrap::TestConsumeGate;
+        use windows_sys::Win32::Foundation::GetHandleInformation;
+
+        use super::process_handle_count;
+
+        let (baseline, server, client, mut stream) = warmed_silent_server_stream("close");
         stream
             .set_read_timeout(Some(Duration::from_millis(850)))
             .expect("bounded native read");
@@ -2134,45 +2146,12 @@ mod cancellation_tests {
         use std::sync::{PoisonError, mpsc};
         use std::thread;
 
-        use crate::bootstrap::{TestConsumeGate, random_test_locator};
+        use crate::bootstrap::TestConsumeGate;
         use windows_sys::Win32::Foundation::GetHandleInformation;
 
-        use super::{
-            AFTER_PENDING_IO_ISSUE, WaitOutcome, WindowsNamedPipeServer, process_handle_count,
-        };
+        use super::{AFTER_PENDING_IO_ISSUE, process_handle_count};
 
-        // Warm the native bind/accept/close path before counting handles.
-        let warm_endpoint = format!(
-            r"\\.\pipe\keld-gh910-pending-warm-{}",
-            random_test_locator().expect("fresh native warmup pipe")
-        );
-        let warm_server = WindowsNamedPipeServer::bind(&warm_endpoint).expect("warm native server");
-        let warm_client =
-            WindowsNamedPipeServer::connect_client(&warm_endpoint).expect("warm native client");
-        assert_eq!(
-            warm_server
-                .accept_until(Some(Instant::now() + Duration::from_secs(3)))
-                .expect("warm native accept"),
-            WaitOutcome::Ready
-        );
-        warm_server.close_terminal().expect("warm terminal close");
-        drop(warm_client);
-        drop(warm_server);
-
-        let baseline = process_handle_count().expect("warmed-up kernel handle count");
-        let endpoint = format!(
-            r"\\.\pipe\keld-gh910-pending-{}",
-            random_test_locator().expect("fresh native pipe identity")
-        );
-        let server = WindowsNamedPipeServer::bind(&endpoint).expect("bind named pipe");
-        let client = WindowsNamedPipeServer::connect_client(&endpoint).expect("silent peer");
-        assert_eq!(
-            server
-                .accept_until(Some(Instant::now() + Duration::from_secs(3)))
-                .expect("real server accepted silent client"),
-            WaitOutcome::Ready
-        );
-        let mut stream = server.stream().expect("live server stream");
+        let (baseline, server, client, mut stream) = warmed_silent_server_stream("pending");
         // Kill switch only: the terminal close cancels the read long before.
         stream
             .set_read_timeout(Some(Duration::from_secs(5)))
