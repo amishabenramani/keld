@@ -108,10 +108,44 @@ fn known_process_names_are_detected_without_resident_ide_false_positives() {
         "clang",
         "clippy-driver",
         "rustdoc.exe",
+        "cargo-clippy.exe",
+        // C/C++ drivers and linkers a Rust build commonly spawns.
+        "cc",
+        "c++",
+        "g++",
+        "/usr/bin/clang++",
+        "clang-cl.exe",
+        "cl.exe",
+        "rust-lld",
+        "lld-link.exe",
+        "LLD-LINK",
+        "ld.lld",
+        "ld64",
+        "ld64.lld",
+        "ld.gold",
+        "ld.bfd",
+        "mold",
+        "/usr/libexec/gcc/x86_64-linux-gnu/13/collect2",
+        r"C:\Program Files\LLVM\bin\lld-link.exe",
     ] {
         assert!(active_build_name(name), "{name}");
     }
-    for name in ["rust-analyzer", "sccache", "git", "bash", "notcargo"] {
+    // Exact-name matching: resident tools and near-miss names are not builds.
+    for name in [
+        "rust-analyzer",
+        "sccache",
+        "git",
+        "bash",
+        "notcargo",
+        "clangd",
+        "ccache",
+        "cmd",
+        "molder",
+        "g++-wrapper",
+        "rust-lld-proxy",
+        "ld.so",
+        "",
+    ] {
         assert!(!active_build_name(name), "{name}");
     }
 }
@@ -359,6 +393,19 @@ fn mount_inventory_blocks_even_same_device_bind_mounts() {
     let target = PathBuf::from("/cache/target");
     assert!(no_mount_overlap(&target, &[PathBuf::from("/cache/target/bind")]).is_err());
     assert!(no_mount_overlap(&target, &[PathBuf::from("/cache/targetish")]).is_ok());
+}
+
+#[test]
+fn dry_run_refuses_eligibility_when_the_process_guard_fails() {
+    let f = Fixture::new(true);
+    let mut args = f.args();
+    args.push("--dry-run".into());
+    let error = run_with_guard(&f.repo, &args, || Err("active build marker".into())).unwrap_err();
+    assert!(error.contains("active build marker"), "{error}");
+    assert!(f.target().exists());
+    // Negative control: the same preview succeeds once the guard is clean.
+    run_with_guard(&f.repo, &args, || Ok(())).unwrap();
+    assert!(f.target().exists());
 }
 
 #[test]
