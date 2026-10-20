@@ -5,7 +5,7 @@
 
 use std::fs::{self, File, OpenOptions};
 use std::io::Cursor;
-use std::os::windows::fs::{OpenOptionsExt as _, symlink_dir, symlink_file};
+use std::os::windows::fs::OpenOptionsExt as _;
 use std::os::windows::io::AsRawHandle as _;
 use std::path::{Path, PathBuf};
 
@@ -34,6 +34,9 @@ use crate::{
     SigningKeyId, UpdateVerifier,
 };
 
+mod readback_integrity;
+mod root_admission;
+mod source_admission;
 mod stage_refusals;
 
 // This fixture was pinned independently with Python stdlib tarfile USTAR_FORMAT,
@@ -105,32 +108,6 @@ fn logical_uac_admission_cannot_open_a_protected_stage_without_writer_authority(
             .count(),
         0,
         "refusal precedes any protected stage creation"
-    );
-}
-
-#[test]
-fn owner_private_root_refuses_install_profile_and_topology_substitution() {
-    let fixture = Fixture::new();
-    let install = fixture.temp.path().join("unprotected-install");
-    let update = install.join("updates");
-    fs::create_dir(&install).expect("ordinary inherited install fixture");
-    fs::create_dir(&update).expect("ordinary inherited update fixture");
-    fs::create_dir(update.join("versions")).expect("ordinary inherited versions fixture");
-
-    let mut identity = fixture.identity.clone();
-    identity.install_root = install;
-    identity.update_root = update.clone();
-    let admitted = admitted_for(identity.clone(), &signing_key(), "1.0.0");
-    assert!(
-        admitted.open_windows_extraction_root().is_err(),
-        "matching topology cannot compensate for a missing owner-private install profile"
-    );
-
-    identity.update_root = fixture.temp.path().join("sibling-updates");
-    let admitted = admitted_for(identity, &signing_key(), "1.0.0");
-    assert!(
-        admitted.open_windows_extraction_root().is_err(),
-        "a sibling update root cannot substitute for the trusted direct child"
     );
 }
 
@@ -468,34 +445,6 @@ fn signed_golden_extracts_only_incomplete_stage_with_exact_bytes() {
 }
 
 #[test]
-fn tilde_in_existing_update_root_preserves_authenticated_extraction() {
-    let mut fixture = Fixture::new();
-    let renamed = fixture.identity.install_root.join("updates~stable");
-    fs::rename(&fixture.identity.update_root, &renamed)
-        .expect("rename preserves protected directory descriptors");
-    fixture.identity.update_root = renamed;
-    let source = fixture.source(GOLDEN_TAR);
-    let receipt = fixture.receipt(GOLDEN_TAR);
-    let mut root = fixture
-        .admitted("1.0.0")
-        .open_windows_extraction_root()
-        .expect("existing filesystem roots permit a literal tilde");
-    let stage = root
-        .extract(&receipt, &source)
-        .expect("authenticated extraction beneath existing tilde root");
-    let stage_path = fixture.versions().join(stage.name());
-    assert_eq!(
-        fs::read(stage_path.join("content.tar")).expect("exact retained content"),
-        GOLDEN_TAR
-    );
-    assert_eq!(
-        fs::read(stage_path.join("tree/nest/one")).expect("extracted payload"),
-        b"!"
-    );
-    assert!(!stage_path.join(".complete").exists());
-}
-
-#[test]
 fn tilde_archive_member_still_refuses_before_stage_creation() {
     let fixture = Fixture::new();
     let mut content = Vec::new();
@@ -590,119 +539,6 @@ fn expect_extraction(error: UpdateError, expected_incomplete: bool) -> Option<St
     }
 }
 
-#[test]
-fn missing_or_noncanonical_protected_root_refuses_without_creating_stage() {
-    let missing = Fixture::new();
-    fs::remove_dir(missing.versions()).expect("remove unused versions root");
-    let error = missing
-        .admitted("1.0.0")
-        .open_windows_extraction_root()
-        .expect_err("missing versions accepted");
-    expect_extraction(error, false);
-
-    let permissive = Fixture::new();
-    fs::remove_dir(permissive.versions()).expect("remove protected versions root");
-    fs::create_dir(permissive.versions()).expect("ordinary inherited versions ACL");
-    let error = permissive
-        .admitted("1.0.0")
-        .open_windows_extraction_root()
-        .expect_err("permissive versions accepted");
-    expect_extraction(error, false);
-    assert_empty_versions(&permissive.versions());
-
-    let permissive = Fixture::new();
-    fs::remove_dir(permissive.versions()).expect("remove protected versions root");
-    fs::remove_dir(&permissive.identity.update_root).expect("remove protected update root");
-    fs::create_dir(&permissive.identity.update_root).expect("ordinary inherited update ACL");
-    fs::create_dir(permissive.versions()).expect("ordinary inherited versions ACL");
-    let error = permissive
-        .admitted("1.0.0")
-        .open_windows_extraction_root()
-        .expect_err("permissive update root accepted");
-    expect_extraction(error, false);
-    assert_empty_versions(&permissive.versions());
-}
-
-#[test]
-fn reparse_update_or_versions_root_refuses_before_stage_creation() {
-    let versions_link = Fixture::new();
-    let target = versions_link.temp.path().join("other-versions");
-    fs::create_dir(&target).expect("reparse target");
-    fs::remove_dir(versions_link.versions()).expect("replace versions with link");
-    symlink_dir(&target, versions_link.versions())
-        .expect("real Windows directory reparse fixture requires symlink privilege");
-    let error = versions_link
-        .admitted("1.0.0")
-        .open_windows_extraction_root()
-        .expect_err("reparse versions root accepted");
-    expect_extraction(error, false);
-    assert_empty_versions(&target);
-
-    let update_link = Fixture::new();
-    let target = update_link.temp.path().join("other-update");
-    fs::create_dir(&target).expect("reparse target");
-    fs::remove_dir(update_link.versions()).expect("empty protected update root");
-    fs::remove_dir(&update_link.identity.update_root).expect("replace update with link");
-    symlink_dir(&target, &update_link.identity.update_root)
-        .expect("real Windows directory reparse fixture requires symlink privilege");
-    let error = update_link
-        .admitted("1.0.0")
-        .open_windows_extraction_root()
-        .expect_err("reparse update root accepted");
-    expect_extraction(error, false);
-    assert_empty_versions(&target);
-}
-
-#[test]
-fn locked_and_hardlinked_sources_refuse_before_stage_creation() {
-    let fixture = Fixture::new();
-    let source = fixture.source(GOLDEN_TAR);
-    let receipt = fixture.receipt(GOLDEN_TAR);
-    let mut root = fixture
-        .admitted("1.0.0")
-        .open_windows_extraction_root()
-        .expect("protected root");
-
-    let lock = OpenOptions::new()
-        .read(true)
-        .share_mode(0)
-        .open(&source)
-        .expect("exclusive source lock");
-    let error = root
-        .extract(&receipt, &source)
-        .expect_err("locked source extracted");
-    expect_extraction(error, false);
-    assert_empty_versions(&fixture.versions());
-    drop(lock);
-
-    let alias = fixture.temp.path().join("source-link.tar");
-    fs::hard_link(&source, &alias).expect("create real NTFS hardlink");
-    let error = root
-        .extract(&receipt, &source)
-        .expect_err("hardlinked source extracted");
-    expect_extraction(error, false);
-    assert_empty_versions(&fixture.versions());
-}
-
-#[test]
-fn reparse_source_refuses_before_stage_creation() {
-    let fixture = Fixture::new();
-    let target = fixture.source(GOLDEN_TAR);
-    let link = fixture.temp.path().join("source-link-symlink.tar");
-    symlink_file(&target, &link)
-        .expect("real Windows source reparse fixture requires symlink privilege");
-    let receipt = fixture.receipt(GOLDEN_TAR);
-    let mut root = fixture
-        .admitted("1.0.0")
-        .open_windows_extraction_root()
-        .expect("protected root");
-    let error = root
-        .extract(&receipt, &link)
-        .expect_err("reparse source extracted");
-    expect_extraction(error, false);
-    assert_empty_versions(&fixture.versions());
-}
-
 struct Mapping(windows_sys::Win32::Foundation::HANDLE);
 
 impl Drop for Mapping {
@@ -742,162 +578,6 @@ fn source_mapping(path: &Path, writable: bool) -> Mapping {
     );
     drop(file); // The mapping, not the original file handle, is the negative control.
     Mapping(handle)
-}
-
-#[test]
-fn writable_mapping_blocks_source_admission_but_readonly_mapping_is_valid() {
-    let fixture = Fixture::new();
-    let source = fixture.source(GOLDEN_TAR);
-    let receipt = fixture.receipt(GOLDEN_TAR);
-    let mut root = fixture
-        .admitted("1.0.0")
-        .open_windows_extraction_root()
-        .expect("protected root");
-    let writable = source_mapping(&source, true);
-    let error = root
-        .extract(&receipt, &source)
-        .expect_err("writable mapped source extracted");
-    expect_extraction(error, false);
-    assert_empty_versions(&fixture.versions());
-    drop(writable);
-
-    let readonly = source_mapping(&source, false);
-    let stage = root
-        .extract(&receipt, &source)
-        .expect("readonly mapping is safe");
-    assert_eq!(
-        fs::read(fixture.versions().join(stage.name()).join("content.tar"))
-            .expect("protected content"),
-        GOLDEN_TAR
-    );
-    drop(stage);
-    drop(readonly);
-}
-
-#[test]
-fn retained_source_blocks_writer_after_complete_preflight() {
-    let fixture = Fixture::new();
-    let source = fixture.source(GOLDEN_TAR);
-    let receipt = fixture.receipt(GOLDEN_TAR);
-    let mut root = fixture
-        .admitted("1.0.0")
-        .open_windows_extraction_root()
-        .expect("protected root");
-    let mut observed = false;
-    let stage = root
-        .extract_inner(&receipt, &source, |event, _| {
-            if event == ExtractionEvent::PreCreate {
-                observed = true;
-                assert!(
-                    OpenOptions::new().write(true).open(&source).is_err(),
-                    "retained source must exclude a concurrent writer"
-                );
-            }
-            Ok(())
-        })
-        .expect("source remains valid after denied writer");
-    assert!(observed, "hook ran after complete preflight");
-    assert_eq!(
-        fs::read(fixture.versions().join(stage.name()).join("content.tar"))
-            .expect("protected content"),
-        GOLDEN_TAR
-    );
-}
-
-#[test]
-fn changed_retained_tar_is_rejected_on_readback() {
-    let fixture = Fixture::new();
-    let source = fixture.source(GOLDEN_TAR);
-    let receipt = fixture.receipt(GOLDEN_TAR);
-    let mut root = fixture
-        .admitted("1.0.0")
-        .open_windows_extraction_root()
-        .expect("protected root");
-    let mut stage_name = String::new();
-    let mut tampered = false;
-    let error = root
-        .extract_inner(&receipt, &source, |event, name| {
-            if event == ExtractionEvent::AfterStageCreate {
-                stage_name = name.to_owned();
-            }
-            if event == ExtractionEvent::BeforeReadback && name == "content.tar" {
-                fs::write(
-                    fixture.versions().join(&stage_name).join("content.tar"),
-                    b"changed",
-                )?;
-                tampered = true;
-            }
-            Ok(())
-        })
-        .expect_err("changed retained tar accepted");
-    assert!(tampered, "hook reached content.tar after writer close");
-    assert_eq!(
-        expect_extraction(error, true).as_deref(),
-        Some(stage_name.as_str())
-    );
-    assert_eq!(fs::read(source).expect("source retained"), GOLDEN_TAR);
-    assert!(
-        !fixture
-            .versions()
-            .join(stage_name)
-            .join(".complete")
-            .exists()
-    );
-}
-
-#[test]
-fn same_length_readback_tamper_fails_the_digest_predicate() {
-    let fixture = Fixture::new();
-    let source = fixture.source(GOLDEN_TAR);
-    let receipt = fixture.receipt(GOLDEN_TAR);
-    let mut root = fixture
-        .admitted("1.0.0")
-        .open_windows_extraction_root()
-        .expect("protected root");
-    let mut stage_name = String::new();
-    let mut tampered = false;
-    let error = root
-        .extract_inner(&receipt, &source, |event, name| {
-            if event == ExtractionEvent::AfterStageCreate {
-                stage_name = name.to_owned();
-            }
-            if event == ExtractionEvent::BeforeReadback && name == "content.tar" {
-                let mut changed = GOLDEN_TAR.to_vec();
-                changed[0] ^= 1;
-                fs::write(
-                    fixture.versions().join(&stage_name).join("content.tar"),
-                    &changed,
-                )?;
-                tampered = true;
-            }
-            Ok(())
-        })
-        .expect_err("same-length readback tamper accepted");
-    assert!(tampered, "hook reached content.tar after writer close");
-    assert_eq!(
-        expect_extraction(error, true).as_deref(),
-        Some(stage_name.as_str())
-    );
-    let retained = fixture.versions().join(&stage_name).join("content.tar");
-    assert_eq!(
-        fs::metadata(&retained).expect("same object remains").len(),
-        GOLDEN_TAR.len() as u64
-    );
-    assert_eq!(
-        fs::read(&retained).expect("tampered stage copy")[0],
-        GOLDEN_TAR[0] ^ 1
-    );
-    assert_eq!(
-        fs::read(source).expect("authenticated source intact"),
-        GOLDEN_TAR
-    );
-    assert!(
-        !fixture
-            .versions()
-            .join(stage_name)
-            .join(".complete")
-            .exists()
-    );
 }
 
 #[test]
