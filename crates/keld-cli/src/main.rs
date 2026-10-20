@@ -20,20 +20,12 @@ use keld_core::run_hello_window;
 use keld_ipc::EchoRequest;
 
 fn main() {
-    // Windows native argv may contain unpaired UTF-16 surrogates. Refuse an
-    // unsupported argument before dispatch, rather than letting args() panic
-    // or replacing the invalid text with a lossy command/option spelling.
-    #[cfg(windows)]
-    let args: Vec<String> = env::args_os()
-        .map(|arg| {
-            arg.into_string().unwrap_or_else(|_| {
-                eprintln!("KELD-CLI-044: command arguments must be valid Unicode.");
-                process::exit(2);
-            })
-        })
-        .collect();
-    #[cfg(not(windows))]
-    let args: Vec<String> = env::args().collect();
+    // Native argv may be non-Unicode on every OS. Refuse it before dispatch
+    // rather than letting args() panic or using a lossy command spelling.
+    let args = keld_core::unicode_args(env::args_os()).unwrap_or_else(|error| {
+        eprintln!("{error}");
+        process::exit(2);
+    });
     let verb = args.get(1).map(String::as_str);
 
     let result = match verb {
