@@ -11,6 +11,10 @@ from pathlib import Path
 
 IMPORT = re.compile(r"^[ \t]*use[ \t]+[^;]*;", re.M | re.S)
 RAW = re.compile(r"(?:br|r)(\#*)\"")
+# A char or byte-char literal ('x', '\n', '\x41', '\u{1F600}', '\'', '"'; the `b`
+# prefix is an ordinary code byte). It is recognised only when its closing quote
+# follows, so lifetimes and loop labels ('a, 'outer:) stay in the normal state.
+CHAR = re.compile(r"'(?:\\(?:x[0-9A-Fa-f]{2}|u\{[0-9A-Fa-f_]{1,6}\}|[^xu\n])|[^'\\\n])'")
 
 
 def git(repo, *args):
@@ -20,7 +24,8 @@ def git(repo, *args):
 
 def is_owner_test(path):
     parts = path.split("/")
-    if len(parts) < 5 or parts[:1] != ["crates"] or parts[2] != "src":
+    # crates/<crate>/src/<file>: crate-root tests.rs and <name>_tests.rs included.
+    if len(parts) < 4 or parts[0] != "crates" or parts[2] != "src":
         return False
     name = parts[-1]
     return name.endswith(".rs") and (name == "tests.rs" or name.endswith("_tests.rs")
@@ -43,6 +48,11 @@ def active_glob_lines(content):
                 code.extend(" " * len(raw.group()))
                 i = raw.end()
                 state = "raw"
+                continue
+            char = CHAR.match(content, i)
+            if char:
+                code.extend(" " * len(char.group()))
+                i = char.end()
                 continue
             if content.startswith("//", i):
                 code.extend("  ")
@@ -72,7 +82,10 @@ def active_glob_lines(content):
                 i += 1
         elif state == "string":
             if ch == "\\" and i + 1 < len(content):
-                code.extend("  ")
+                # Keep the newline of a `\`-newline line continuation so masked
+                # text and source keep identical line numbers.
+                code.append(" ")
+                code.append("\n" if content[i + 1] == "\n" else " ")
                 i += 2
             elif ch == '"':
                 code.append(" ")
