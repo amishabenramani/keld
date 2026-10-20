@@ -52,6 +52,12 @@ impl Options {
     }
 }
 
+/// Cooperative heuristic, not a complete active-build proof: it matches the
+/// exact executable names of the Cargo, rustc, C/C++ compiler and linker
+/// drivers a Keld build spawns. Hash-suffixed build scripts, wrapper names,
+/// target-prefixed cross tools and Linux `comm` values truncated to 15 bytes
+/// are not recognized, so a clean census lowers but never removes the risk
+/// of deleting a target that is being written.
 fn active_build_name(name: &str) -> bool {
     let name = name
         .trim()
@@ -62,18 +68,37 @@ fn active_build_name(name: &str) -> bool {
     let name = name.strip_suffix(".exe").unwrap_or(&name);
     matches!(
         name,
+        // Cargo and Rust drivers.
         "cargo"
+            | "cargo-clippy"
             | "cargo-nextest"
             | "rustc"
             | "rustdoc"
             | "nextest"
             | "clippy-driver"
+            // C and C++ compiler drivers.
+            | "cc"
+            | "c++"
             | "clang"
+            | "clang++"
+            | "clang-cl"
             | "gcc"
+            | "g++"
             | "cc1"
             | "cc1plus"
+            | "cl"
+            // Linkers, including rustc's bundled LLD flavors.
             | "ld"
+            | "ld.bfd"
+            | "ld.gold"
+            | "ld.lld"
+            | "ld64"
+            | "ld64.lld"
             | "lld"
+            | "lld-link"
+            | "rust-lld"
+            | "mold"
+            | "collect2"
             | "link"
             | "ninja"
     )
@@ -463,6 +488,9 @@ fn run_with_guard(
         .iter()
         .try_fold(0u64, |sum, item| sum.checked_add(item.bytes))
         .ok_or("cache size sum overflow")?;
+    // The read-only process census runs before any eligibility report, so a
+    // dry run refuses exactly when the matching --yes run would refuse.
+    build_guard()?;
     println!(
         "Eligible targets: {} in {} worktrees; {bytes} logical bytes",
         targets.len(),
@@ -478,7 +506,6 @@ fn run_with_guard(
     if !options.yes {
         return Err("no files deleted; supply --yes or use --dry-run".into());
     }
-    build_guard()?;
     let mut removed = 0usize;
     for target in &targets {
         build_guard()?;
