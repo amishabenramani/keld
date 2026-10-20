@@ -29,6 +29,9 @@ const BOUND: Duration = Duration::from_secs(5);
 #[path = "tests/native_activity.rs"]
 mod native_activity;
 
+#[path = "tests/real_eperm_eof.rs"]
+mod real_eperm_eof;
+
 #[test]
 fn native_role() {
     let Ok(role) = std::env::var(ROLE) else {

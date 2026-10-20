@@ -203,6 +203,72 @@ pub(super) fn observe_group_identity(group_pid: u32) -> Result<GroupIdentity, Ru
     })
 }
 
+// One-shot test receipt after the genuine birth check but before the native
+// group signal. It forces the real OS race without substituting a PID, syscall,
+// return value or clock. Shipping binaries cannot install or execute this hook.
+#[cfg(test)]
+thread_local! {
+    static ATTESTED_SIGNAL_FENCE: RefCell<Option<AttestedSignalFence>> = const { RefCell::new(None) };
+}
+
+#[cfg(test)]
+struct AttestedSignalFence {
+    original: GroupIdentity,
+    observed: mpsc::SyncSender<()>,
+    release: mpsc::Receiver<()>,
+}
+
+#[cfg(test)]
+pub(super) struct TestAttestedSignalFence;
+
+#[cfg(test)]
+impl Drop for TestAttestedSignalFence {
+    fn drop(&mut self) {
+        ATTESTED_SIGNAL_FENCE.with(|slot| slot.borrow_mut().take());
+    }
+}
+
+#[cfg(test)]
+pub(super) fn install_test_attested_signal_fence(
+    original: GroupIdentity,
+    observed: mpsc::SyncSender<()>,
+    release: mpsc::Receiver<()>,
+) -> TestAttestedSignalFence {
+    ATTESTED_SIGNAL_FENCE.with(|slot| {
+        let mut slot = slot.borrow_mut();
+        assert!(
+            slot.is_none(),
+            "one original-group signal observer per thread"
+        );
+        *slot = Some(AttestedSignalFence {
+            original,
+            observed,
+            release,
+        });
+    });
+    TestAttestedSignalFence
+}
+
+#[cfg(test)]
+fn observe_test_attested_signal_phase(original: GroupIdentity) {
+    ATTESTED_SIGNAL_FENCE.with(|slot| {
+        if let Some(fence) = slot.borrow_mut().take() {
+            assert!(
+                fence.original == original,
+                "test signal observation must match the verified native birth"
+            );
+            fence
+                .observed
+                .send(())
+                .expect("original group birth checked");
+            fence
+                .release
+                .recv_timeout(GUARDIAN_SHUTDOWN_DEADLINE)
+                .expect("release authentic native group signal");
+        }
+    });
+}
+
 /// A private authenticated KGR1/KGC1 PID cannot substitute another process:
 /// require the exact Guardian's live direct child before retaining authority.
 pub(super) fn validate_guardian_child_group(
@@ -235,7 +301,11 @@ pub(super) fn validate_guardian_child_group(
 /// empty/recycled group between inspections remains a documented race.
 pub(super) fn terminate_attested_group(group: GroupIdentity) -> Result<(), RuntimeError> {
     match observe_group_identity(group.pid) {
-        Ok(current) if current == group => terminate_registered_group(group.pid),
+        Ok(current) if current == group => {
+            #[cfg(test)]
+            observe_test_attested_signal_phase(group);
+            terminate_registered_group(group.pid)
+        }
         Ok(_) => Err(lifecycle_error(
             "macOS guardian registered group identity changed",
             io::Error::new(
