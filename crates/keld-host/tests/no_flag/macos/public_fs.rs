@@ -312,10 +312,12 @@ fn public_launch_witness_private_data_never_reaches_stderr() {
         "one exact child selector must execute"
     );
     let stderr = std::str::from_utf8(&output.stderr).expect("child witness stderr");
-    assert_eq!(
-        stderr.trim(),
-        SAFE_LINE,
-        "only the fixed pre-Quit stage and safe counts may be logged"
+    // Comparing captured stderr with assert_eq! would expose the private
+    // sentinel and OS identifiers when this leak regression deliberately REDs.
+    // Keep the failure message fixed and never format the actual payload.
+    assert!(
+        stderr.trim() == SAFE_LINE,
+        "native privacy witness emitted a nonconforming stderr record"
     );
     for private in [
         "324987652",
