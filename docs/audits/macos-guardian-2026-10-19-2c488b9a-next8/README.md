@@ -2,7 +2,7 @@
 
 **Historical, source-reviewed-LIMITED evidence only. No shipping code change, native test rerun, process/OS-custody certification, product security acceptance, independent exact-head review, or merge permission.**
 
-This second eight-file source batch is stacked **directly on DRAFT #981** at immutable Git commit `2c488b9a4a9a31617af7806e317701ef6ac6a0cb`. The original historical snapshot is **#949** `899e287ea487f38ec1cd347f7c9db8f1927348ef`, and the source tip is **#952** `77b1c5aef9202a6cc0d84195fc1f4c32e1eb1cba`. Each of the eight new paths is unchanged between these historical revisions. All six #981 parent source documents and all its original 77 ledger columns remain immutable.
+This second eight-file source batch is stacked **directly on DRAFT #981** at immutable Git commit `ca0e62cc0af8c972e83b1548d88f79c2e1af98be`. The original historical snapshot is **#949** `899e287ea487f38ec1cd347f7c9db8f1927348ef`, and the source tip is **#952** `77b1c5aef9202a6cc0d84195fc1f4c32e1eb1cba`. Each of the eight new paths is unchanged between these historical revisions. All six #981 parent source documents and all its original 77 ledger columns remain immutable.
 
 ## Records and scope
 
