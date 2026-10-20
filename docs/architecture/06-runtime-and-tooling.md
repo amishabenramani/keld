@@ -363,7 +363,7 @@ crash-loop budget or restart. Non-zero and signal terminations still follow
 `RestartPolicy`, so one crash or crashes spaced beyond the window do not by themselves
 mean no app is running. Every unrequested termination remains durable even when the
 breaker does not trip. Under a strict post-ready liveness policy, an unrecovered
-termination under a clean `Stopped` outcome surfaces `KELD-RUNTIME-012`; completed
+termination under a `Stopped` outcome (no restart-policy error) surfaces `KELD-RUNTIME-012`; completed
 windowless work accepts status-zero termination after its reply is captured. The host
 reads both decisions from ledger state it never has to drain.
 
@@ -394,7 +394,11 @@ was `002` or `012` by timing alone (GH-674). The session therefore provisions no
 successor after its one admission. The supervisor's one successor gate
 (`Supervisor::start_with_stdout_markers_and_successor_gate`, at its existing
 post-revocation boundary) stops supervision at the recorded crash, and the ledger
-decides the verdict.
+decides the verdict. That stop is reported as `SupervisorEvent::Stopped` and
+`SupervisorOutcome::Stopped`, the same value an exit-zero child or a requested
+shutdown produces, so `Stopped` is not a clean-exit claim: it covers a zero exit, a
+requested shutdown and a gate refusal after a recorded crash, and every caller reads
+`Supervisor::crash_ledger` before treating it as clean.
 
 A crash the supervisor *recovered* from before the app reported ready stays a
 success (KEL-70 AC1/AC3). Separating the two cases cannot be done by counting

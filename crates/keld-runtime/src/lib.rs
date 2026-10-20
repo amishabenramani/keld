@@ -513,8 +513,13 @@ pub enum SupervisorEvent {
     },
     /// The crash-loop breaker tripped; supervision has stopped permanently.
     CrashLoopTripped,
-    /// The child exited zero (or `shutdown()` was called); supervision has
-    /// stopped and will not restart.
+    /// Supervision has stopped and will not restart. This is not proof that
+    /// the child ended cleanly: it is sent when the child exited zero, when
+    /// `shutdown()` was called, or when a successor gate refused a crash
+    /// successor (see [`Supervisor::start_with_stdout_markers_and_successor_gate`]).
+    /// A gate refusal follows a non-zero or signal termination the supervisor
+    /// has already recorded, so a caller must read [`Supervisor::crash_ledger`]
+    /// before it treats any `Stopped` as a clean stop.
     Stopped,
 }
 
@@ -582,10 +587,12 @@ pub struct CrashLedger {
 /// Terminal outcome of [`Supervisor::wait_for_outcome`].
 #[derive(Debug)]
 pub enum SupervisorOutcome {
-    /// The child exited zero or the host requested shutdown; supervision ended
-    /// without a restart-policy error. A generation may still have terminated
-    /// itself — read [`Supervisor::crash_ledger`] for that fact
-    /// (KEL-105/KEL-116).
+    /// The child exited zero, the host requested shutdown, or a successor gate
+    /// refused a crash successor; supervision ended without a restart-policy
+    /// error. A gate refusal follows a crash the supervisor has already
+    /// recorded, and any other stop can still follow a generation that
+    /// terminated itself, so a caller must read [`Supervisor::crash_ledger`]
+    /// before it treats `Stopped` as a clean exit (KEL-105/KEL-116, GH-674).
     Stopped,
     /// The crash-loop breaker tripped.
     CrashLoop(RuntimeError),

@@ -277,8 +277,9 @@ payload:= postcard-encoded schema type (structured) | raw bytes (flags.RAW)
   therefore provisions no crash successor once its one admission is used
   (GH-674): `HostOwnedHelloSession` gates the supervisor's successor boundary on
   the echo server's single accept, so a crash before authentication still
-  restarts (KEL-70 AC1/AC3) and a crash after it ends supervision with the crash
-  in the ledger. Before GH-674 those successors were restarted, failed to
+  restarts (KEL-70 AC1/AC3) and a crash after it ends supervision as
+  `SupervisorOutcome::Stopped` with the crash in the ledger, so a host never
+  reads that `Stopped` as a clean exit without `Supervisor::crash_ledger`. Before GH-674 those successors were restarted, failed to
   connect, and tripped the crash-loop breaker whenever teardown came late.
   `keld dev` does not paper over the death. It reports it
   rather than pretending the app is alive: teardown reads the supervisor's
