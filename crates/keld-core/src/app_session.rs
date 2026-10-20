@@ -4376,9 +4376,12 @@ fn await_bound_generation(
             // the first generation exists the Guardian refuses Q; orderly S
             // is acknowledged at every startup stage and denies recovery
             // under the lock that orders it against initial PREPARE.
-            guardian
-                .shutdown()
-                .map_err(|source| app_guardian_fatal("accepted startup cancellation", &source))?;
+            guardian.shutdown().map_err(|source| {
+                app_guardian_fatal(
+                    "orderly shutdown after dev lease loss before Bound",
+                    &source,
+                )
+            })?;
             return Ok(None);
         }
         let now = Instant::now();
