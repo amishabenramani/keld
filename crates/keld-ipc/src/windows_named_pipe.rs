@@ -88,6 +88,11 @@ const _: () = assert!(
 #[cfg(test)]
 thread_local! {
     static CONNECT_BUSY_WITNESS: RefCell<Option<mpsc::Sender<()>>> = const { RefCell::new(None) };
+    /// Test-only pause on this thread after a stream `ReadFile`/`WriteFile`
+    /// returned `ERROR_IO_PENDING` and `io_issue` was released, before the
+    /// completion wait. A terminal close can then run to completion while the
+    /// pending operation still uses its raw HANDLE.
+    static AFTER_PENDING_IO_ISSUE: Mutex<Option<TestConsumeGate>> = const { Mutex::new(None) };
 }
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
@@ -1298,6 +1303,8 @@ fn overlapped_io(
     if error.raw_os_error() != Some(ERROR_IO_PENDING.cast_signed()) {
         return Err(error);
     }
+    #[cfg(test)]
+    AFTER_PENDING_IO_ISSUE.with(wait_at_test_consume_gate);
     let wait_ms = duration_to_wait_ms(timeout);
     // SAFETY: event remains live and belongs to the live OVERLAPPED above.
     match unsafe { WaitForSingleObject(event.raw(), wait_ms) } {
@@ -2112,6 +2119,129 @@ mod cancellation_tests {
             process_handle_count().expect("final native handle count"),
             baseline,
             "terminal close and a racing read must not leak any pipe/event handle"
+        );
+    }
+
+    /// Native failure-first (GH-910): once `ReadFile` is pending and `io_issue`
+    /// is released, a terminal close runs to completion, yet the exact raw
+    /// HANDLE the pending read still passes to `GetOverlappedResult` and
+    /// `CancelIoEx` must stay valid until that read observes its completion.
+    /// Removing the read-side `Arc` pin makes the close free the HANDLE here.
+    #[test]
+    fn terminal_close_after_pending_read_issue_keeps_the_read_handle_valid() {
+        use std::io::Read as _;
+        use std::os::windows::io::AsRawHandle as _;
+        use std::sync::{PoisonError, mpsc};
+        use std::thread;
+
+        use crate::bootstrap::{TestConsumeGate, random_test_locator};
+        use windows_sys::Win32::Foundation::GetHandleInformation;
+
+        use super::{
+            AFTER_PENDING_IO_ISSUE, WaitOutcome, WindowsNamedPipeServer, process_handle_count,
+        };
+
+        // Warm the native bind/accept/close path before counting handles.
+        let warm_endpoint = format!(
+            r"\\.\pipe\keld-gh910-pending-warm-{}",
+            random_test_locator().expect("fresh native warmup pipe")
+        );
+        let warm_server = WindowsNamedPipeServer::bind(&warm_endpoint).expect("warm native server");
+        let warm_client =
+            WindowsNamedPipeServer::connect_client(&warm_endpoint).expect("warm native client");
+        assert_eq!(
+            warm_server
+                .accept_until(Some(Instant::now() + Duration::from_secs(3)))
+                .expect("warm native accept"),
+            WaitOutcome::Ready
+        );
+        warm_server.close_terminal().expect("warm terminal close");
+        drop(warm_client);
+        drop(warm_server);
+
+        let baseline = process_handle_count().expect("warmed-up kernel handle count");
+        let endpoint = format!(
+            r"\\.\pipe\keld-gh910-pending-{}",
+            random_test_locator().expect("fresh native pipe identity")
+        );
+        let server = WindowsNamedPipeServer::bind(&endpoint).expect("bind named pipe");
+        let client = WindowsNamedPipeServer::connect_client(&endpoint).expect("silent peer");
+        assert_eq!(
+            server
+                .accept_until(Some(Instant::now() + Duration::from_secs(3)))
+                .expect("real server accepted silent client"),
+            WaitOutcome::Ready
+        );
+        let mut stream = server.stream().expect("live server stream");
+        // Kill switch only: the terminal close cancels the read long before.
+        stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .expect("bounded native read");
+
+        let (entered, entered_rx) = mpsc::sync_channel(1);
+        let (release_tx, release) = mpsc::channel();
+        let (read_tx, read_rx) = mpsc::sync_channel(1);
+        let reader = thread::spawn(move || {
+            AFTER_PENDING_IO_ISSUE.with(|gate| {
+                *gate.lock().unwrap_or_else(PoisonError::into_inner) =
+                    Some(TestConsumeGate { entered, release });
+            });
+            let mut byte = [0_u8; 1];
+            read_tx
+                .send(stream.read(&mut byte))
+                .expect("send native read observation");
+        });
+        entered_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("the silent peer's ReadFile is pending with io_issue released");
+
+        let raw = server
+            .inspect_owned_pipe(|owned| Ok(owned.as_raw_handle()))
+            .expect("native handle identity before terminal close");
+        let mut flags = 0_u32;
+        // SAFETY: the server still owns this pipe HANDLE; flags is writable.
+        let valid_before = unsafe { GetHandleInformation(raw.cast(), &raw mut flags) } != 0;
+
+        // io_issue is free, so the terminal close is not held behind the read:
+        // it cancels the pending I/O and drops the server's HANDLE reference
+        // while the read has not yet observed its completion.
+        let terminal = server.close_terminal();
+        let server_released = server
+            .inspect_owned_pipe(|owned| Ok(owned.as_raw_handle()))
+            .is_err();
+        // SAFETY: GetHandleInformation only queries the exact captured HANDLE
+        // value; a freed value fails with ERROR_INVALID_HANDLE.
+        let valid_while_pending = unsafe { GetHandleInformation(raw.cast(), &raw mut flags) } != 0;
+
+        release_tx
+            .send(())
+            .expect("release the pending reader after the close completed");
+        let observation = read_rx
+            .recv_timeout(Duration::from_secs(3))
+            .expect("native read has a finite terminal outcome");
+        reader.join().expect("native reader joined");
+        drop(client);
+        drop(server);
+
+        terminal.expect("terminal close completes while the read is pending");
+        assert!(valid_before, "original named pipe HANDLE was never live");
+        assert!(
+            server_released,
+            "terminal close must drop the server's own HANDLE reference"
+        );
+        assert!(
+            valid_while_pending,
+            "terminal close freed the HANDLE a pending ReadFile still uses"
+        );
+        match observation {
+            Ok(0) => {}
+            Err(error) if matches!(error.raw_os_error(), Some(995 | 109 | 232 | 233)) => {}
+            other => panic!("pending read used a disposed/wrong HANDLE: {other:?}"),
+        }
+        assert_eq!(
+            process_handle_count().expect("final native handle count"),
+            baseline,
+            "terminal close and a pending read must not leak any pipe/event handle"
         );
     }
 
