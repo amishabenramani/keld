@@ -22,9 +22,7 @@
 use std::io;
 use std::io::{Read as _, Write as _};
 use std::mem::ManuallyDrop;
-use std::os::windows::ffi::OsStringExt as _;
 use std::os::windows::io::{AsRawHandle as _, FromRawHandle as _, OwnedHandle};
-use std::path::PathBuf;
 use std::process::Child;
 use std::time::{Duration, Instant};
 
@@ -36,9 +34,9 @@ use keld_ipc::{
 use crate::windows_lpac::{WindowsLpacError, WindowsSuspendedChild, nul_terminated_wide};
 
 use windows_sys::Win32::Foundation::{
-    CompareObjectHandles, DUPLICATE_SAME_ACCESS, DuplicateHandle, ERROR_INVALID_PARAMETER,
-    ERROR_MORE_DATA, ERROR_NOT_SAME_OBJECT, FILETIME, GetHandleInformation, HANDLE,
-    HANDLE_FLAG_INHERIT, INVALID_HANDLE_VALUE, SetHandleInformation, WAIT_OBJECT_0, WAIT_TIMEOUT,
+    DUPLICATE_SAME_ACCESS, DuplicateHandle, ERROR_INVALID_PARAMETER, FILETIME,
+    GetHandleInformation, HANDLE, HANDLE_FLAG_INHERIT, INVALID_HANDLE_VALUE, SetHandleInformation,
+    WAIT_OBJECT_0, WAIT_TIMEOUT,
 };
 #[cfg(test)]
 use windows_sys::Win32::Foundation::{ERROR_CANCELLED, S_FALSE, S_OK};
@@ -55,18 +53,16 @@ use windows_sys::Win32::System::JobObjects::{
     AssignProcessToJobObject, CreateJobObjectW, IsProcessInJob, JOB_OBJECT_LIMIT_BREAKAWAY_OK,
     JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE, JOB_OBJECT_LIMIT_SILENT_BREAKAWAY_OK,
     JOBOBJECT_ASSOCIATE_COMPLETION_PORT, JOBOBJECT_BASIC_ACCOUNTING_INFORMATION,
-    JOBOBJECT_BASIC_PROCESS_ID_LIST, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
-    JobObjectAssociateCompletionPortInformation, JobObjectBasicAccountingInformation,
-    JobObjectBasicProcessIdList, JobObjectExtendedLimitInformation, QueryInformationJobObject,
-    SetInformationJobObject, TerminateJobObject,
+    JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JobObjectAssociateCompletionPortInformation,
+    JobObjectBasicAccountingInformation, JobObjectExtendedLimitInformation,
+    QueryInformationJobObject, SetInformationJobObject, TerminateJobObject,
 };
 use windows_sys::Win32::System::Pipes::PeekNamedPipe;
 use windows_sys::Win32::System::SystemServices::{JOB_OBJECT_QUERY, JOB_OBJECT_TERMINATE};
 use windows_sys::Win32::System::Threading::{
     CreateWaitableTimerW, GetCurrentProcess, GetProcessId, GetProcessTimes, OpenProcess,
     OpenProcessToken, PROCESS_DUP_HANDLE, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SYNCHRONIZE,
-    PROCESS_TERMINATE, QueryFullProcessImageNameW, SetWaitableTimer, TerminateProcess,
-    WaitForSingleObject,
+    PROCESS_TERMINATE, SetWaitableTimer, TerminateProcess, WaitForSingleObject,
 };
 
 const HOST_START_TOKEN_V1: &[u8; 10] = b"KELDHOST/1";
@@ -856,233 +852,8 @@ impl WindowsLifecycleRetirementPending {
     }
 }
 
-/// Retained process-object identity observed from a connected Windows pipe peer.
-///
-/// The retained handle prevents PID reuse from changing this observation. The
-/// caller still compares `image_path` against a trusted installed-image digest;
-/// a PID or pipe DACL alone is not executable authentication.
-#[derive(Debug)]
-pub struct WindowsProcessPeer {
-    process: OwnedHandle,
-    process_id: u32,
-    session_id: u32,
-    token_facts: keld_ipc::WindowsPeerTokenFacts,
-    creation_time: u64,
-    image_path: PathBuf,
-}
-
-impl WindowsProcessPeer {
-    /// Opens and pins the exact PID and session reported by the connected pipe.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the process exits before observation, its PID/session
-    /// differs from the pipe report, or its image/creation time cannot be read.
-    pub fn open(process_id: u32, pipe_session_id: u32) -> Result<Self, WindowsHostJobError> {
-        // SAFETY: the PID came from the OS pipe endpoint query; only identity
-        // query and synchronization rights are requested.
-        let raw_process = unsafe {
-            OpenProcess(
-                PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_SYNCHRONIZE,
-                0,
-                process_id,
-            )
-        };
-        if raw_process.is_null() {
-            return Err(WindowsHostJobError::new("keeper peer process open"));
-        }
-        // SAFETY: OpenProcess returned one fresh non-null owning process handle.
-        let process = unsafe { OwnedHandle::from_raw_handle(raw_process.cast()) };
-        // SAFETY: the retained process handle is live; GetProcessId is read-only.
-        let observed_id = unsafe { GetProcessId(process.as_raw_handle().cast()) };
-        if observed_id != process_id {
-            return Err(WindowsHostJobError::contract(
-                "keeper peer process identity",
-                "opened process ID differs from the connected pipe peer ID",
-            ));
-        }
-        let token_facts = process_token_facts(process.as_raw_handle().cast())?;
-        let observed_session = token_facts.session_id;
-        if observed_session != pipe_session_id {
-            return Err(WindowsHostJobError::contract(
-                "keeper peer session identity",
-                "process session differs from the connected pipe session",
-            ));
-        }
-        let mut image = vec![0_u16; 32_768];
-        let mut image_units = u32::try_from(image.len()).map_err(|_| {
-            WindowsHostJobError::contract(
-                "keeper peer image path",
-                "image buffer exceeds the Win32 size bound",
-            )
-        })?;
-        // SAFETY: process is retained, image is writable for image_units UTF-16
-        // code units, and image_units is writable length storage.
-        if unsafe {
-            QueryFullProcessImageNameW(
-                process.as_raw_handle().cast(),
-                0,
-                image.as_mut_ptr(),
-                &raw mut image_units,
-            )
-        } == 0
-        {
-            return Err(WindowsHostJobError::new("keeper peer image query"));
-        }
-        let image_units = usize::try_from(image_units).map_err(|_| {
-            WindowsHostJobError::contract(
-                "keeper peer image path",
-                "returned image path length exceeds usize",
-            )
-        })?;
-        if image_units == 0 || image_units > image.len() {
-            return Err(WindowsHostJobError::contract(
-                "keeper peer image path",
-                "returned image path length is invalid",
-            ));
-        }
-        let image_path = PathBuf::from(std::ffi::OsString::from_wide(&image[..image_units]));
-        let creation_time = process_creation_time(
-            process.as_raw_handle().cast(),
-            "keeper peer creation-time query",
-        )?;
-        // A process can exit after the pipe reports its PID. Refuse a stale
-        // process object before returning this connected-peer observation.
-        // The protocol challenge/ack must still bind the live connection.
-        // SAFETY: `process` owns the exact process handle from `OpenProcess`
-        // throughout this zero-time, read-only signal query.
-        match unsafe { WaitForSingleObject(process.as_raw_handle().cast(), 0) } {
-            WAIT_TIMEOUT => {}
-            WAIT_OBJECT_0 => {
-                return Err(WindowsHostJobError::contract(
-                    "keeper peer process state query",
-                    "pipe peer exited before its identity was fully observed",
-                ));
-            }
-            _ => return Err(WindowsHostJobError::new("keeper peer process state query")),
-        }
-        Ok(Self {
-            process,
-            process_id,
-            session_id: observed_session,
-            token_facts,
-            creation_time,
-            image_path,
-        })
-    }
-
-    /// Duplicates this exact retained process-object observation for an independent
-    /// keeper owner; it does not reopen by PID or mint a new peer identity.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if Windows cannot duplicate the retained process handle.
-    pub fn try_clone(&self) -> Result<Self, WindowsHostJobError> {
-        let mut duplicate = std::ptr::null_mut();
-        // SAFETY: `self.process` is an owned live process handle; SAME_ACCESS
-        // creates a second handle to that exact kernel object in this process.
-        if unsafe {
-            DuplicateHandle(
-                GetCurrentProcess(),
-                self.process.as_raw_handle().cast(),
-                GetCurrentProcess(),
-                &raw mut duplicate,
-                0,
-                0,
-                DUPLICATE_SAME_ACCESS,
-            )
-        } == 0
-        {
-            return Err(WindowsHostJobError::new(
-                "keeper peer process pin duplication",
-            ));
-        }
-        // SAFETY: successful DuplicateHandle returned one fresh owning handle.
-        let process = unsafe { OwnedHandle::from_raw_handle(duplicate.cast()) };
-        Ok(Self {
-            process,
-            process_id: self.process_id,
-            session_id: self.session_id,
-            token_facts: self.token_facts.clone(),
-            creation_time: self.creation_time,
-            image_path: self.image_path.clone(),
-        })
-    }
-
-    /// PID reported by the connected pipe and pinned by the process handle.
-    #[must_use]
-    pub const fn process_id(&self) -> u32 {
-        self.process_id
-    }
-
-    /// Session reported by the connected pipe and re-read from the process.
-    #[must_use]
-    pub const fn session_id(&self) -> u32 {
-        self.session_id
-    }
-
-    /// User SID, session and integrity facts queried from this exact process token.
-    #[must_use]
-    pub const fn token_facts(&self) -> &keld_ipc::WindowsPeerTokenFacts {
-        &self.token_facts
-    }
-
-    /// Process creation time in Windows FILETIME units.
-    #[must_use]
-    pub const fn creation_time(&self) -> u64 {
-        self.creation_time
-    }
-
-    /// Full image path reported by Windows for the retained process object.
-    #[must_use]
-    pub fn image_path(&self) -> &std::path::Path {
-        &self.image_path
-    }
-
-    /// Reports whether this exact process object has exited.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if Windows cannot query the retained process handle.
-    pub fn has_exited(&self) -> Result<bool, WindowsHostJobError> {
-        // SAFETY: this owner retains the exact process object during the query.
-        match unsafe { WaitForSingleObject(self.process.as_raw_handle().cast(), 0) } {
-            WAIT_OBJECT_0 => Ok(true),
-            WAIT_TIMEOUT => Ok(false),
-            _ => Err(WindowsHostJobError::new("keeper peer process state query")),
-        }
-    }
-
-    /// Waits on this retained exact process object for a bounded duration.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if Windows cannot wait on the retained process handle.
-    pub fn wait_until_exited(&self, timeout: Duration) -> Result<bool, WindowsHostJobError> {
-        let millis = finite_wait_millis(timeout);
-        // SAFETY: `self.process` is a retained process handle with synchronize
-        // rights; the timeout is finite and never uses INFINITE.
-        match unsafe { WaitForSingleObject(self.process.as_raw_handle().cast(), millis) } {
-            WAIT_OBJECT_0 => Ok(true),
-            WAIT_TIMEOUT => Ok(false),
-            _ => Err(WindowsHostJobError::new("keeper peer process wait")),
-        }
-    }
-}
-
-impl keld_ipc::WindowsLifecyclePeerPin for WindowsProcessPeer {
-    fn process_id(&self) -> u32 {
-        self.process_id
-    }
-
-    fn session_id(&self) -> u32 {
-        self.session_id
-    }
-
-    fn has_exited(&self) -> io::Result<bool> {
-        WindowsProcessPeer::has_exited(self).map_err(|error| io::Error::other(error.to_string()))
-    }
-}
+mod process_peer;
+pub use process_peer::WindowsProcessPeer;
 
 /// One process that an attempt owner launched suspended, retained with the
 /// creation time recorded at launch.
@@ -1419,153 +1190,13 @@ impl std::error::Error for WindowsClaimantRefusal {
     }
 }
 
-/// Process-object identity compared by the claimant binding. The lifetime keeps
-/// the raw handle's owner alive while the observation is in use.
-#[derive(Clone, Copy)]
-struct ProcessObservation<'a> {
-    handle: HANDLE,
-    process_id: u32,
-    creation_time: u64,
-    _owner: std::marker::PhantomData<&'a OwnedHandle>,
-}
-
-impl<'a> ProcessObservation<'a> {
-    fn of_peer(peer: &'a WindowsProcessPeer) -> Self {
-        Self {
-            handle: peer.process.as_raw_handle().cast(),
-            process_id: peer.process_id,
-            creation_time: peer.creation_time,
-            _owner: std::marker::PhantomData,
-        }
-    }
-
-    fn of_launch(launch: &'a WindowsLaunchedProcess) -> Self {
-        Self {
-            handle: launch.child.process_handle().as_raw_handle().cast(),
-            process_id: launch.child.id(),
-            creation_time: launch.creation_time,
-            _owner: std::marker::PhantomData,
-        }
-    }
-}
-
-/// Requires the three acceptance facts in their specified order.
-fn bind_observed_claimant(
-    claimant: ProcessObservation<'_>,
-    launch: ProcessObservation<'_>,
-) -> Result<(), WindowsClaimantRefusal> {
-    match same_kernel_object(claimant.handle, launch.handle) {
-        Ok(true) => {}
-        Ok(false) => return Err(WindowsClaimantRefusal::NotLaunchedProcess),
-        Err(source) => {
-            return Err(WindowsClaimantRefusal::Unverifiable {
-                phase: "claimant process-object comparison",
-                source,
-            });
-        }
-    }
-    // The launch observation borrows its owner, which retains the launch handle
-    // through this query.
-    match process_signaled(launch.handle) {
-        Ok(false) => {}
-        Ok(true) => return Err(WindowsClaimantRefusal::LaunchExited),
-        Err(source) => {
-            return Err(WindowsClaimantRefusal::Unverifiable {
-                phase: "launch handle state query",
-                source,
-            });
-        }
-    }
-    if claimant.process_id != launch.process_id || claimant.creation_time != launch.creation_time {
-        return Err(WindowsClaimantRefusal::LaunchIdentityMismatch);
-    }
-    Ok(())
-}
-
-/// Reports whether a process handle is signaled, with a zero-time wait that
-/// consumes nothing. The caller retains the handle through the call.
-fn process_signaled(process: HANDLE) -> io::Result<bool> {
-    // SAFETY: WaitForSingleObject reads no caller memory and resolves `process`
-    // only through this process's handle table, so no value makes the call
-    // unsound. That the caller retains this handle through the call is a
-    // correctness precondition: a closed value that was reused would name another
-    // object and would not fail.
-    match unsafe { WaitForSingleObject(process, 0) } {
-        WAIT_OBJECT_0 => Ok(true),
-        WAIT_TIMEOUT => Ok(false),
-        _ => Err(io::Error::last_os_error()),
-    }
-}
-
-/// Reports whether one process is a member of one Job hierarchy, by the handles
-/// their owners retain through the call. A null `job` asks whether the process
-/// belongs to any Job.
-fn process_in_job(
-    process: HANDLE,
-    job: HANDLE,
-    phase: &'static str,
-) -> Result<bool, WindowsHostJobError> {
-    let mut in_job = 0;
-    // SAFETY: the callers retain both handles through this synchronous call,
-    // IsProcessInJob resolves them only through this process's handle table, and
-    // `in_job` is writable BOOL storage.
-    if unsafe { IsProcessInJob(process, job, &raw mut in_job) } == 0 {
-        return Err(WindowsHostJobError::new(phase));
-    }
-    Ok(in_job != 0)
-}
-
-/// Reports whether two handles name one kernel object.
-///
-/// `CompareObjectHandles` requires no access right on either handle. Its
-/// reference page documents only the return value: `TRUE` for one object,
-/// otherwise `FALSE`. Its example names `ERROR_NOT_SAME_OBJECT` only for two
-/// objects of different types, an event and a process. That two different
-/// process objects leave `ERROR_NOT_SAME_OBJECT`, and that a null, out-of-range
-/// or closed handle leaves `ERROR_INVALID_HANDLE`, is observed only on Windows 11
-/// build 26300, pinned by
-/// `compare_object_handles_classifies_same_different_and_invalid_handles` and
-/// `compare_object_handles_refuses_a_closed_handle`. So `FALSE` with
-/// `ERROR_NOT_SAME_OBJECT` is the only different-object verdict, and any other
-/// `FALSE` is an error. Every non-`TRUE` result refuses the claimant: the verdict
-/// as [`WindowsClaimantRefusal::NotLaunchedProcess`], an error as
-/// [`WindowsClaimantRefusal::Unverifiable`].
-fn same_kernel_object(first: HANDLE, second: HANDLE) -> io::Result<bool> {
-    // SAFETY: CompareObjectHandles only resolves the two handle values through
-    // this process's handle table and dereferences no caller memory; an unusable
-    // value makes it fail without touching any object.
-    if unsafe { CompareObjectHandles(first, second) } != 0 {
-        return Ok(true);
-    }
-    let error = io::Error::last_os_error();
-    if error.raw_os_error() == Some(ERROR_NOT_SAME_OBJECT.cast_signed()) {
-        return Ok(false);
-    }
-    Err(error)
-}
-
-/// Reads one retained process object's creation time in FILETIME units.
-fn process_creation_time(process: HANDLE, phase: &'static str) -> Result<u64, WindowsHostJobError> {
-    let mut creation = FILETIME::default();
-    let mut exit = FILETIME::default();
-    let mut kernel = FILETIME::default();
-    let mut user = FILETIME::default();
-    // SAFETY: the caller retains the process handle and all four FILETIME outputs
-    // are writable.
-    if unsafe {
-        GetProcessTimes(
-            process,
-            &raw mut creation,
-            &raw mut exit,
-            &raw mut kernel,
-            &raw mut user,
-        )
-    } == 0
-    {
-        return Err(WindowsHostJobError::new(phase));
-    }
-    Ok((u64::from(creation.dwHighDateTime) << 32) | u64::from(creation.dwLowDateTime))
-}
+mod claimant_identity;
+#[cfg(test)]
+use claimant_identity::same_kernel_object;
+use claimant_identity::{
+    ProcessObservation, bind_observed_claimant, process_creation_time, process_in_job,
+    process_signaled,
+};
 
 /// One live process that an attempt Job admits as its direct host, borrowed
 /// from the owner that retains it.
@@ -3042,179 +2673,15 @@ fn query_job_active_processes(raw_job: HANDLE) -> Result<u32, WindowsHostJobErro
     Ok(accounting.ActiveProcesses)
 }
 
-/// Initial capacity, in process IDs, of one Job process-ID snapshot. A host, its
-/// Bun primary, its `WebView2` processes and a candidate family fit; a larger Job
-/// grows the buffer.
-const JOB_PROCESS_ID_LIST_INITIAL_IDS: usize = 32;
-/// IDs added beyond the reported count when a snapshot buffer grows, for members
-/// that join between the report and the next query.
-const JOB_PROCESS_ID_LIST_GROWTH_SLACK: usize = 16;
-/// Bound on buffer growth within one snapshot; a Job whose member count outruns
-/// it that often is refused rather than queried without end.
-const JOB_PROCESS_ID_LIST_GROWTH_LIMIT: u32 = 8;
-
-/// One snapshot of a Job hierarchy's process-ID list.
-#[derive(Debug)]
-struct WindowsJobProcessIdSnapshot {
-    /// Every ID the kernel listed: the members it considers in the Job at the
-    /// instant of the query. Complete on success; an exited member is omitted
-    /// only after its handle is signaled and every thread of it has stopped.
-    ids: Vec<u32>,
-    /// `NumberOfAssignedProcesses` of the same query. It exceeds `ids.len()` for
-    /// one lock release while a member leaves the Job; it is never a buffer
-    /// size.
-    assigned: u32,
-}
-
-impl WindowsJobProcessIdSnapshot {
-    /// Whether the kernel's assigned count and its list agree.
-    ///
-    /// Every census caller MUST require this before it treats a snapshot as clean,
-    /// the Machine-UAC census of S12 included: a disagreement names a membership
-    /// change in flight (KEL-270 finding F54), so the snapshot is retaken under the
-    /// caller's deadline, never refused and never accepted.
-    fn is_settled(&self) -> bool {
-        usize::try_from(self.assigned).is_ok_and(|assigned| assigned == self.ids.len())
-    }
-}
-
-/// Words of the process-ID list record that precede the ID array. The record is
-/// two u32 counts followed by the `ULONG_PTR` ID array, so a usize buffer holds
-/// it at the alignment it requires and the IDs start at a whole-word offset.
-const JOB_PROCESS_ID_LIST_HEADER_WORDS: usize =
-    std::mem::offset_of!(JOBOBJECT_BASIC_PROCESS_ID_LIST, ProcessIdList)
-        / std::mem::size_of::<usize>();
-const _: () = assert!(
-    std::mem::offset_of!(JOBOBJECT_BASIC_PROCESS_ID_LIST, ProcessIdList)
-        % std::mem::size_of::<usize>()
-        == 0
-);
-
-/// Lists the IDs of the live processes in one Job hierarchy: the process-ID
-/// lister of KEL-53 §5 (slice S6b3), which the host-death census uses and the
-/// Machine-UAC census of S12 reuses.
-///
-/// The list is a snapshot. A member can exit, and its ID be reused, after the
-/// call returns, so callers bind each ID to a process handle and check that
-/// process's Job membership before acting on it.
-///
-/// The buffer grows and the query is retaken only on the kernel's own "too
-/// small" signal: a query that fails with `ERROR_MORE_DATA` (the header is
-/// written, so the assigned count sizes the next buffer), or one that succeeds
-/// with a full buffer. A successful list shorter than its buffer is complete.
-/// `assigned > ids.len()` names a member whose exit the kernel has not finished
-/// accounting; it is not a truncated list, and a larger buffer cannot change it
-/// (KEL-270 finding F54).
-fn list_job_process_ids(
-    raw_job: HANDLE,
-    phase: &'static str,
-) -> Result<WindowsJobProcessIdSnapshot, WindowsHostJobError> {
-    list_job_process_ids_from(raw_job, JOB_PROCESS_ID_LIST_INITIAL_IDS, phase)
-}
-
-/// [`list_job_process_ids`] from a caller-chosen initial capacity, so the growth
-/// path is reachable with a small Job.
-fn list_job_process_ids_from(
-    raw_job: HANDLE,
-    initial_ids: usize,
-    phase: &'static str,
-) -> Result<WindowsJobProcessIdSnapshot, WindowsHostJobError> {
-    list_job_process_ids_with(initial_ids, phase, |buffer| {
-        query_job_process_id_list(raw_job, buffer)
-    })
-}
-
-/// One `QueryInformationJobObject` of the process-ID list into `buffer`, which
-/// holds the record header and the ID array.
-fn query_job_process_id_list(raw_job: HANDLE, buffer: &mut [usize]) -> io::Result<()> {
-    let bytes = u32::try_from(std::mem::size_of_val(&*buffer)).map_err(|_| {
-        io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "process-ID list buffer exceeds u32",
-        )
-    })?;
-    // SAFETY: the caller retains the live Job handle; `buffer` is writable,
-    // usize-aligned storage of exactly `bytes`, which holds the record header
-    // and the IDs; the API writes within that size and retains no pointer.
-    let queried = unsafe {
-        QueryInformationJobObject(
-            raw_job,
-            JobObjectBasicProcessIdList,
-            buffer.as_mut_ptr().cast(),
-            bytes,
-            std::ptr::null_mut(),
-        )
-    };
-    if queried == 0 {
-        return Err(io::Error::last_os_error());
-    }
-    Ok(())
-}
-
-/// [`list_job_process_ids`] with the query as a parameter. Production passes
-/// [`query_job_process_id_list`]; the tests inject the kernel's outcomes. The
-/// query writes the record into the buffer it is given: `Err(ERROR_MORE_DATA)`
-/// with the header written when the buffer is too small, any other error as the
-/// OS reports it.
-fn list_job_process_ids_with(
-    initial_ids: usize,
-    phase: &'static str,
-    mut query: impl FnMut(&mut [usize]) -> io::Result<()>,
-) -> Result<WindowsJobProcessIdSnapshot, WindowsHostJobError> {
-    let mut capacity = initial_ids.max(1);
-    for _ in 0..JOB_PROCESS_ID_LIST_GROWTH_LIMIT {
-        let mut buffer = vec![0_usize; JOB_PROCESS_ID_LIST_HEADER_WORDS + capacity];
-        let short_buffer = match query(&mut buffer) {
-            Ok(()) => false,
-            Err(source) if source.raw_os_error() == Some(ERROR_MORE_DATA.cast_signed()) => true,
-            Err(source) => return Err(WindowsHostJobError { phase, source }),
-        };
-        // SAFETY: `buffer` starts with at least the record's size in initialized
-        // bytes at the alignment the record requires; the read copies the header
-        // out and keeps no pointer into the buffer.
-        let header = unsafe {
-            buffer
-                .as_ptr()
-                .cast::<JOBOBJECT_BASIC_PROCESS_ID_LIST>()
-                .read()
-        };
-        let assigned = usize::try_from(header.NumberOfAssignedProcesses).map_err(|_| {
-            WindowsHostJobError::contract(phase, "assigned-process count exceeds usize")
-        })?;
-        let listed = usize::try_from(header.NumberOfProcessIdsInList).map_err(|_| {
-            WindowsHostJobError::contract(phase, "listed-process count exceeds usize")
-        })?;
-        if listed > capacity {
-            return Err(WindowsHostJobError::contract(
-                phase,
-                "the Job reported more process IDs than the snapshot buffer holds",
-            ));
-        }
-        if short_buffer || listed == capacity {
-            capacity = assigned
-                .max(capacity.saturating_mul(2))
-                .saturating_add(JOB_PROCESS_ID_LIST_GROWTH_SLACK);
-            continue;
-        }
-        let ids = buffer
-            .iter()
-            .skip(JOB_PROCESS_ID_LIST_HEADER_WORDS)
-            .take(listed)
-            .map(|&id| {
-                u32::try_from(id)
-                    .map_err(|_| WindowsHostJobError::contract(phase, "process ID exceeds u32"))
-            })
-            .collect::<Result<Vec<u32>, _>>()?;
-        return Ok(WindowsJobProcessIdSnapshot {
-            ids,
-            assigned: header.NumberOfAssignedProcesses,
-        });
-    }
-    Err(WindowsHostJobError::contract(
-        phase,
-        "the Job's process list outgrew the snapshot buffer at every retake",
-    ))
-}
+mod process_id_snapshot;
+#[cfg(test)]
+use self::process_id_snapshot::{
+    JOB_PROCESS_ID_LIST_GROWTH_LIMIT, JOB_PROCESS_ID_LIST_HEADER_WORDS,
+    JOB_PROCESS_ID_LIST_INITIAL_IDS,
+};
+use self::process_id_snapshot::{WindowsJobProcessIdSnapshot, list_job_process_ids};
+#[cfg(test)]
+use self::process_id_snapshot::{list_job_process_ids_from, list_job_process_ids_with};
 
 fn open_lifecycle_transfer_target(
     target: &WindowsProcessPeer,
@@ -4056,6 +3523,7 @@ mod tests {
     use std::os::windows::io::AsHandle as _;
     use std::os::windows::process::CommandExt as _;
     use std::path::Path;
+    use std::path::PathBuf;
     use std::process::{Command, Stdio};
     use std::sync::atomic::{AtomicU32, Ordering};
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -5838,178 +5306,7 @@ mod tests {
         assert!(again.to_string().contains("not released"), "{again}");
     }
 
-    #[test]
-    fn the_process_id_lister_grows_from_a_short_buffer_to_the_full_list() {
-        // The Job's members are exactly the occupants: `spawn_blocking_descendant`
-        // creates them with no console, so no console host joins the Job behind
-        // the test's back. Its end is the kernel's own notice: the completion
-        // port is associated while the Job is empty, so the active-process-zero
-        // message cannot be lost, and the empty list is asserted only after Job
-        // accounting read zero, through the crate's `wait_for_active_zero`, with
-        // the deadline as a kill switch. When an exited member leaves the list
-        // relative to its handle's signal is the kernel's ordering, not this
-        // test's, so a list taken straight after `wait` proves nothing.
-        //
-        // What this cell guards (KEL-270 F54): against the real kernel, the lister
-        // returns exactly the Job's members from three initial capacities. A
-        // success truncated at capacity 1 or 2 is not caught here but by the
-        // lister's full-buffer retake
-        // (`the_process_id_lister_retakes_a_success_that_filled_the_buffer`); only
-        // a truncation below capacity would fail this cell. Capacities 1, 2 and 32
-        // take the ERROR_MORE_DATA path twice and the plain path once.
-        let job = WindowsProcessJob::create().expect("create a kill-on-close Job");
-        let raw = job.handle.as_raw_handle().cast();
-        let completion_port = create_job_completion_port(raw)
-            .expect("associate a completion port with the empty Job");
-        let mut occupants: Vec<Child> = (0..3).map(|_| spawn_blocking_descendant()).collect();
-        for occupant in &occupants {
-            // SAFETY: both handles are live; the occupant is a test-owned fixture
-            // assigned to a test-owned Job for the duration of this test.
-            assert_ne!(
-                unsafe { AssignProcessToJobObject(raw, occupant.as_raw_handle().cast()) },
-                0,
-                "assign an occupant: {}",
-                io::Error::last_os_error()
-            );
-        }
-        let mut expected: Vec<u32> = occupants.iter().map(Child::id).collect();
-        expected.sort_unstable();
-        for initial in [1, 2, JOB_PROCESS_ID_LIST_INITIAL_IDS] {
-            let mut listed = list_job_process_ids_from(raw, initial, "test list")
-                .expect("list the Job")
-                .ids;
-            listed.sort_unstable();
-            assert_eq!(listed, expected, "initial capacity {initial}");
-        }
-        for occupant in &mut occupants {
-            occupant.kill().expect("end an occupant");
-            occupant.wait().expect("reap an occupant");
-        }
-        job.wait_for_active_zero(&completion_port, Instant::now() + RELEASE_WAIT)
-            .expect("the Job reaches zero active processes once its occupants exited");
-        assert_eq!(
-            list_job_process_ids(raw, "test list")
-                .expect("list the empty Job")
-                .ids,
-            Vec::<u32>::new(),
-            "a Job at zero active processes lists no process"
-        );
-    }
-
-    /// Writes one process-ID list record into a lister buffer, as the kernel
-    /// does: the two counts, then `ids` from the first array slot. `listed` is
-    /// `ids.len()`; `assigned` is whatever the case reports.
-    fn write_process_id_record(buffer: &mut [usize], assigned: u32, ids: &[u32]) {
-        assert!(
-            buffer.len() > JOB_PROCESS_ID_LIST_HEADER_WORDS + ids.len().saturating_sub(1),
-            "the lister's buffer must hold the header and the IDs"
-        );
-        let listed = u32::try_from(ids.len()).expect("a small ID count");
-        let record = buffer
-            .as_mut_ptr()
-            .cast::<JOBOBJECT_BASIC_PROCESS_ID_LIST>();
-        // SAFETY: `buffer` is usize-aligned, writable storage holding at least the
-        // record header (asserted above); the two writes stay inside it and keep
-        // no pointer.
-        unsafe {
-            (&raw mut (*record).NumberOfAssignedProcesses).write(assigned);
-            (&raw mut (*record).NumberOfProcessIdsInList).write(listed);
-        }
-        for (slot, id) in buffer
-            .iter_mut()
-            .skip(JOB_PROCESS_ID_LIST_HEADER_WORDS)
-            .zip(ids)
-        {
-            *slot = usize::try_from(*id).expect("a u32 ID fits usize");
-        }
-    }
-
-    #[test]
-    fn a_member_leaving_the_job_does_not_exhaust_the_snapshot_retakes() {
-        // KEL-270 F54: while a member leaves the Job the kernel reports one more
-        // assigned process than it lists, with success and room to spare. That
-        // state is not a short buffer, and no larger buffer changes it, so the
-        // lister returns what it listed at once instead of retaking until its
-        // growth limit refuses a healthy release. The injected query freezes the
-        // window that a descheduled exiting thread holds open on the real kernel.
-        let mut calls = 0_u32;
-        let snapshot = list_job_process_ids_with(32, "test list", |buffer| {
-            calls += 1;
-            write_process_id_record(buffer, 4, &[10, 11, 12]);
-            Ok(())
-        })
-        .expect("a member in transition must not refuse the snapshot");
-        assert_eq!(calls, 1, "a complete list is not retaken");
-        assert_eq!(snapshot.ids, [10, 11, 12]);
-        assert_eq!(snapshot.assigned, 4);
-    }
-
-    #[test]
-    fn the_process_id_lister_grows_on_error_more_data_and_reads_the_full_list() {
-        // Control for the F54 fix: a too-small buffer is the kernel's
-        // ERROR_MORE_DATA with the header written, and `assigned` sizes the retake.
-        let wanted: Vec<u32> = (100..140).collect();
-        let mut capacities = Vec::new();
-        let snapshot = list_job_process_ids_with(4, "test list", |buffer| {
-            let capacity = buffer.len() - JOB_PROCESS_ID_LIST_HEADER_WORDS;
-            capacities.push(capacity);
-            if capacity < wanted.len() {
-                write_process_id_record(buffer, 40, &wanted[..capacity]);
-                return Err(io::Error::from_raw_os_error(ERROR_MORE_DATA.cast_signed()));
-            }
-            write_process_id_record(buffer, 40, &wanted);
-            Ok(())
-        })
-        .expect("the list grows to fit");
-        assert_eq!(capacities.len(), 2, "{capacities:?}");
-        assert_eq!(capacities[0], 4);
-        assert!(capacities[1] >= 40, "{capacities:?}");
-        assert_eq!(snapshot.ids, wanted);
-        assert_eq!(snapshot.assigned, 40);
-    }
-
-    #[test]
-    fn the_process_id_lister_growth_limit_still_bounds_genuine_growth() {
-        // Control for the F54 fix: a Job that outruns every buffer is refused after
-        // the growth limit, not queried without end.
-        let mut calls = 0_u32;
-        let refusal = list_job_process_ids_with(4, "test list", |buffer| {
-            calls += 1;
-            let capacity = buffer.len() - JOB_PROCESS_ID_LIST_HEADER_WORDS;
-            let ids = vec![7_u32; capacity];
-            write_process_id_record(
-                buffer,
-                u32::try_from(capacity + 1).expect("a small count"),
-                &ids,
-            );
-            Err(io::Error::from_raw_os_error(ERROR_MORE_DATA.cast_signed()))
-        })
-        .expect_err("a Job that outgrows every buffer must be refused");
-        assert_eq!(calls, JOB_PROCESS_ID_LIST_GROWTH_LIMIT);
-        assert!(refusal.to_string().contains("outgrew"), "{refusal}");
-    }
-
-    #[test]
-    fn the_process_id_lister_retakes_a_success_that_filled_the_buffer() {
-        // The lister's defensive rule: a success whose list fills the buffer is
-        // retaken with a larger one, because the kernel could not then have shown
-        // whether the list was cut. The second query is the one that settles it.
-        let wanted: Vec<u32> = (200..204).collect();
-        let mut capacities = Vec::new();
-        let snapshot = list_job_process_ids_with(4, "test list", |buffer| {
-            let capacity = buffer.len() - JOB_PROCESS_ID_LIST_HEADER_WORDS;
-            capacities.push(capacity);
-            let listed = capacity.min(wanted.len());
-            write_process_id_record(buffer, 4, &wanted[..listed]);
-            Ok(())
-        })
-        .expect("the retake settles the list");
-        assert_eq!(capacities.len(), 2, "{capacities:?}");
-        assert_eq!(capacities[0], 4);
-        assert!(capacities[1] > 4, "{capacities:?}");
-        assert_eq!(snapshot.ids, wanted);
-        assert_eq!(snapshot.assigned, 4);
-    }
+    mod process_id_list;
 
     /// Two plain Jobs, `outer` standing for the host-death Job and `inner` for the
     /// released attempt Job nested under it, and two occupants assigned to `outer`
