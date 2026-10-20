@@ -6,7 +6,7 @@ historical path is not a certification of the current implementation or every OS
 race.
 
 This docs-only child builds directly on draft **#990** at immutable parent
-`869335285b6fbbe2d2278e8a018e0ea83ff95e7f`. All source receipts reference
+`d11030d709667f6a28c07fe0f1a8b4db54531a82`. All source receipts reference
 the historical **#949** revision
 `899e287ea487f38ec1cd347f7c9db8f1927348ef` and **#952** revision
 `77b1c5aef9202a6cc0d84195fc1f4c32e1eb1cba`. The 19 selected files
