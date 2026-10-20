@@ -374,7 +374,7 @@
         "packages/*",
         "justfile"
       ],
-      "sha256": "8cc413ffa72563b6289ed115e265aaeb320061ae60e342985014cb915661ab42"
+      "sha256": "702b6d1a2219774c6979ecf04efaed706a07def497938f8dc702ab019ef69816"
     },
     "policy-readers": {
       "patterns": [
@@ -384,14 +384,14 @@
         ".githooks/*",
         "rust-toolchain.toml"
       ],
-      "sha256": "bbaa210cddcea5162a985fd536c6023ab4170410746211d5f7096e700eb7311c"
+      "sha256": "b5f770f19815af38f86196a25718fd26e7c7c1188ad0ca8c678b5ee26ba7383e"
     },
     "audit-readers": {
       "patterns": [
         "docs/audits/*.py",
         "justfile"
       ],
-      "sha256": "7f00c1aeb098cb5176c83fc3ae4c2070d2ac32f8059bdee632cb71c4d76b631e"
+      "sha256": "7cf7feaa6a77bb3fad2368cdaddeabb0e13e7cc99d228ee14efa122452576f7d"
     },
     "rustdoc-readers": {
       "patterns": [
@@ -401,13 +401,13 @@
         "rust-toolchain.toml",
         ".cargo/*"
       ],
-      "sha256": "891848f43776a8f65cb05ec9da4d86114c3ae069c66ce2e48b57467b1bb052d6"
+      "sha256": "a8447c359121c559c7cd52c0331fe58a542ea2fc458ce57b075450e7a68af551"
     },
     "dependency-command": {
       "patterns": [
         "justfile"
       ],
-      "sha256": "05684d6c898c75bf3c8e9898fcfad33e50b17a5b70a3335d8cbb8c0d5d9b679b"
+      "sha256": "18945b350135d3adbe194b403a3d9e14456a38b923f054f09751e30dd517a3b6"
     },
     "status-test-readers": {
       "patterns": [
@@ -417,7 +417,7 @@
         "rust-toolchain.toml",
         "justfile"
       ],
-      "sha256": "d5607a76d73ac869abff10834482799d8707275d6e852992b3a4432e53cd9b54"
+      "sha256": "0c690ef5b0a9bde49a735d46d6fc982e3b798a8e6542d78da7af8dacbe2c74f5"
     }
   },
   "live_inputs": {
@@ -430,7 +430,7 @@
     "patterns": [
       "crates/*"
     ],
-    "membership_sha256": "57c6f8b58b80bd0e16fb124e286e0c2645a4abf9cfa848bec5b180d299d39b09",
+    "membership_sha256": "bf150256c341850de3fb635bec7d7b73267a8d97ccbe7ca5c87119244398a6b0",
     "contract": "Broad census binds path membership only: new/removed crate paths fail closed. Existing crate-content edits select Rust through the crates/* input edge. A new cross-tree read in an existing source must register that reader and its input edge in the same change; exact-reader content digests then guard future drift."
   },
   "rust_package_inputs": {
