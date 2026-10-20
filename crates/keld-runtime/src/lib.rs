@@ -515,8 +515,9 @@ pub enum SupervisorEvent {
     CrashLoopTripped,
     /// Supervision has stopped and will not restart. This is not proof that
     /// the child ended cleanly: it is sent when the child exited zero, when
-    /// `shutdown()` was called or a primary role accepted shutdown (Linux and
-    /// Windows), or when a successor gate refused a successor at the
+    /// `shutdown()` was called or the host accepted a primary's shutdown (the
+    /// primary role on Linux and Windows, the Guardian's accepted Quit on
+    /// macOS), or when a successor gate refused a successor at the
     /// post-revocation boundary. Gates include, for example, the closure given
     /// to [`Supervisor::start_with_stdout_markers_and_successor_gate`] and a
     /// primary role's denied recovery ([`primary::PrimaryRecoveryGate::deny`]).
