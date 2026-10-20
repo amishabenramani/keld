@@ -1071,9 +1071,13 @@ impl Supervisor {
         self.events_rx.recv_timeout(timeout).ok()
     }
 
-    /// Blocks until supervision reaches a terminal state: the child exited
-    /// zero, or the crash-loop breaker tripped. There is no internal
-    /// timeout — the crash-loop breaker itself bounds the number of
+    /// Blocks until supervision reaches a terminal state:
+    /// [`SupervisorOutcome::Stopped`] (the child exited zero, the host
+    /// requested shutdown, or a successor gate refused a crash successor
+    /// after the crash was recorded), [`SupervisorOutcome::CrashLoop`], or
+    /// [`SupervisorOutcome::Failed`]. `Stopped` is not proof of a clean exit;
+    /// read [`Self::crash_ledger`] before treating it as one. There is no
+    /// internal timeout — the crash-loop breaker itself bounds the number of
     /// spawn/wait cycles, so this call always terminates.
     #[must_use]
     pub fn wait_for_outcome(&self) -> SupervisorOutcome {
