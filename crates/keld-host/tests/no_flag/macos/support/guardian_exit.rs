@@ -507,4 +507,57 @@ mod tests {
         child.release();
         child.reap_status23();
     }
+
+    /// The kernel's own EINTR (`kevent64` -1), injected inside the real read
+    /// and reached only through `seal_before_quit_release` and `poll`, stays
+    /// unproved. Wiring either back to `try_poll_exit`, or letting
+    /// `try_read_exit` map EINTR to no event, makes these reads empty.
+    #[test]
+    fn kernel_interrupted_witness_read_is_unproved_not_empty() {
+        let mut child = OwnedShell::status23();
+        let mut sealed = GuardianExitWitness::register(child.0.id());
+        let mut fenced = GuardianExitWitness::register_with_body_receipt_fence(child.0.id());
+        let mut direct = ProcessExitObserver::arm(child.0.id());
+        child.assert_live();
+        direct.interrupt_next_read();
+        assert_eq!(
+            direct.try_read_exit().map_err(|error| error.kind()),
+            Err(std::io::ErrorKind::Interrupted),
+            "the native read keeps the kernel's EINTR as an error"
+        );
+        direct.interrupt_next_read();
+        assert_eq!(
+            direct.try_poll_exit().map_err(|error| error.kind()),
+            Ok(None),
+            "retry loops still read EINTR as no event"
+        );
+        sealed
+            .observer
+            .as_mut()
+            .expect("registered live child")
+            .interrupt_next_read();
+        sealed.seal_before_quit_release();
+        assert_eq!(
+            sealed.phase(),
+            GuardianExitPhase::Unproved,
+            "a kernel-interrupted sealing read must not order later exits after Quit"
+        );
+        fenced.seal_before_quit_release();
+        assert_eq!(fenced.phase(), GuardianExitPhase::NotObserved);
+        fenced.note_body_receipt_verified();
+        fenced
+            .observer
+            .as_mut()
+            .expect("registered live child")
+            .interrupt_next_read();
+        child.assert_live();
+        fenced.poll(Instant::now() + PROCESS_DEADLINE);
+        assert_eq!(
+            fenced.phase(),
+            GuardianExitPhase::Unproved,
+            "a kernel-interrupted post-receipt read must not order the fence"
+        );
+        child.release();
+        child.reap_status23();
+    }
 }
