@@ -331,7 +331,10 @@ fn zero_exit_guardian_shutdown_reaps_still_registered_group() {
         terminate_registered_group(group_pid).expect("test fallback signal");
         group.wait().expect("test fallback reap");
     }
-    assert!(group_reaped, "zero-status guardian stranded its registered group");
+    assert!(
+        group_reaped,
+        "zero-status guardian stranded its registered group"
+    );
     assert_eq!(owner.group_pid(), None);
 }
 
@@ -341,7 +344,9 @@ fn zero_exit_guardian_shutdown_reaps_still_registered_group() {
 fn dropping_wedged_registered_guardian_enforces_shutdown_deadline() {
     let mut group_command = long_running_command();
     group_command.process_group(0);
-    let mut group = group_command.spawn().expect("spawn isolated registered group");
+    let mut group = group_command
+        .spawn()
+        .expect("spawn isolated registered group");
     let group_pid = group.id();
 
     let mut guardian_command = long_running_command();
@@ -373,7 +378,9 @@ fn dropping_wedged_registered_guardian_enforces_shutdown_deadline() {
     let mut group_status = group.try_wait().expect("inspect registered group");
     while group_status.is_none() && Instant::now() < deadline {
         thread::yield_now();
-        group_status = group.try_wait().expect("observe registered-group retirement");
+        group_status = group
+            .try_wait()
+            .expect("observe registered-group retirement");
     }
     let group_reaped_by_drop = group_status.is_some();
     if !group_reaped_by_drop {

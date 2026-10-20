@@ -366,7 +366,10 @@ fn shutdown_worker_error_reaps_registered_group_after_zero_guardian_exit() {
         terminate_registered_group(group_pid).expect("test-owned group fallback");
         group.wait().expect("reap test-owned group");
     }
-    assert!(guardian_status.success(), "test requires zero guardian exit");
+    assert!(
+        guardian_status.success(),
+        "test requires zero guardian exit"
+    );
     assert!(
         fail_safe_reaped,
         "worker failure left a registered Bun process group alive: {error}"

@@ -49,7 +49,11 @@ fn premature_successful_generation_worker_exit_reaps_unattributed_group() {
         thread::yield_now();
     }
     assert!(
-        primary.child.try_wait().expect("inspect live guardian").is_none(),
+        primary
+            .child
+            .try_wait()
+            .expect("inspect live guardian")
+            .is_none(),
         "test must observe successful worker exit while guardian remains live"
     );
 
@@ -68,7 +72,10 @@ fn premature_successful_generation_worker_exit_reaps_unattributed_group() {
     }
     primary.shutdown_attributed = true; // Avoid stand-in Q/S ACK I/O.
     let guardian_shutdown = primary.shutdown();
-    assert!(guardian_shutdown.is_ok(), "guardian cleanup: {guardian_shutdown:?}");
+    assert!(
+        guardian_shutdown.is_ok(),
+        "guardian cleanup: {guardian_shutdown:?}"
+    );
 
     let error = result.expect_err("unattributed worker exit must be fatal");
     assert!(
@@ -187,12 +194,9 @@ fn poll_fatal_inspection_error_reaps_registered_group() {
     // Deliberately consume the OS child status without updating Child's cache.
     let raw_guardian = i32::try_from(guardian.id()).expect("guardian id fits c_int");
     let guardian_pid = rustix::process::Pid::from_raw(raw_guardian).expect("positive guardian id");
-    rustix::process::waitpid(
-        Some(guardian_pid),
-        rustix::process::WaitOptions::empty(),
-    )
-    .expect("reap guardian externally")
-    .expect("wait produced exited guardian");
+    rustix::process::waitpid(Some(guardian_pid), rustix::process::WaitOptions::empty())
+        .expect("reap guardian externally")
+        .expect("wait produced exited guardian");
 
     let current_generation = Arc::new(Mutex::new(Some(RegisteredPrimaryGeneration {
         attempt: 1,

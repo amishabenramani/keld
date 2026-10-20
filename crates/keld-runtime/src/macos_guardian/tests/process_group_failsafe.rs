@@ -22,7 +22,10 @@ fn reaped_leader_does_not_mask_live_process_group_when_signal_is_denied() {
     let cleanup = terminate_registered_group(group_pid);
     assert_eq!(leader_gone, Err(Errno::ESRCH));
     assert_eq!(group_probe, Ok(()), "descendant still owns group");
-    assert!(outcome.is_err(), "EPERM cannot be suppressed for a live group");
+    assert!(
+        outcome.is_err(),
+        "EPERM cannot be suppressed for a live group"
+    );
     cleanup.expect("reap isolated test process group");
 }
 

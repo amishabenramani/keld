@@ -77,7 +77,10 @@ fn host_eof_before_group_registration_reaps_spawned_child() {
     worker.join().expect("Guardian worker joins");
     assert_eq!(report.leader_pid(), pid);
     assert_eq!(report.leader_status().signal(), Some(9));
-    assert!(revoked.load(Ordering::SeqCst), "registered resources revoked");
+    assert!(
+        revoked.load(Ordering::SeqCst),
+        "registered resources revoked"
+    );
     assert_gone(Some(pid));
 }
 
@@ -114,7 +117,11 @@ fn pre_registration_sigkill_role() {
             let marker = socket.with_extension("descendant.pid");
             let mut command = Command::new("/bin/sh");
             command
-                .args(["-c", r#"/bin/sleep 60 & echo $! > "$1"; wait"#, "keld-prereg"])
+                .args([
+                    "-c",
+                    r#"/bin/sleep 60 & echo $! > "$1"; wait"#,
+                    "keld-prereg",
+                ])
                 .arg(marker)
                 .stdin(Stdio::null())
                 .stdout(Stdio::null())
@@ -252,7 +259,10 @@ fn receive_pre_registration_event(
                 return (stream, event);
             }
             Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
-                assert!(Instant::now() < deadline, "timed out awaiting process event");
+                assert!(
+                    Instant::now() < deadline,
+                    "timed out awaiting process event"
+                );
                 thread::sleep(Duration::from_millis(2));
             }
             Err(error) => panic!("accept process event: {error}"),
@@ -266,7 +276,9 @@ fn pre_registration_real_host_sigkill_reaps_spawned_group() {
     let socket = temp.path().join("prereg.sock");
     let listener = std::os::unix::net::UnixListener::bind(&socket)
         .expect("bind pre-registration test control");
-    listener.set_nonblocking(true).expect("bound controller event poll");
+    listener
+        .set_nonblocking(true)
+        .expect("bound controller event poll");
     let host = pre_registration_role_command("host", &socket)
         .spawn()
         .expect("spawn isolated host process");
@@ -281,8 +293,16 @@ fn pre_registration_real_host_sigkill_reaps_spawned_group() {
         receive_pre_registration_event(&listener, Instant::now() + Duration::from_secs(10));
     let mut fields = paused.split_whitespace();
     assert_eq!(fields.next(), Some("PAUSED"), "unexpected event: {paused}");
-    let group_pid: u32 = fields.next().expect("group id").parse().expect("valid group id");
-    let guardian_pid: u32 = fields.next().expect("guardian id").parse().expect("valid guardian id");
+    let group_pid: u32 = fields
+        .next()
+        .expect("group id")
+        .parse()
+        .expect("valid group id");
+    let guardian_pid: u32 = fields
+        .next()
+        .expect("guardian id")
+        .parse()
+        .expect("valid guardian id");
     assert!(fields.next().is_none(), "unexpected event suffix: {paused}");
     cleanup.group_pid = Some(group_pid);
     cleanup.guardian_pid = Some(guardian_pid);
@@ -314,8 +334,11 @@ fn pre_registration_real_host_sigkill_reaps_spawned_group() {
         "registration must still be blocked after group creation"
     );
     assert!(
-        kill(Pid::from_raw(i32::try_from(guardian_pid).expect("guardian id fits PID")), None)
-            .is_ok(),
+        kill(
+            Pid::from_raw(i32::try_from(guardian_pid).expect("guardian id fits PID")),
+            None
+        )
+        .is_ok(),
         "independent Guardian must be alive before host death"
     );
 

@@ -89,10 +89,11 @@ fn rejected_writer_with_clean_guardian_exit_reaps_enrolled_group() {
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
-    let mut guardian = guardian_command.spawn().expect("successful guardian stand-in");
+    let mut guardian = guardian_command
+        .spawn()
+        .expect("successful guardian stand-in");
     let writer = guardian.stdin.take().expect("sole liveness writer");
-    fcntl(&writer, FcntlArg::F_SETFD(FdFlag::empty()))
-        .expect("force registered-owner rejection");
+    fcntl(&writer, FcntlArg::F_SETFD(FdFlag::empty())).expect("force registered-owner rejection");
     let error = HostGuardian::from_registered_parts(guardian, writer, None, group_pid)
         .expect_err("inheritable writer must be rejected");
     assert!(
@@ -110,5 +111,8 @@ fn rejected_writer_with_clean_guardian_exit_reaps_enrolled_group() {
         terminate_registered_group(group_pid).expect("test-owned red-phase group kill");
         group.wait().expect("test-owned red-phase group reap");
     }
-    assert!(retired, "rejected Guardian status zero stranded its enrolled Bun group");
+    assert!(
+        retired,
+        "rejected Guardian status zero stranded its enrolled Bun group"
+    );
 }
