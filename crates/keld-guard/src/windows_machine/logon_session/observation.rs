@@ -74,6 +74,15 @@ pub(super) fn session_ended(
 ) -> Result<(), WindowsLogonSessionError> {
     match state {
         SessionState::Absent => Ok(()),
+        // An invalid timestamp cannot independently prove the LUID belongs to
+        // a different generation. Otherwise a malformed successful LSA reply
+        // could authorize retirement of a still-live initiating session.
+        SessionState::Present { logon_time } if logon_time <= 0 => {
+            Err(WindowsLogonSessionError::Malformed {
+                session,
+                detail: "a present logon session returned a nonpositive logon time",
+            })
+        }
         SessionState::Present { logon_time } if logon_time != recorded.get() => Ok(()),
         SessionState::Present { .. } => Err(WindowsLogonSessionError::SessionLive { session }),
     }
