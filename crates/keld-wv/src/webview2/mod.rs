@@ -73,23 +73,25 @@ use tao::platform::windows::WindowExtWindows;
 use tao::window::{Window, WindowBuilder};
 
 #[cfg(all(feature = "media-acceptance", test))]
-use webview2_com::Microsoft::Web::WebView2::Win32::COREWEBVIEW2_PERMISSION_STATE_DEFAULT;
+use webview2_com::Microsoft::Web::WebView2::Win32::ICoreWebView2Profile4;
 use webview2_com::Microsoft::Web::WebView2::Win32::{
     COREWEBVIEW2_BROWSER_PROCESS_EXIT_KIND_NORMAL, COREWEBVIEW2_MOVE_FOCUS_REASON_PROGRAMMATIC,
+    CreateCoreWebView2EnvironmentWithOptions, ICoreWebView2, ICoreWebView2Controller,
+    ICoreWebView2Environment, ICoreWebView2Environment5, ICoreWebView2EnvironmentOptions,
+};
+#[cfg(test)]
+use webview2_com::Microsoft::Web::WebView2::Win32::{
     COREWEBVIEW2_PERMISSION_KIND, COREWEBVIEW2_PERMISSION_KIND_CAMERA,
-    COREWEBVIEW2_PERMISSION_KIND_MICROPHONE, COREWEBVIEW2_PERMISSION_STATE,
-    COREWEBVIEW2_PERMISSION_STATE_ALLOW, COREWEBVIEW2_PERMISSION_STATE_DENY,
-    CreateCoreWebView2EnvironmentWithOptions, ICoreWebView2, ICoreWebView2_13,
-    ICoreWebView2Controller, ICoreWebView2Environment, ICoreWebView2Environment5,
-    ICoreWebView2EnvironmentOptions, ICoreWebView2Profile4,
+    COREWEBVIEW2_PERMISSION_KIND_MICROPHONE, COREWEBVIEW2_PERMISSION_STATE_ALLOW,
+    COREWEBVIEW2_PERMISSION_STATE_DENY,
 };
 use webview2_com::{
     BrowserProcessExitedEventHandler, CoreWebView2EnvironmentOptions,
     CreateCoreWebView2ControllerCompletedHandler, CreateCoreWebView2EnvironmentCompletedHandler,
-    ExecuteScriptCompletedHandler, GetNonDefaultPermissionSettingsCompletedHandler,
-    NavigationCompletedEventHandler, NewWindowRequestedEventHandler,
-    PermissionRequestedEventHandler, SetPermissionStateCompletedHandler, wait_with_pump,
+    ExecuteScriptCompletedHandler, NavigationCompletedEventHandler,
 };
+#[cfg(all(feature = "media-acceptance", test))]
+use webview2_com::{PermissionRequestedEventHandler, wait_with_pump};
 use windows::Win32::Foundation::{
     E_POINTER, E_UNEXPECTED, ERROR_ACCESS_DENIED, ERROR_ALREADY_EXISTS, ERROR_INVALID_STATE,
     FILETIME, HANDLE, HWND, INVALID_HANDLE_VALUE, RECT, WAIT_FAILED, WAIT_TIMEOUT,
@@ -119,13 +121,14 @@ use windows::Win32::UI::WindowsAndMessaging::{
     MsgWaitForMultipleObjectsEx, PM_REMOVE, PeekMessageW, QS_ALLINPUT, TranslateMessage,
     WINDOW_EX_STYLE, WM_QUIT, WS_OVERLAPPED,
 };
-use windows::core::{BOOL, HSTRING, IUnknown, Interface, PCWSTR, PWSTR, w};
+use windows::core::{BOOL, HSTRING, Interface, PCWSTR, PWSTR, w};
 use windows_permissions::constants::{AccessRights, SeObjectType, SecurityInformation};
 use windows_permissions::utilities::current_process_sid;
 use windows_permissions::wrappers::{ConvertSidToStringSid, GetSecurityInfo};
 use windows_permissions::{Acl, LocalBox, SecurityDescriptor};
 
-use keld_guard::{PermissionsManifest, Principal};
+#[cfg(not(all(feature = "media-acceptance", test)))]
+use keld_guard::PermissionsManifest;
 
 use crate::WebviewId;
 use crate::engine::{
@@ -133,7 +136,7 @@ use crate::engine::{
     WebView2EngineExt, WebviewSpec,
 };
 use crate::error::WvError;
-use crate::media::{media_permission_allowed, webview_media_principal, webview2_media_kind};
+use crate::media::webview_media_principal;
 use crate::profile::{
     EphemeralProfile, ProfileError, ProfileErrorKind, ProfileIdentity, ProfileLifecycleAction,
     ProfileLifecyclePhase, ProfileLifecycleRecord, ProfileMarker, ProfilePlatform,
@@ -2074,274 +2077,23 @@ fn scavenge_ephemeral_profiles(
     Ok(removed)
 }
 
-struct SavedPermission {
-    kind: COREWEBVIEW2_PERMISSION_KIND,
-    state: COREWEBVIEW2_PERMISSION_STATE,
-    origin: String,
-}
+mod saved_media_permissions;
+#[cfg(test)]
+use saved_media_permissions::{SavedPermission, saved_media_permission_needs_deny};
+#[cfg(all(feature = "media-acceptance", test))]
+use saved_media_permissions::{
+    profile_permission_settings, set_profile_permission_state, webview_profile,
+};
+use saved_media_permissions::{
+    reconcile_saved_media_permissions, saved_permission_reconciliation_enabled,
+};
 
-fn saved_media_permission_needs_deny(permission: &SavedPermission) -> bool {
-    matches!(
-        permission.kind,
-        COREWEBVIEW2_PERMISSION_KIND_CAMERA | COREWEBVIEW2_PERMISSION_KIND_MICROPHONE
-    ) && permission.state != COREWEBVIEW2_PERMISSION_STATE_DENY
-}
-
-fn profile_permission_settings(
-    profile: &ICoreWebView2Profile4,
-) -> Result<Vec<SavedPermission>, WvError> {
-    let (tx, rx) = mpsc::channel();
-    let handler = GetNonDefaultPermissionSettingsCompletedHandler::create(Box::new(
-        move |result, settings| {
-            tx.send(result.and(settings.ok_or_else(|| windows::core::Error::from(E_POINTER))))
-                .map_err(|_| windows::core::Error::from(E_UNEXPECTED))
-        },
-    ));
-    // SAFETY: the profile and one-shot completion handler live on this STA;
-    // `wait_with_pump` retains the receiver until the callback completes.
-    unsafe { profile.GetNonDefaultPermissionSettings(&handler) }
-        .map_err(|_| profile_failure(ProfileErrorKind::LifecycleUnproven))?;
-    let settings = wait_with_pump(rx)
-        .map_err(|_| profile_failure(ProfileErrorKind::LifecycleUnproven))?
-        .map_err(|_| profile_failure(ProfileErrorKind::LifecycleUnproven))?;
-    let mut count = 0_u32;
-    // SAFETY: the returned collection is live and `count` is writable.
-    unsafe { settings.Count(&raw mut count) }
-        .map_err(|_| profile_failure(ProfileErrorKind::LifecycleUnproven))?;
-    let mut permissions = Vec::new();
-    for index in 0..count {
-        // SAFETY: `index` is bounded by the collection's observed count.
-        let setting = unsafe { settings.GetValueAtIndex(index) }
-            .map_err(|_| profile_failure(ProfileErrorKind::LifecycleUnproven))?;
-        let mut kind = COREWEBVIEW2_PERMISSION_KIND::default();
-        let mut state = COREWEBVIEW2_PERMISSION_STATE::default();
-        let mut origin = PWSTR::null();
-        // SAFETY: this live setting owns all three synchronous getter outputs.
-        let observed = unsafe { setting.PermissionKind(&raw mut kind) }
-            .and_then(|()| unsafe { setting.PermissionState(&raw mut state) })
-            .and_then(|()| unsafe { setting.PermissionOrigin(&raw mut origin) });
-        observed.map_err(|_| profile_failure(ProfileErrorKind::LifecycleUnproven))?;
-        // SAFETY: the successful origin getter returned one COM-allocated,
-        // NUL-terminated string. It is copied before being freed exactly once.
-        let text = unsafe { origin.to_string() };
-        // SAFETY: this is the one allocation returned by PermissionOrigin.
-        unsafe { CoTaskMemFree(Some(origin.as_ptr().cast())) };
-        permissions.push(SavedPermission {
-            kind,
-            state,
-            origin: text.map_err(|_| profile_failure(ProfileErrorKind::LifecycleUnproven))?,
-        });
-    }
-    Ok(permissions)
-}
-
-fn set_profile_permission_state(
-    profile: &ICoreWebView2Profile4,
-    permission: &SavedPermission,
-    state: COREWEBVIEW2_PERMISSION_STATE,
-) -> Result<(), WvError> {
-    let origin = permission
-        .origin
-        .encode_utf16()
-        .chain(Some(0))
-        .collect::<Vec<_>>();
-    let (tx, rx) = mpsc::channel();
-    let handler = SetPermissionStateCompletedHandler::create(Box::new(move |result| {
-        tx.send(result)
-            .map_err(|_| windows::core::Error::from(E_UNEXPECTED))
-    }));
-    // SAFETY: the profile, NUL-terminated origin and one-shot handler live on
-    // this STA through the pumped completion. The current v0 webview policy is
-    // fail-closed, so persisted camera/microphone decisions are reconciled to
-    // deny before any app navigation can consult them.
-    unsafe {
-        profile.SetPermissionState(permission.kind, PCWSTR(origin.as_ptr()), state, &handler)
-    }
-    .map_err(|_| profile_failure(ProfileErrorKind::LifecycleUnproven))?;
-    wait_with_pump(rx)
-        .map_err(|_| profile_failure(ProfileErrorKind::LifecycleUnproven))?
-        .map_err(|_| profile_failure(ProfileErrorKind::LifecycleUnproven))
-}
-
-fn webview_profile(webview: &ICoreWebView2) -> Result<ICoreWebView2Profile4, WvError> {
-    let webview13: ICoreWebView2_13 = webview
-        .cast()
-        .map_err(|_| profile_failure(ProfileErrorKind::LifecycleUnproven))?;
-    // SAFETY: the webview is live on its owning STA.
-    unsafe { webview13.Profile() }
-        .and_then(|profile| profile.cast())
-        .map_err(|_| profile_failure(ProfileErrorKind::LifecycleUnproven))
-}
-
-fn reconcile_saved_media_permissions(webview: &ICoreWebView2) -> Result<(), WvError> {
-    let profile = webview_profile(webview)?;
-    for permission in profile_permission_settings(&profile)?
-        .iter()
-        .filter(|permission| saved_media_permission_needs_deny(permission))
-    {
-        set_profile_permission_state(&profile, permission, COREWEBVIEW2_PERMISSION_STATE_DENY)?;
-    }
-    Ok(())
-}
-
-fn saved_permission_reconciliation_enabled() -> bool {
-    #[cfg(all(feature = "media-acceptance", test))]
-    if std::env::var_os("KELD_PROFILE_TEST_SKIP_SAVED_RECONCILIATION").is_some() {
-        return false;
-    }
-    true
-}
-
-/// Proof that media permissions and popup denial are registered on a webview.
-///
-/// [`navigate_initial`] demands it, so "content ran before the guard existed"
-/// is a compile error rather than a review catch. Only
-/// [`install_guarded_media_permissions`] mints one.
-struct GuardInstalled<'view>(&'view ICoreWebView2);
-
-fn webview2_permission_state(allowed: bool) -> COREWEBVIEW2_PERMISSION_STATE {
-    if allowed {
-        COREWEBVIEW2_PERMISSION_STATE_ALLOW
-    } else {
-        COREWEBVIEW2_PERMISSION_STATE_DENY
-    }
-}
-
-fn canonical_webview_identity(webview: &ICoreWebView2) -> windows::core::Result<usize> {
-    let identity: IUnknown = webview.cast()?;
-    Ok(identity.as_raw() as usize)
-}
-
-/// Registers the default-deny media-capture handler backed by `keld-guard`
-/// (KEL-59 parity with the macOS backend).
-///
-/// Without a handler `WebView2` falls back to its own **user prompt** —
-/// default-ask, not default-deny. A prompt lets a renderer obtain capture the
-/// manifest never granted, and the manifest is the authority
-/// (`docs/architecture/03-security.md` §1). Kinds without a Keld capability
-/// (geolocation, notifications, …) are denied outright: there is no v0
-/// capability for them, and fail-closed is the crate rule.
-fn install_guarded_media_permissions(
-    webview: &ICoreWebView2,
-    manifest: PermissionsManifest,
-    principal: Principal,
-) -> Result<GuardInstalled<'_>, WvError> {
-    let registered_identity = canonical_webview_identity(webview)
-        .map_err(|error| WvError::Webview(format!("permission identity: {error}")))?;
-    // Built outside the registration's `unsafe` block so the COM calls inside
-    // the callback carry their own SAFETY proofs instead of inheriting one
-    // lexically.
-    let handler = PermissionRequestedEventHandler::create(Box::new(move |sender, args| {
-        // Fail closed: without args no state can be set, and `Ok(())` would
-        // silently hand the decision back to WebView2's own prompt
-        // (default-ask). An error at least refuses to report success.
-        let Some(args) = args else {
-            return Err(windows::core::Error::from(E_POINTER));
-        };
-        let Ok(Some(sender_identity)) = sender.as_ref().map(canonical_webview_identity).transpose()
-        else {
-            // SAFETY: failure to canonicalize the sender is an identity
-            // failure, so complete the request as denied.
-            return unsafe { args.SetState(COREWEBVIEW2_PERMISSION_STATE_DENY) };
-        };
-        if sender_identity != registered_identity {
-            // SAFETY: live callback args; a foreign/missing sender must never
-            // fall through to WebView2's DEFAULT prompt behavior.
-            return unsafe { args.SetState(COREWEBVIEW2_PERMISSION_STATE_DENY) };
-        }
-
-        let mut kind = COREWEBVIEW2_PERMISSION_KIND::default();
-        // SAFETY: `args` is live for the duration of the callback; the
-        // out-pointer is valid.
-        if unsafe { args.PermissionKind(&raw mut kind) }.is_err() {
-            // SAFETY: the same live callback args accept a by-value state.
-            // Enforcing DENY takes precedence over propagating a getter error
-            // that could leave WebView2 on DEFAULT/prompt behavior.
-            return unsafe { args.SetState(COREWEBVIEW2_PERMISSION_STATE_DENY) };
-        }
-        #[cfg(all(feature = "media-acceptance", test))]
-        let before = {
-            let mut before = COREWEBVIEW2_PERMISSION_STATE_DEFAULT;
-            // SAFETY: same live callback arguments and writable enum output.
-            if unsafe { args.State(&raw mut before) }.is_err() {
-                // SAFETY: keep the evidence-only getter fail-closed too.
-                return unsafe { args.SetState(COREWEBVIEW2_PERMISSION_STATE_DENY) };
-            }
-            before
-        };
-
-        let state = webview2_permission_state(media_permission_allowed(
-            &manifest,
-            Some(principal),
-            webview2_media_kind(kind),
-        ));
-        // SAFETY: same liveness as above; `SetState` takes the enum by value.
-        unsafe { args.SetState(state) }?;
-        #[cfg(all(feature = "media-acceptance", test))]
-        {
-            let mut readback = COREWEBVIEW2_PERMISSION_STATE_DEFAULT;
-            // SAFETY: the callback still owns the same live args. Reading the
-            // value here proves the state before this callback returns.
-            if unsafe { args.State(&raw mut readback) }.is_err() {
-                return Ok(());
-            }
-            let Ok(uri) = media_acceptance::permission_uri(&args) else {
-                return Ok(());
-            };
-            media_acceptance::observe_production_effect(
-                kind,
-                before,
-                state,
-                readback,
-                uri,
-                sender_identity,
-            );
-        }
-        Ok(())
-    }));
-
-    let mut token = 0_i64;
-    // SAFETY: `webview` lives on this thread (module note). The handler runs
-    // on this same thread for the webview's whole life — WebView2 raises
-    // events on the creating thread.
-    let registered = unsafe { webview.add_PermissionRequested(&handler, &raw mut token) };
-    registered.map_err(|err| WvError::Webview(format!("permission handler: {err}")))?;
-    #[cfg(all(feature = "media-acceptance", test))]
-    media_acceptance::observe_registration(registered_identity, token);
-
-    // Windows WebView2 (KEL-168): an unhandled new-window request creates a
-    // popup outside Keld's principal, permission, and lifecycle accounting.
-    // v0 denies every popup; SetHandled(true) without NewWindow loads nothing.
-    // https://learn.microsoft.com/en-us/microsoft-edge/webview2/reference/win32/icorewebview2newwindowrequestedeventargs#put_handled
-    let popup_handler = NewWindowRequestedEventHandler::create(Box::new(|_, args| {
-        let Some(args) = args else {
-            return Err(windows::core::Error::from(E_POINTER));
-        };
-        // SAFETY: WebView2 supplies live event args on the creating STA thread
-        // for this callback. SetHandled takes a BOOL by value (contract above).
-        unsafe { args.SetHandled(true) }
-    }));
-    // SAFETY: `webview` and the writable token are live on the creating STA.
-    // WebView2 retains the COM handler and invokes it on that same thread.
-    unsafe { webview.add_NewWindowRequested(&popup_handler, &raw mut token) }
-        .map_err(|err| WvError::Webview(format!("popup handler: {err}")))?;
-    Ok(GuardInstalled(webview))
-}
-
-/// Performs the first navigation of a freshly created webview.
-///
-/// Takes [`GuardInstalled`] so the type system enforces the crate rule that no
-/// content runs before the permission guard is registered.
-fn navigate_initial(guard: &GuardInstalled<'_>, target: &NavTarget) -> Result<(), WvError> {
-    let webview = guard.0;
-    // SAFETY: `webview` lives on this thread; both calls take an HSTRING by
-    // reference that outlives the call.
-    let loaded = match target {
-        NavTarget::Html(html) => unsafe { webview.NavigateToString(&HSTRING::from(html.as_str())) },
-        NavTarget::Url(url) => unsafe { webview.Navigate(&HSTRING::from(url.as_str())) },
-    };
-    loaded.map_err(|err| WvError::Navigate(err.to_string()))
-}
+mod guarded_navigation;
+#[cfg(all(feature = "media-acceptance", test))]
+use guarded_navigation::canonical_webview_identity;
+#[cfg(test)]
+use guarded_navigation::webview2_permission_state;
+use guarded_navigation::{install_guarded_media_permissions, navigate_initial};
 
 fn install_app_navigation_handler(
     webview: &ICoreWebView2,
@@ -3705,6 +3457,7 @@ mod tests {
     };
 
     mod exit_wait_pump;
+    mod profile_lifecycle;
 
     #[cfg(feature = "profile-test-root")]
     #[test]
@@ -4460,382 +4213,6 @@ mod tests {
             state: COREWEBVIEW2_PERMISSION_STATE_ALLOW,
             origin: String::from("http://127.0.0.1:41000"),
         }));
-    }
-
-    /// KEL-63: the profile must be per-user, not beside the executable.
-    ///
-    /// The loader default is `<exe>.WebView2\` next to the binary, which a
-    /// standard user cannot create under `C:\Program Files\`. This asserts we
-    /// are not on that default and that the directory is user-scoped.
-    #[test]
-    fn profile_dir_is_user_scoped_not_next_to_the_exe() {
-        let root = std::path::Path::new(r"C:\Users\fixture\AppData\Local");
-        let identity = ProfileIdentity::from_host_verified_parts([7; 32], "dev.keld.fixture")
-            .expect("verified fixture identity");
-        let plan = windows_profile_plan(root, WebProfileSelection::Persistent(identity))
-            .expect("persistent profile plan");
-        assert!(plan.user_data_dir.starts_with(root));
-        assert_eq!(
-            plan.user_data_dir,
-            root.join("Keld")
-                .join("profiles")
-                .join("v1")
-                .join(identity.namespace_segment())
-                .join("webview2")
-        );
-    }
-
-    #[test]
-    fn dev_profile_is_not_the_global_legacy_namespace() {
-        let root = std::path::Path::new(r"C:\Users\fixture\AppData\Local");
-        let first = EphemeralProfile::from_host_random([1; 32]).expect("first dev launch");
-        let second = EphemeralProfile::from_host_random([2; 32]).expect("second dev launch");
-        let first = windows_profile_plan(root, WebProfileSelection::ephemeral_dev(first))
-            .expect("first plan");
-        let second = windows_profile_plan(root, WebProfileSelection::ephemeral_dev(second))
-            .expect("second plan");
-        assert_ne!(first.control_dir, second.control_dir);
-        assert!(
-            first
-                .control_dir
-                .starts_with(root.join("Keld").join("ephemeral").join("v1"))
-        );
-        assert_eq!(first.user_data_dir, first.control_dir.join("webview2"));
-        assert!(!first.control_dir.ends_with("dev.keld"));
-    }
-
-    #[test]
-    fn native_profile_lease_and_handles_prevent_alias_and_reuse() {
-        let root = create_private_test_root("lease");
-        let identity = ProfileIdentity::from_host_verified_parts([9; 32], "dev.keld.native-lease")
-            .expect("identity");
-        let selection = WebProfileSelection::Persistent(identity);
-        let first = prepare_windows_profile_at(&root, selection).expect("first owner");
-        let second = prepare_windows_profile_at(&root, selection)
-            .expect_err("same profile must reject a second native lease");
-        assert!(second.to_string().contains("already in use"));
-        assert!(
-            std::fs::rename(
-                &first.plan.control_dir,
-                first.plan.control_dir.with_extension("moved")
-            )
-            .is_err(),
-            "retained handles must deny rename/delete substitution"
-        );
-        drop(first);
-        prepare_windows_profile_at(&root, selection)
-            .expect_err("dropping a host lease without durable idle must not admit reuse");
-        std::fs::remove_dir_all(&root).expect("remove test root");
-    }
-
-    #[test]
-    fn aliased_control_file_is_rejected_before_lock_or_record_use() {
-        let root = create_private_test_root("control-alias");
-        let identity = ProfileIdentity::from_host_verified_parts([11; 32], "dev.keld.alias")
-            .expect("identity");
-        let plan =
-            windows_profile_plan(&root, WebProfileSelection::Persistent(identity)).expect("plan");
-        std::fs::create_dir_all(&plan.control_dir).expect("create control tree");
-        std::fs::write(plan.control_dir.join(PROFILE_MARKER), &plan.marker)
-            .expect("write marker fixture");
-        let outside = root.join("outside.lock");
-        std::fs::write(&outside, []).expect("write outside lease target");
-        std::fs::hard_link(&outside, plan.control_dir.join(PROFILE_LEASE))
-            .expect("create native hard-link alias");
-
-        let error = prepare_windows_profile_at(&root, WebProfileSelection::Persistent(identity))
-            .expect_err("aliased lease file must fail");
-        assert!(error.to_string().contains("ownership marker"));
-        std::fs::remove_dir_all(&root).expect("remove test root");
-    }
-
-    #[test]
-    fn dead_persistent_owner_is_durably_quarantined_before_recovery() {
-        let root = create_private_test_root("lifecycle");
-        let identity = ProfileIdentity::from_host_verified_parts([12; 32], "dev.keld.lifecycle")
-            .expect("identity");
-        let selection = WebProfileSelection::Persistent(identity);
-        let initial = prepare_windows_profile_at(&root, selection).expect("initial owner");
-        let lifecycle_path = initial.plan.control_dir.join(PROFILE_LIFECYCLE);
-        drop(initial);
-
-        let prior = ProfileLifecycleRecord::windows_idle()
-            .begin_startup(
-                ProfileProcessIdentity::from_host_observation(u32::MAX, u64::MAX)
-                    .expect("dead fixture owner"),
-            )
-            .and_then(|record| record.advance(ProfileLifecyclePhase::Running))
-            .expect("prior running record");
-        std::fs::write(
-            &lifecycle_path,
-            prior.to_record_bytes().expect("encode prior state"),
-        )
-        .expect("replace prior state fixture");
-        let recovered = prepare_windows_profile_at(&root, selection)
-            .expect("dead owner reaches quarantined recovery preparation");
-        assert!(recovered.recovery_required);
-        assert_eq!(
-            recovered.lifecycle.map(|record| record.phase()),
-            Some(ProfileLifecyclePhase::Quarantined)
-        );
-        let durable = ProfileLifecycleRecord::from_windows_record_bytes(
-            &std::fs::read(lifecycle_path).expect("read durable quarantine"),
-        )
-        .expect("decode durable quarantine");
-        assert_eq!(durable.phase(), ProfileLifecyclePhase::Quarantined);
-        drop(recovered);
-        std::fs::remove_dir_all(&root).expect("remove test root");
-    }
-
-    #[test]
-    fn persistent_purge_is_resumable_and_preserves_control_state() {
-        let root = create_private_test_root("purge");
-        let identity = ProfileIdentity::from_host_verified_parts([16; 32], "dev.keld.purge")
-            .expect("identity");
-        let selection = WebProfileSelection::Persistent(identity);
-        let initial = prepare_windows_profile_at(&root, selection).expect("initial profile");
-        let plan = initial.plan.clone();
-        drop(initial);
-        std::fs::write(
-            plan.control_dir.join(PROFILE_LIFECYCLE),
-            ProfileLifecycleRecord::windows_idle()
-                .to_record_bytes()
-                .expect("idle bytes"),
-        )
-        .expect("write idle fixture");
-        std::fs::write(plan.user_data_dir.join("state.bin"), b"owned state")
-            .expect("write data fixture");
-
-        purge_persistent_profile_at(&root, identity, true).expect("first purge");
-        assert!(!plan.user_data_dir.exists());
-        assert!(plan.control_dir.exists());
-        assert!(plan.control_dir.join(PROFILE_MARKER).exists());
-        assert!(plan.control_dir.join(PROFILE_LIFECYCLE).exists());
-        assert!(!plan.control_dir.join(super::PROFILE_PURGE).exists());
-
-        purge_persistent_profile_at(&root, identity, true).expect("idempotent purge");
-        assert!(!plan.user_data_dir.exists());
-        assert!(!plan.control_dir.join(super::PROFILE_PURGE).exists());
-        std::fs::remove_dir_all(&root).expect("remove test root");
-    }
-
-    #[test]
-    fn purge_intent_precedes_recovery_and_blocks_normal_startup() {
-        let root = create_private_test_root("purge-recovery-order");
-        let identity =
-            ProfileIdentity::from_host_verified_parts([20; 32], "dev.keld.purge-recovery")
-                .expect("identity");
-        let selection = WebProfileSelection::Persistent(identity);
-        let initial = prepare_windows_profile_at(&root, selection).expect("initial profile");
-        let plan = initial.plan.clone();
-        drop(initial);
-        let dead = ProfileLifecycleRecord::windows_idle()
-            .begin_startup(
-                ProfileProcessIdentity::from_host_observation(u32::MAX, u64::MAX)
-                    .expect("dead owner"),
-            )
-            .and_then(|record| record.advance(ProfileLifecyclePhase::Running))
-            .expect("dead running");
-        std::fs::write(
-            plan.control_dir.join(PROFILE_LIFECYCLE),
-            dead.to_record_bytes().expect("dead bytes"),
-        )
-        .expect("write dead lifecycle");
-
-        purge_persistent_profile_at(&root, identity, false)
-            .expect_err("recovery needs a real event loop");
-        let intent = ProfilePurgeRecord::from_record_bytes(
-            &std::fs::read(plan.control_dir.join(super::PROFILE_PURGE))
-                .expect("read committed purge intent"),
-        )
-        .expect("decode committed purge intent");
-        assert_eq!(intent.phase(), ProfilePurgePhase::Prepared);
-        let blocked = prepare_windows_profile_at(&root, selection)
-            .expect_err("normal startup cannot bypass purge recovery");
-        assert!(blocked.to_string().contains("durable profile intent"));
-        std::fs::remove_dir_all(&root).expect("remove test root");
-    }
-
-    #[test]
-    fn scavenger_deletes_only_marker_validated_inactive_leaf() {
-        let root = create_private_test_root("scavenge");
-        let profile = EphemeralProfile::from_host_random([17; 32]).expect("ephemeral");
-        let plan =
-            windows_profile_plan(&root, WebProfileSelection::ephemeral_dev(profile)).expect("plan");
-        let (control_handles, created) =
-            super::retain_directory_chain(&root, &plan.control_dir, true, false)
-                .expect("create old control through owning helper");
-        assert!(created);
-        drop(control_handles);
-        std::fs::write(plan.control_dir.join(PROFILE_MARKER), &plan.marker)
-            .expect("write old marker");
-        std::fs::write(plan.control_dir.join(PROFILE_LEASE), []).expect("write old lease");
-        assert!(
-            try_scavenge_ephemeral_profile(&root, profile, PROFILE_LAUNCH_DEADLINE)
-                .expect("scavenge old leaf")
-        );
-        assert!(!plan.control_dir.exists());
-
-        let corrupt = EphemeralProfile::from_host_random([18; 32]).expect("ephemeral");
-        let corrupt_plan = windows_profile_plan(&root, WebProfileSelection::ephemeral_dev(corrupt))
-            .expect("corrupt plan");
-        let (corrupt_handles, created) =
-            super::retain_directory_chain(&root, &corrupt_plan.control_dir, true, false)
-                .expect("create corrupt control through owning helper");
-        assert!(created);
-        drop(corrupt_handles);
-        std::fs::write(corrupt_plan.control_dir.join(PROFILE_MARKER), b"foreign")
-            .expect("write foreign marker");
-        std::fs::write(corrupt_plan.control_dir.join(PROFILE_LEASE), [])
-            .expect("write corrupt lease");
-        assert!(try_scavenge_ephemeral_profile(&root, corrupt, PROFILE_LAUNCH_DEADLINE).is_err());
-        assert!(corrupt_plan.control_dir.exists());
-        std::fs::remove_dir_all(&root).expect("remove test root");
-    }
-
-    /// A predecessor probe that cannot prove release retains the leaf and
-    /// never fails the current host's own release, for every probe step and
-    /// not only the exit wait (architecture 05; KEL-135 review). The injected
-    /// step is the launch: a zero launch budget expires environment creation
-    /// at its first pump, before any browser launches. Oracle: the probe
-    /// outcome is `Unproven` naming the launch deadline, the scavenge pass
-    /// returns `Ok(0)`, and both leaf directories still exist.
-    #[test]
-    fn expired_probe_launch_retains_the_leaf_without_failing_the_scavenge() {
-        let _com = initialize_com_sta().expect("STA for the probe");
-        let root = create_private_test_root("scavenge-expired-probe-launch");
-        let profile = EphemeralProfile::from_host_random([19; 32]).expect("ephemeral");
-        let selection = WebProfileSelection::ephemeral_dev(profile);
-        let predecessor = prepare_windows_profile_at(&root, selection).expect("predecessor leaf");
-        let plan = predecessor.plan.clone();
-        match prove_exclusive_udf_released(&predecessor, std::time::Duration::ZERO) {
-            ExclusiveUdfRelease::Unproven(error) => assert!(
-                error.to_string().contains("launch deadline expired"),
-                "the retention must name the launch deadline: {error}"
-            ),
-            other => panic!("expected an unproven probe, got {other:?}"),
-        }
-        drop(predecessor);
-        assert!(plan.user_data_dir.exists(), "the leaf outlives its owner");
-
-        let removed = scavenge_ephemeral_profiles(&root, std::time::Duration::ZERO)
-            .expect("an unproven probe never fails the scavenge pass");
-        assert_eq!(removed, 0, "nothing may be deleted on an unproven probe");
-        assert!(
-            plan.control_dir.exists() && plan.user_data_dir.exists(),
-            "the leaf must be retained for a later pass"
-        );
-        std::fs::remove_dir_all(&root).expect("remove test root");
-    }
-
-    #[test]
-    fn untrusted_profile_access_is_rejected_without_replacing_engine_aces() {
-        use windows_permissions::{LocalBox, SecurityDescriptor};
-
-        let owner_and_engine_access = concat!(
-            "D:(A;;FA;;;S-1-5-21-1-2-3-1001)",
-            "(A;;FW;;;AC)(A;;FW;;;S-1-15-3-1)(A;;FA;;;SY)(A;;FA;;;BA)"
-        )
-        .parse::<LocalBox<SecurityDescriptor>>()
-        .expect("safe descriptor");
-        assert!(!dacl_has_untrusted_access(
-            owner_and_engine_access.dacl().expect("safe DACL"),
-            "S-1-5-21-1-2-3-1001"
-        ));
-
-        for broad_sid in [
-            "WD",
-            "AU",
-            "BU",
-            "S-1-5-21-3459511679-531530595-653566084-1006",
-        ] {
-            for rights in ["FR", "FW", "FX", "FA"] {
-                let descriptor =
-                    format!("D:(A;;FA;;;S-1-5-21-1-2-3-1001)(A;;{rights};;;{broad_sid})")
-                        .parse::<LocalBox<SecurityDescriptor>>()
-                        .expect("broad-access descriptor");
-                assert!(
-                    dacl_has_untrusted_access(
-                        descriptor.dacl().expect("broad-access DACL"),
-                        "S-1-5-21-1-2-3-1001"
-                    ),
-                    "{broad_sid} {rights} access must fail"
-                );
-            }
-        }
-    }
-
-    #[test]
-    fn reparse_ancestor_is_rejected_before_profile_creation() {
-        let root = create_private_test_root("reparse");
-        let outside = create_private_test_root("reparse-outside");
-        let junction = std::process::Command::new("cmd.exe")
-            .args(["/d", "/c", "mklink", "/J"])
-            .arg(root.join("Keld"))
-            .arg(&outside)
-            .output()
-            .expect("run junction fixture command");
-        assert!(
-            junction.status.success(),
-            "create directory junction: {}",
-            String::from_utf8_lossy(&junction.stderr)
-        );
-        let identity = ProfileIdentity::from_host_verified_parts([10; 32], "dev.keld.reparse")
-            .expect("identity");
-        let error = prepare_windows_profile_at(&root, WebProfileSelection::Persistent(identity))
-            .expect_err("reparse ancestor must fail");
-        assert!(error.to_string().contains("ownership marker"));
-        std::fs::remove_dir(root.join("Keld")).expect("remove reparse point");
-        std::fs::remove_dir(root).expect("remove test LocalAppData");
-        std::fs::remove_dir(outside).expect("remove reparse target");
-    }
-
-    #[test]
-    fn dev_nonce_leaf_is_create_once_even_after_release() {
-        let root = create_private_test_root("ephemeral");
-        let first = EphemeralProfile::from_host_random([3; 32]).expect("first nonce");
-        let selected = prepare_windows_profile_at(&root, WebProfileSelection::ephemeral_dev(first))
-            .expect("first dev profile");
-        drop(selected);
-        prepare_windows_profile_at(&root, WebProfileSelection::ephemeral_dev(first))
-            .expect_err("a later launch must not reuse an old dev leaf");
-        let second = EphemeralProfile::from_host_random([4; 32]).expect("second nonce");
-        prepare_windows_profile_at(&root, WebProfileSelection::ephemeral_dev(second))
-            .expect("fresh nonce gets a fresh leaf");
-        std::fs::remove_dir_all(&root).expect("remove test root");
-    }
-
-    fn create_private_test_root(label: &str) -> std::path::PathBuf {
-        use std::fmt::Write as _;
-
-        let mut nonce = [0_u8; 16];
-        getrandom::fill(&mut nonce).expect("test randomness");
-        let mut suffix = String::with_capacity(32);
-        for byte in nonce {
-            write!(&mut suffix, "{byte:02x}").expect("write test suffix");
-        }
-        let root = super::known_local_app_data()
-            .expect("resolve test LocalAppData")
-            .join("Keld")
-            .join("test-fixtures")
-            .join(format!("keld-profile-{label}-{suffix}"));
-        std::fs::create_dir_all(&root).expect("create test LocalAppData");
-        let current_sid = super::current_process_sid()
-            .expect("resolve test process SID")
-            .to_string();
-        let grant = format!("*{current_sid}:(OI)(CI)F");
-        let output = std::process::Command::new("icacls.exe")
-            .arg(&root)
-            .args(["/inheritance:r", "/grant:r"])
-            .arg(grant)
-            .output()
-            .expect("run owner-private DACL fixture command");
-        assert!(
-            output.status.success(),
-            "set owner-private fixture DACL: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-        root
     }
 
     /// KEL-66: the environment options this backend ships must not carry
