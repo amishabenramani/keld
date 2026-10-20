@@ -7,11 +7,11 @@ use super::process_group::{
 use super::terminate_registered_group;
 use super::{
     Arc, BoundRoleGeneration, Child, ChildStdin, ChildStdout, Duration, ExitStatus,
-    GUARDIAN_SHUTDOWN_DEADLINE, Instant, JoinHandle, Mutex, Receiver, RecoveryState, RoleEvent,
-    RuntimeError, SUPERVISED_ORDERLY_SHUTDOWN, SUPERVISED_QUIT_ACCEPTED, Write, collapse_failures,
-    io, lifecycle_error, lock_recovery, mpsc, read_supervised_orderly_ack,
-    read_supervised_quit_ack, reject_host_registration, run_generation_host,
-    set_liveness_nonblocking, thread,
+    GENERATION_CONTROL_POLL, GUARDIAN_SHUTDOWN_DEADLINE, Instant, JoinHandle, Mutex, Receiver,
+    RecoveryState, RoleEvent, RuntimeError, SUPERVISED_ORDERLY_SHUTDOWN, SUPERVISED_QUIT_ACCEPTED,
+    Write, collapse_failures, io, lifecycle_error, lock_recovery, mpsc,
+    read_supervised_orderly_ack, read_supervised_quit_ack, reject_host_registration,
+    run_generation_host, set_liveness_nonblocking, thread,
 };
 
 /// One host-visible update from the guarded primary-generation owner.
@@ -59,21 +59,42 @@ pub(super) struct RegisteredPrimaryGeneration {
 
 /// Host-side signal authority carried WITH one retained generation.
 ///
-/// A retained birth is custody, not repeated signal authority. The numeric
-/// PGID may be recycled after any failed or refused attempt, and a fresh
-/// call cannot know what an earlier call observed. So the first failed
-/// attempt spends the authority for this generation: every later host path
-/// may only run the read-only dual-ESRCH absence probe, never `killpg`, and
-/// only inside the reap budget that first attempt started.
+/// One native group signal per generation. A retained birth is custody, not
+/// repeated signal authority: the numeric PGID may be recycled once the
+/// leader is gone, and after a delivered SIGKILL a second group-wide kill
+/// could only reach processes that joined later or a recycled group. So the
+/// first host-side attempt spends the authority whether it was delivered or
+/// failed. Later host paths keep custody (fail closed) and may only run the
+/// read-only dual-ESRCH absence probe, never `killpg`.
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub(super) enum NativeSignalAuthority {
-    /// No host-side signal attempt for this generation has failed.
+    /// No host-side signal has been attempted for this generation.
     Armed,
-    /// A signal attempt failed; absence probes share its one reap deadline.
-    ProbeOnly {
-        /// Absolute end of the generation's single reap budget.
+    /// The one signal was delivered; the group is not yet proven absent.
+    Delivered {
+        /// Absolute end of the attempt's reap budget.
         reap_deadline: Instant,
     },
+    /// The one attempt failed or was refused.
+    ProbeOnly {
+        /// Absolute end of the attempt's reap budget.
+        reap_deadline: Instant,
+    },
+}
+
+impl NativeSignalAuthority {
+    /// Absolute deadline for a later read-only absence probe. Probes share
+    /// the spent attempt's budget; once it has passed, a call still gets one
+    /// observation (at most one poll interval) so a group that has since
+    /// disappeared can be released, but never a fresh reap window.
+    fn probe_deadline(self) -> Option<Instant> {
+        match self {
+            Self::Armed => None,
+            Self::Delivered { reap_deadline } | Self::ProbeOnly { reap_deadline } => {
+                Some(reap_deadline.max(Instant::now() + GENERATION_CONTROL_POLL))
+            }
+        }
+    }
 }
 
 impl RegisteredPrimaryGeneration {
@@ -86,9 +107,10 @@ impl RegisteredPrimaryGeneration {
         }
     }
 
-    /// Makes at most one birth-attested signal attempt while armed. A failure
-    /// spends the generation's signal authority; a probe-only generation is
-    /// left untouched here so the caller applies its own absence proof.
+    /// Makes the generation's single birth-attested signal attempt while
+    /// armed, and spends the authority whatever its outcome. When the
+    /// authority is already spent this sends nothing and returns `Ok`, so
+    /// the caller applies its own read-only absence proof.
     pub(super) fn signal_if_armed(&mut self) -> Result<(), RuntimeError> {
         let Some(identity) = self.group_identity else {
             return terminate_unwitnessed_generation(self.group_pid);
@@ -98,20 +120,48 @@ impl RegisteredPrimaryGeneration {
         }
         let reap_deadline = Instant::now() + GUARDIAN_SHUTDOWN_DEADLINE / 4;
         let result = terminate_attested_group_until(identity, reap_deadline);
-        if result.is_err() {
-            self.native_signal = NativeSignalAuthority::ProbeOnly { reap_deadline };
-        }
+        self.native_signal = if result.is_ok() {
+            NativeSignalAuthority::Delivered { reap_deadline }
+        } else {
+            NativeSignalAuthority::ProbeOnly { reap_deadline }
+        };
         result
     }
 
     /// Host fail-safe for this retained generation: the single armed signal
     /// attempt, or afterwards only the read-only absence probe.
     pub(super) fn terminate(&mut self) -> Result<(), RuntimeError> {
-        match (self.native_signal, self.group_identity) {
-            (NativeSignalAuthority::ProbeOnly { reap_deadline }, Some(identity)) => {
-                require_attested_group_absence(identity, reap_deadline)
-            }
+        match (self.native_signal.probe_deadline(), self.group_identity) {
+            (Some(deadline), Some(identity)) => require_attested_group_absence(identity, deadline),
             _ => self.signal_if_armed(),
+        }
+    }
+
+    /// Core's app-link failure report. A repeated report after a delivered
+    /// signal is idempotent: the Guardian's CLEAR, not a second signal,
+    /// proves absence. A failed attempt still reports its probe result.
+    fn fail(&mut self) -> Result<(), RuntimeError> {
+        match self.native_signal {
+            NativeSignalAuthority::Delivered { .. } => Ok(()),
+            _ => self.terminate(),
+        }
+    }
+
+    /// CLEAR's absence deadline. CLEAR keeps its own `own` window after an
+    /// armed or delivered signal: it is the normal release after Core's
+    /// delivered `fail_current_generation` signal, and the Guardian reports
+    /// CLEAR only after its own reap, possibly after that attempt's reap
+    /// budget. Honouring that spent budget would make every app-link
+    /// restart fatal. CLEAR runs at most once per attempt and its failure
+    /// ends the worker, so the window is never stacked. After a FAILED
+    /// attempt, CLEAR honours that attempt's already-spent budget.
+    pub(super) fn clear_absence_deadline(&self, own: Instant) -> Instant {
+        match self.native_signal {
+            NativeSignalAuthority::ProbeOnly { .. } => self
+                .native_signal
+                .probe_deadline()
+                .map_or(own, |shared| shared.min(own)),
+            _ => own,
         }
     }
 }
@@ -270,7 +320,7 @@ impl GuardedPrimary {
         if generation.attempt != attempt {
             return Ok(());
         }
-        generation.terminate()
+        generation.fail()
     }
 
     /// Waits for one generation update up to `timeout`.

@@ -361,13 +361,17 @@ pub(super) fn run_generation_host(
                     if let Some(mut generation) = registered_generation {
                         match generation.group_identity {
                             Some(group) => {
-                                // Never a second signal after an earlier
-                                // failed attempt for this same generation:
-                                // persist a newly spent authority before `?`.
+                                // One signal per generation: none after an
+                                // earlier delivered or failed attempt. Persist
+                                // the spent authority before any `?`, so a
+                                // failed absence proof cannot re-arm it.
                                 let signalled = generation.signal_if_armed();
                                 *current_generation_owner = Some(generation);
                                 signalled?;
-                                require_attested_group_absence(group, absence_deadline)?;
+                                require_attested_group_absence(
+                                    group,
+                                    generation.clear_absence_deadline(absence_deadline),
+                                )?;
                             }
                             #[cfg(test)]
                             None => {} // Synthetic EOF/transition-only fixtures.

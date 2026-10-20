@@ -19,6 +19,8 @@ use super::super::super::{
 use super::super::test_support::{NativeChildOwner, test_group_identity};
 use super::primary_with_dead_guardian;
 
+mod delivered_signal;
+
 const AMBIGUOUS_GROUP: &str = "registered group identity unavailable";
 const PROBE_TIMEOUT: &str = "absence remains unproven";
 

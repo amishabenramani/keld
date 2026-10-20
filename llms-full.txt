@@ -2814,12 +2814,19 @@ screencast on Wayland) on Linux, with portal-first behavior so sandboxed formats
   every post-start failure, signals the group once, and waits its direct child.
   `HostGuardian` consumes the group identity on every terminal path, so an API
   retry cannot signal a reused PGID. `GuardedPrimary` instead retains a
-  generation's birth after a failed native cleanup, but that retained record
-  is custody, not repeated signal authority: the first failed or refused
-  host-side attempt makes the generation probe-only, so every later fail-safe,
-  shutdown or KGC1 CLEAR for it runs only the read-only dual-ESRCH absence
-  check and never `killpg`. Terminal-path retries share that first attempt's
-  single reap budget, and one shutdown makes at most one native attempt.
+  generation's birth until its group is proven absent, but makes at most
+  one host-side native group signal per generation. The first attempt
+  (fail-safe, `fail_current_generation`, denied SPAWNED or KGC1 CLEAR)
+  spends that authority whether the signal was delivered or failed; every
+  later host path for the generation runs only the read-only dual-ESRCH
+  absence check and never `killpg`. A repeated `fail_current_generation`
+  after a delivered signal is a no-op. Later fail-safe probes wait only
+  until the first attempt's reap deadline, plus at most one poll interval
+  once it has passed, and one shutdown makes at most one native call. KGC1
+  CLEAR keeps its own absence window after an armed or delivered signal,
+  because it is the normal release after Core's signal and the Guardian
+  reaps first; after a failed attempt it is bounded by that attempt's
+  already-spent deadline.
   Unexpected guardian exit produces
   `KELD-RUNTIME-013` only after the host fail-safe; orderly shutdown closes the
   same writer. The KEL-96 supervised variant may first write one fixed
