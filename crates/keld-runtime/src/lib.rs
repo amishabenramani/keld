@@ -515,11 +515,17 @@ pub enum SupervisorEvent {
     CrashLoopTripped,
     /// Supervision has stopped and will not restart. This is not proof that
     /// the child ended cleanly: it is sent when the child exited zero, when
-    /// `shutdown()` was called, or when a successor gate refused a crash
-    /// successor (see [`Supervisor::start_with_stdout_markers_and_successor_gate`]).
-    /// A gate refusal follows a non-zero or signal termination the supervisor
-    /// has already recorded, so a caller must read [`Supervisor::crash_ledger`]
-    /// before it treats any `Stopped` as a clean stop.
+    /// `shutdown()` was called or a primary role accepted shutdown (Linux and
+    /// Windows), or when a successor gate refused a successor at the
+    /// post-revocation boundary. Gates include, for example, the closure given
+    /// to [`Supervisor::start_with_stdout_markers_and_successor_gate`] and a
+    /// primary role's denied recovery ([`primary::PrimaryRecoveryGate::deny`]).
+    /// A gate is consulted only after a non-zero or signal termination the
+    /// supervisor has already recorded in [`Supervisor::crash_ledger`] or, on
+    /// Linux and Windows, after a host-requested primary-role generation
+    /// restart, which kills a live child and records no crash. A caller must
+    /// read [`Supervisor::crash_ledger`] before it treats any `Stopped` as a
+    /// clean stop.
     Stopped,
 }
 
@@ -1073,8 +1079,8 @@ impl Supervisor {
 
     /// Blocks until supervision reaches a terminal state:
     /// [`SupervisorOutcome::Stopped`] (the child exited zero, the host
-    /// requested shutdown, or a successor gate refused a crash successor
-    /// after the crash was recorded), [`SupervisorOutcome::CrashLoop`], or
+    /// requested or accepted shutdown, or a successor gate refused a
+    /// successor; see [`SupervisorEvent::Stopped`]), [`SupervisorOutcome::CrashLoop`], or
     /// [`SupervisorOutcome::Failed`]. `Stopped` is not proof of a clean exit;
     /// read [`Self::crash_ledger`] before treating it as one. There is no
     /// internal timeout — the crash-loop breaker itself bounds the number of

@@ -3085,9 +3085,11 @@ successor after its one admission. The supervisor's one successor gate
 post-revocation boundary) stops supervision at the recorded crash, and the ledger
 decides the verdict. That stop is reported as `SupervisorEvent::Stopped` and
 `SupervisorOutcome::Stopped`, the same value an exit-zero child or a requested
-shutdown produces, so `Stopped` is not a clean-exit claim: it covers a zero exit, a
-requested shutdown and a gate refusal after a recorded crash, and every caller reads
-`Supervisor::crash_ledger` before treating it as clean.
+shutdown produces, so `Stopped` is not a clean-exit claim: for this supervisor it covers a
+zero exit, a requested shutdown and a gate refusal after a recorded crash. A primary
+role's denied recovery is another such gate and can also follow a host-requested
+generation restart that records no crash (`SupervisorEvent::Stopped` lists every case),
+so every caller reads `Supervisor::crash_ledger` before treating it as clean.
 
 A crash the supervisor *recovered* from before the app reported ready stays a
 success (KEL-70 AC1/AC3). Separating the two cases cannot be done by counting
