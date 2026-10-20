@@ -8,7 +8,11 @@ use std::time::{Duration, Instant};
 use nix::fcntl::{FcntlArg, OFlag, fcntl};
 use nix::unistd::{Pid, getpgid, getpgrp};
 
+use super::super::super::RuntimeError;
 use super::super::super::process_group::observe_group_identity;
+use super::super::super::process_group::reap_pending_guardian;
+use super::super::test_support::{NativeChildOwner, long_running_command};
+use super::GUARDIAN_SHUTDOWN_DEADLINE;
 use super::rescue_wedged_guardian;
 
 struct OwnedNativeGuardian(Child);
@@ -102,5 +106,71 @@ fn watchdog_can_retire_only_its_attested_original_native_group() {
         status.signal(),
         Some(9),
         "attested watchdog rescue must terminate its original native group"
+    );
+}
+
+// A borrowed Child retains its single original wait owner while shipping
+// rejected-registration cleanup kills and reaps a wedged native Guardian.
+#[test]
+fn rejected_registration_borrowed_native_child_is_killed_and_reaped_before_return() {
+    let mut command = long_running_command();
+    command.process_group(0);
+    let mut guardian = NativeChildOwner::new(
+        command
+            .spawn()
+            .expect("start actual uncooperative test-owned Guardian group"),
+    );
+    let birth = observe_group_identity(guardian.id())
+        .expect("retain original isolated Guardian group birth before cleanup");
+    assert!(
+        guardian
+            .try_wait()
+            .expect("inspect originally owned live Guardian")
+            .is_none(),
+        "real native Guardian must remain live before rejected cleanup"
+    );
+
+    // This product operation retains borrowed Child custody for five seconds.
+    // The extra two seconds are only the existing harness observation budget.
+    let started = Instant::now();
+    let outcome = reap_pending_guardian(&mut guardian);
+    let elapsed = started.elapsed();
+    // Observe the original birth before calling try_wait, which itself can
+    // reap a zombie. Test inspection must not supply the product's reap proof.
+    let original_birth_still_visible = observe_group_identity(birth.pid).ok() == Some(birth);
+    let product_status = guardian.try_wait();
+
+    // The test owner must clean up the exact same Child even on a RED mutant.
+    // Never authorize a signal using a newly observed numeric PID or PGID.
+    if !matches!(&product_status, Ok(Some(_))) {
+        let _ = guardian.kill();
+        let _ = guardian.wait();
+    }
+    assert!(
+        matches!(
+            &outcome,
+            Err(RuntimeError::Lifecycle {
+                phase: "macOS guardian rejected-registration cleanup deadline",
+                source,
+            }) if source.kind() == std::io::ErrorKind::TimedOut
+        ),
+        "native cleanup must retain the original typed deadline: {outcome:?}"
+    );
+    assert!(
+        elapsed >= GUARDIAN_SHUTDOWN_DEADLINE
+            && elapsed <= GUARDIAN_SHUTDOWN_DEADLINE + Duration::from_secs(2),
+        "native cleanup exceeded the original five-second plus two-second observation: {elapsed:?}"
+    );
+    let native_exit = product_status
+        .expect("inspect product-retired original Guardian")
+        .and_then(|status| status.signal());
+    assert_eq!(
+        native_exit,
+        Some(9),
+        "shipping cleanup must SIGKILL and reap its exactly owned native Guardian before returning"
+    );
+    assert!(
+        !original_birth_still_visible,
+        "shipping cleanup returned with the original kernel group leader still alive"
     );
 }
