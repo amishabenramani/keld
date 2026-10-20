@@ -152,9 +152,10 @@
   until the first attempt's reap deadline, plus at most one poll interval
   once it has passed, and one shutdown makes at most one native call. KGC1
   CLEAR keeps its own absence window after an armed or delivered signal,
-  because it is the normal release after Core's signal and the Guardian
-  reaps first; after a failed attempt it is bounded by that attempt's
-  already-spent deadline.
+  because its own signal spends the authority just before the window is
+  chosen and a shorter cap would fail a group that is still draining; after
+  a failed attempt it is bounded by that attempt's already-spent deadline
+  plus at most one poll interval of grace.
   Unexpected guardian exit produces
   `KELD-RUNTIME-013` only after the host fail-safe; orderly shutdown closes the
   same writer. The KEL-96 supervised variant may first write one fixed

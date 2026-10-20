@@ -147,14 +147,15 @@ impl RegisteredPrimaryGeneration {
         }
     }
 
-    /// CLEAR's absence deadline. CLEAR keeps its own `own` window after an
-    /// armed or delivered signal: it is the normal release after Core's
-    /// delivered `fail_current_generation` signal, and the Guardian reports
-    /// CLEAR only after its own reap, possibly after that attempt's reap
-    /// budget. Honouring that spent budget would make every app-link
-    /// restart fatal. CLEAR runs at most once per attempt and its failure
-    /// ends the worker, so the window is never stacked. After a FAILED
-    /// attempt, CLEAR honours that attempt's already-spent budget.
+    /// CLEAR's absence deadline. After an armed or delivered signal CLEAR
+    /// keeps its own `own` window: CLEAR's own `signal_if_armed` turns
+    /// `Armed` into `Delivered { now + D/4 }` before this deadline is
+    /// chosen, so capping at that budget would shrink CLEAR's own window
+    /// from D to D/4 and fail a group that is still draining when CLEAR
+    /// arrives. CLEAR runs at most once per attempt and any failure ends the
+    /// worker, so the window is never stacked. After a FAILED attempt CLEAR
+    /// is bounded by that attempt's already-spent deadline, plus at most one
+    /// poll interval of grace.
     pub(super) fn clear_absence_deadline(&self, own: Instant) -> Instant {
         match self.native_signal {
             NativeSignalAuthority::ProbeOnly { .. } => self
