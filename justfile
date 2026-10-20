@@ -49,7 +49,8 @@ ci-route:
 #   of test_ci_local.py run hosted through tools/ci_changes_test.sh.
 # agent-context's workspace.py check also runs hosted, but only a developer
 # checkout has task records for it to validate.
-# cache-check-test also runs hosted, as the "Worktree cache tool native tests"
+# cache-check-test also runs hosted, unchanged (worktree_cache.rs unit tests plus
+# tools/cache_tool_provenance_test.sh), as the "Worktree cache tool native tests"
 # step of the clippy + test matrix, on ubuntu, macos and windows: its cfg(windows)
 # and cfg(unix) paths each compile only on their own OS.
 [parallel]

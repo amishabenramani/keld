@@ -160,16 +160,6 @@ jobs:
           mkdir -p target/product-status
           rustc --edition=2024 -D warnings --test tools/product_status.rs -o target/product-status/product-status-test
           target/product-status/product-status-test
-      # The `cache-check-test` ci-policy recipe, hosted. Unlike the other policy
-      # tools it runs on all three runners: worktree_cache.rs has separate
-      # cfg(windows) and cfg(unix) refusal paths (reparse points, mounts,
-      # process census) that only their own OS compiles and exercises.
-      - name: Worktree cache tool native tests
-        shell: bash
-        run: |
-          mkdir -p target/worktree-cache
-          rustc --edition=2024 -D warnings --test tools/worktree_cache.rs -o target/worktree-cache/worktree-cache-test
-          target/worktree-cache/worktree-cache-test
       # The .deb set comes from a first-party cache keyed by the exact package
       # list and runner image (#645). tools/ci_webkitgtk_apt.sh still runs
       # apt-get update and stages a cached file only after its SHA256 matches
@@ -238,7 +228,15 @@ jobs:
           New-Item -ItemType Directory -Force -Path (Join-Path $cargoHome 'bin') | Out-Null
       - uses: taiki-e/install-action@ab6895351a88b908e96a4697860d4ffea5e57dbe # v2.87.27
         with:
-          tool: nextest
+          tool: nextest,just@1.58.0
+      # The `cache-check-test` ci-policy recipe itself, hosted. Unlike the other
+      # policy tools it runs on all three runners: worktree_cache.rs has separate
+      # cfg(windows) and cfg(unix) refusal paths (reparse points, mounts,
+      # process census) that only their own OS compiles and exercises, and
+      # tools/cache_tool_provenance_test.sh drives `just cache-check` (#935).
+      - name: Worktree cache tool native tests
+        shell: bash
+        run: just cache-check-test
       - name: test
         shell: bash
         env:
