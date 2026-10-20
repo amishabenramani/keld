@@ -34,7 +34,7 @@ use keld_ipc::{
 use crate::windows_lpac::{WindowsLpacError, WindowsSuspendedChild, nul_terminated_wide};
 
 use windows_sys::Win32::Foundation::{
-    DUPLICATE_SAME_ACCESS, DuplicateHandle, ERROR_INVALID_PARAMETER, ERROR_MORE_DATA, FILETIME,
+    DUPLICATE_SAME_ACCESS, DuplicateHandle, ERROR_INVALID_PARAMETER, FILETIME,
     GetHandleInformation, HANDLE, HANDLE_FLAG_INHERIT, INVALID_HANDLE_VALUE, SetHandleInformation,
     WAIT_OBJECT_0, WAIT_TIMEOUT,
 };
@@ -53,10 +53,9 @@ use windows_sys::Win32::System::JobObjects::{
     AssignProcessToJobObject, CreateJobObjectW, IsProcessInJob, JOB_OBJECT_LIMIT_BREAKAWAY_OK,
     JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE, JOB_OBJECT_LIMIT_SILENT_BREAKAWAY_OK,
     JOBOBJECT_ASSOCIATE_COMPLETION_PORT, JOBOBJECT_BASIC_ACCOUNTING_INFORMATION,
-    JOBOBJECT_BASIC_PROCESS_ID_LIST, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
-    JobObjectAssociateCompletionPortInformation, JobObjectBasicAccountingInformation,
-    JobObjectBasicProcessIdList, JobObjectExtendedLimitInformation, QueryInformationJobObject,
-    SetInformationJobObject, TerminateJobObject,
+    JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JobObjectAssociateCompletionPortInformation,
+    JobObjectBasicAccountingInformation, JobObjectExtendedLimitInformation,
+    QueryInformationJobObject, SetInformationJobObject, TerminateJobObject,
 };
 use windows_sys::Win32::System::Pipes::PeekNamedPipe;
 use windows_sys::Win32::System::SystemServices::{JOB_OBJECT_QUERY, JOB_OBJECT_TERMINATE};
@@ -2674,179 +2673,15 @@ fn query_job_active_processes(raw_job: HANDLE) -> Result<u32, WindowsHostJobErro
     Ok(accounting.ActiveProcesses)
 }
 
-/// Initial capacity, in process IDs, of one Job process-ID snapshot. A host, its
-/// Bun primary, its `WebView2` processes and a candidate family fit; a larger Job
-/// grows the buffer.
-const JOB_PROCESS_ID_LIST_INITIAL_IDS: usize = 32;
-/// IDs added beyond the reported count when a snapshot buffer grows, for members
-/// that join between the report and the next query.
-const JOB_PROCESS_ID_LIST_GROWTH_SLACK: usize = 16;
-/// Bound on buffer growth within one snapshot; a Job whose member count outruns
-/// it that often is refused rather than queried without end.
-const JOB_PROCESS_ID_LIST_GROWTH_LIMIT: u32 = 8;
-
-/// One snapshot of a Job hierarchy's process-ID list.
-#[derive(Debug)]
-struct WindowsJobProcessIdSnapshot {
-    /// Every ID the kernel listed: the members it considers in the Job at the
-    /// instant of the query. Complete on success; an exited member is omitted
-    /// only after its handle is signaled and every thread of it has stopped.
-    ids: Vec<u32>,
-    /// `NumberOfAssignedProcesses` of the same query. It exceeds `ids.len()` for
-    /// one lock release while a member leaves the Job; it is never a buffer
-    /// size.
-    assigned: u32,
-}
-
-impl WindowsJobProcessIdSnapshot {
-    /// Whether the kernel's assigned count and its list agree.
-    ///
-    /// Every census caller MUST require this before it treats a snapshot as clean,
-    /// the Machine-UAC census of S12 included: a disagreement names a membership
-    /// change in flight (KEL-270 finding F54), so the snapshot is retaken under the
-    /// caller's deadline, never refused and never accepted.
-    fn is_settled(&self) -> bool {
-        usize::try_from(self.assigned).is_ok_and(|assigned| assigned == self.ids.len())
-    }
-}
-
-/// Words of the process-ID list record that precede the ID array. The record is
-/// two u32 counts followed by the `ULONG_PTR` ID array, so a usize buffer holds
-/// it at the alignment it requires and the IDs start at a whole-word offset.
-const JOB_PROCESS_ID_LIST_HEADER_WORDS: usize =
-    std::mem::offset_of!(JOBOBJECT_BASIC_PROCESS_ID_LIST, ProcessIdList)
-        / std::mem::size_of::<usize>();
-const _: () = assert!(
-    std::mem::offset_of!(JOBOBJECT_BASIC_PROCESS_ID_LIST, ProcessIdList)
-        % std::mem::size_of::<usize>()
-        == 0
-);
-
-/// Lists the IDs of the live processes in one Job hierarchy: the process-ID
-/// lister of KEL-53 §5 (slice S6b3), which the host-death census uses and the
-/// Machine-UAC census of S12 reuses.
-///
-/// The list is a snapshot. A member can exit, and its ID be reused, after the
-/// call returns, so callers bind each ID to a process handle and check that
-/// process's Job membership before acting on it.
-///
-/// The buffer grows and the query is retaken only on the kernel's own "too
-/// small" signal: a query that fails with `ERROR_MORE_DATA` (the header is
-/// written, so the assigned count sizes the next buffer), or one that succeeds
-/// with a full buffer. A successful list shorter than its buffer is complete.
-/// `assigned > ids.len()` names a member whose exit the kernel has not finished
-/// accounting; it is not a truncated list, and a larger buffer cannot change it
-/// (KEL-270 finding F54).
-fn list_job_process_ids(
-    raw_job: HANDLE,
-    phase: &'static str,
-) -> Result<WindowsJobProcessIdSnapshot, WindowsHostJobError> {
-    list_job_process_ids_from(raw_job, JOB_PROCESS_ID_LIST_INITIAL_IDS, phase)
-}
-
-/// [`list_job_process_ids`] from a caller-chosen initial capacity, so the growth
-/// path is reachable with a small Job.
-fn list_job_process_ids_from(
-    raw_job: HANDLE,
-    initial_ids: usize,
-    phase: &'static str,
-) -> Result<WindowsJobProcessIdSnapshot, WindowsHostJobError> {
-    list_job_process_ids_with(initial_ids, phase, |buffer| {
-        query_job_process_id_list(raw_job, buffer)
-    })
-}
-
-/// One `QueryInformationJobObject` of the process-ID list into `buffer`, which
-/// holds the record header and the ID array.
-fn query_job_process_id_list(raw_job: HANDLE, buffer: &mut [usize]) -> io::Result<()> {
-    let bytes = u32::try_from(std::mem::size_of_val(&*buffer)).map_err(|_| {
-        io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "process-ID list buffer exceeds u32",
-        )
-    })?;
-    // SAFETY: the caller retains the live Job handle; `buffer` is writable,
-    // usize-aligned storage of exactly `bytes`, which holds the record header
-    // and the IDs; the API writes within that size and retains no pointer.
-    let queried = unsafe {
-        QueryInformationJobObject(
-            raw_job,
-            JobObjectBasicProcessIdList,
-            buffer.as_mut_ptr().cast(),
-            bytes,
-            std::ptr::null_mut(),
-        )
-    };
-    if queried == 0 {
-        return Err(io::Error::last_os_error());
-    }
-    Ok(())
-}
-
-/// [`list_job_process_ids`] with the query as a parameter. Production passes
-/// [`query_job_process_id_list`]; the tests inject the kernel's outcomes. The
-/// query writes the record into the buffer it is given: `Err(ERROR_MORE_DATA)`
-/// with the header written when the buffer is too small, any other error as the
-/// OS reports it.
-fn list_job_process_ids_with(
-    initial_ids: usize,
-    phase: &'static str,
-    mut query: impl FnMut(&mut [usize]) -> io::Result<()>,
-) -> Result<WindowsJobProcessIdSnapshot, WindowsHostJobError> {
-    let mut capacity = initial_ids.max(1);
-    for _ in 0..JOB_PROCESS_ID_LIST_GROWTH_LIMIT {
-        let mut buffer = vec![0_usize; JOB_PROCESS_ID_LIST_HEADER_WORDS + capacity];
-        let short_buffer = match query(&mut buffer) {
-            Ok(()) => false,
-            Err(source) if source.raw_os_error() == Some(ERROR_MORE_DATA.cast_signed()) => true,
-            Err(source) => return Err(WindowsHostJobError { phase, source }),
-        };
-        // SAFETY: `buffer` starts with at least the record's size in initialized
-        // bytes at the alignment the record requires; the read copies the header
-        // out and keeps no pointer into the buffer.
-        let header = unsafe {
-            buffer
-                .as_ptr()
-                .cast::<JOBOBJECT_BASIC_PROCESS_ID_LIST>()
-                .read()
-        };
-        let assigned = usize::try_from(header.NumberOfAssignedProcesses).map_err(|_| {
-            WindowsHostJobError::contract(phase, "assigned-process count exceeds usize")
-        })?;
-        let listed = usize::try_from(header.NumberOfProcessIdsInList).map_err(|_| {
-            WindowsHostJobError::contract(phase, "listed-process count exceeds usize")
-        })?;
-        if listed > capacity {
-            return Err(WindowsHostJobError::contract(
-                phase,
-                "the Job reported more process IDs than the snapshot buffer holds",
-            ));
-        }
-        if short_buffer || listed == capacity {
-            capacity = assigned
-                .max(capacity.saturating_mul(2))
-                .saturating_add(JOB_PROCESS_ID_LIST_GROWTH_SLACK);
-            continue;
-        }
-        let ids = buffer
-            .iter()
-            .skip(JOB_PROCESS_ID_LIST_HEADER_WORDS)
-            .take(listed)
-            .map(|&id| {
-                u32::try_from(id)
-                    .map_err(|_| WindowsHostJobError::contract(phase, "process ID exceeds u32"))
-            })
-            .collect::<Result<Vec<u32>, _>>()?;
-        return Ok(WindowsJobProcessIdSnapshot {
-            ids,
-            assigned: header.NumberOfAssignedProcesses,
-        });
-    }
-    Err(WindowsHostJobError::contract(
-        phase,
-        "the Job's process list outgrew the snapshot buffer at every retake",
-    ))
-}
+mod process_id_snapshot;
+#[cfg(test)]
+use self::process_id_snapshot::{
+    JOB_PROCESS_ID_LIST_GROWTH_LIMIT, JOB_PROCESS_ID_LIST_HEADER_WORDS,
+    JOB_PROCESS_ID_LIST_INITIAL_IDS,
+};
+use self::process_id_snapshot::{WindowsJobProcessIdSnapshot, list_job_process_ids};
+#[cfg(test)]
+use self::process_id_snapshot::{list_job_process_ids_from, list_job_process_ids_with};
 
 fn open_lifecycle_transfer_target(
     target: &WindowsProcessPeer,
@@ -5471,178 +5306,7 @@ mod tests {
         assert!(again.to_string().contains("not released"), "{again}");
     }
 
-    #[test]
-    fn the_process_id_lister_grows_from_a_short_buffer_to_the_full_list() {
-        // The Job's members are exactly the occupants: `spawn_blocking_descendant`
-        // creates them with no console, so no console host joins the Job behind
-        // the test's back. Its end is the kernel's own notice: the completion
-        // port is associated while the Job is empty, so the active-process-zero
-        // message cannot be lost, and the empty list is asserted only after Job
-        // accounting read zero, through the crate's `wait_for_active_zero`, with
-        // the deadline as a kill switch. When an exited member leaves the list
-        // relative to its handle's signal is the kernel's ordering, not this
-        // test's, so a list taken straight after `wait` proves nothing.
-        //
-        // What this cell guards (KEL-270 F54): against the real kernel, the lister
-        // returns exactly the Job's members from three initial capacities. A
-        // success truncated at capacity 1 or 2 is not caught here but by the
-        // lister's full-buffer retake
-        // (`the_process_id_lister_retakes_a_success_that_filled_the_buffer`); only
-        // a truncation below capacity would fail this cell. Capacities 1, 2 and 32
-        // take the ERROR_MORE_DATA path twice and the plain path once.
-        let job = WindowsProcessJob::create().expect("create a kill-on-close Job");
-        let raw = job.handle.as_raw_handle().cast();
-        let completion_port = create_job_completion_port(raw)
-            .expect("associate a completion port with the empty Job");
-        let mut occupants: Vec<Child> = (0..3).map(|_| spawn_blocking_descendant()).collect();
-        for occupant in &occupants {
-            // SAFETY: both handles are live; the occupant is a test-owned fixture
-            // assigned to a test-owned Job for the duration of this test.
-            assert_ne!(
-                unsafe { AssignProcessToJobObject(raw, occupant.as_raw_handle().cast()) },
-                0,
-                "assign an occupant: {}",
-                io::Error::last_os_error()
-            );
-        }
-        let mut expected: Vec<u32> = occupants.iter().map(Child::id).collect();
-        expected.sort_unstable();
-        for initial in [1, 2, JOB_PROCESS_ID_LIST_INITIAL_IDS] {
-            let mut listed = list_job_process_ids_from(raw, initial, "test list")
-                .expect("list the Job")
-                .ids;
-            listed.sort_unstable();
-            assert_eq!(listed, expected, "initial capacity {initial}");
-        }
-        for occupant in &mut occupants {
-            occupant.kill().expect("end an occupant");
-            occupant.wait().expect("reap an occupant");
-        }
-        job.wait_for_active_zero(&completion_port, Instant::now() + RELEASE_WAIT)
-            .expect("the Job reaches zero active processes once its occupants exited");
-        assert_eq!(
-            list_job_process_ids(raw, "test list")
-                .expect("list the empty Job")
-                .ids,
-            Vec::<u32>::new(),
-            "a Job at zero active processes lists no process"
-        );
-    }
-
-    /// Writes one process-ID list record into a lister buffer, as the kernel
-    /// does: the two counts, then `ids` from the first array slot. `listed` is
-    /// `ids.len()`; `assigned` is whatever the case reports.
-    fn write_process_id_record(buffer: &mut [usize], assigned: u32, ids: &[u32]) {
-        assert!(
-            buffer.len() > JOB_PROCESS_ID_LIST_HEADER_WORDS + ids.len().saturating_sub(1),
-            "the lister's buffer must hold the header and the IDs"
-        );
-        let listed = u32::try_from(ids.len()).expect("a small ID count");
-        let record = buffer
-            .as_mut_ptr()
-            .cast::<JOBOBJECT_BASIC_PROCESS_ID_LIST>();
-        // SAFETY: `buffer` is usize-aligned, writable storage holding at least the
-        // record header (asserted above); the two writes stay inside it and keep
-        // no pointer.
-        unsafe {
-            (&raw mut (*record).NumberOfAssignedProcesses).write(assigned);
-            (&raw mut (*record).NumberOfProcessIdsInList).write(listed);
-        }
-        for (slot, id) in buffer
-            .iter_mut()
-            .skip(JOB_PROCESS_ID_LIST_HEADER_WORDS)
-            .zip(ids)
-        {
-            *slot = usize::try_from(*id).expect("a u32 ID fits usize");
-        }
-    }
-
-    #[test]
-    fn a_member_leaving_the_job_does_not_exhaust_the_snapshot_retakes() {
-        // KEL-270 F54: while a member leaves the Job the kernel reports one more
-        // assigned process than it lists, with success and room to spare. That
-        // state is not a short buffer, and no larger buffer changes it, so the
-        // lister returns what it listed at once instead of retaking until its
-        // growth limit refuses a healthy release. The injected query freezes the
-        // window that a descheduled exiting thread holds open on the real kernel.
-        let mut calls = 0_u32;
-        let snapshot = list_job_process_ids_with(32, "test list", |buffer| {
-            calls += 1;
-            write_process_id_record(buffer, 4, &[10, 11, 12]);
-            Ok(())
-        })
-        .expect("a member in transition must not refuse the snapshot");
-        assert_eq!(calls, 1, "a complete list is not retaken");
-        assert_eq!(snapshot.ids, [10, 11, 12]);
-        assert_eq!(snapshot.assigned, 4);
-    }
-
-    #[test]
-    fn the_process_id_lister_grows_on_error_more_data_and_reads_the_full_list() {
-        // Control for the F54 fix: a too-small buffer is the kernel's
-        // ERROR_MORE_DATA with the header written, and `assigned` sizes the retake.
-        let wanted: Vec<u32> = (100..140).collect();
-        let mut capacities = Vec::new();
-        let snapshot = list_job_process_ids_with(4, "test list", |buffer| {
-            let capacity = buffer.len() - JOB_PROCESS_ID_LIST_HEADER_WORDS;
-            capacities.push(capacity);
-            if capacity < wanted.len() {
-                write_process_id_record(buffer, 40, &wanted[..capacity]);
-                return Err(io::Error::from_raw_os_error(ERROR_MORE_DATA.cast_signed()));
-            }
-            write_process_id_record(buffer, 40, &wanted);
-            Ok(())
-        })
-        .expect("the list grows to fit");
-        assert_eq!(capacities.len(), 2, "{capacities:?}");
-        assert_eq!(capacities[0], 4);
-        assert!(capacities[1] >= 40, "{capacities:?}");
-        assert_eq!(snapshot.ids, wanted);
-        assert_eq!(snapshot.assigned, 40);
-    }
-
-    #[test]
-    fn the_process_id_lister_growth_limit_still_bounds_genuine_growth() {
-        // Control for the F54 fix: a Job that outruns every buffer is refused after
-        // the growth limit, not queried without end.
-        let mut calls = 0_u32;
-        let refusal = list_job_process_ids_with(4, "test list", |buffer| {
-            calls += 1;
-            let capacity = buffer.len() - JOB_PROCESS_ID_LIST_HEADER_WORDS;
-            let ids = vec![7_u32; capacity];
-            write_process_id_record(
-                buffer,
-                u32::try_from(capacity + 1).expect("a small count"),
-                &ids,
-            );
-            Err(io::Error::from_raw_os_error(ERROR_MORE_DATA.cast_signed()))
-        })
-        .expect_err("a Job that outgrows every buffer must be refused");
-        assert_eq!(calls, JOB_PROCESS_ID_LIST_GROWTH_LIMIT);
-        assert!(refusal.to_string().contains("outgrew"), "{refusal}");
-    }
-
-    #[test]
-    fn the_process_id_lister_retakes_a_success_that_filled_the_buffer() {
-        // The lister's defensive rule: a success whose list fills the buffer is
-        // retaken with a larger one, because the kernel could not then have shown
-        // whether the list was cut. The second query is the one that settles it.
-        let wanted: Vec<u32> = (200..204).collect();
-        let mut capacities = Vec::new();
-        let snapshot = list_job_process_ids_with(4, "test list", |buffer| {
-            let capacity = buffer.len() - JOB_PROCESS_ID_LIST_HEADER_WORDS;
-            capacities.push(capacity);
-            let listed = capacity.min(wanted.len());
-            write_process_id_record(buffer, 4, &wanted[..listed]);
-            Ok(())
-        })
-        .expect("the retake settles the list");
-        assert_eq!(capacities.len(), 2, "{capacities:?}");
-        assert_eq!(capacities[0], 4);
-        assert!(capacities[1] > 4, "{capacities:?}");
-        assert_eq!(snapshot.ids, wanted);
-        assert_eq!(snapshot.assigned, 4);
-    }
+    mod process_id_list;
 
     /// Two plain Jobs, `outer` standing for the host-death Job and `inner` for the
     /// released attempt Job nested under it, and two occupants assigned to `outer`
