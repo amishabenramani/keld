@@ -17,7 +17,7 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parents[2]
-PARENT = "2c488b9a4a9a31617af7806e317701ef6ac6a0cb"
+PARENT = "ca0e62cc0af8c972e83b1548d88f79c2e1af98be"
 BASELINE = "899e287ea487f38ec1cd347f7c9db8f1927348ef"
 SOURCE = "77b1c5aef9202a6cc0d84195fc1f4c32e1eb1cba"
 PARENT_REL = "docs/audits/macos-guardian-2026-10-19-059c70d8-eightfile"
