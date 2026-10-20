@@ -271,13 +271,39 @@ fn no_mount_overlap(target: &Path, mounts: &[PathBuf]) -> Result<(), String> {
     Ok(())
 }
 fn no_nested_mounts(target: &Path) -> Result<(), String> {
-    let physical = mount_points()?
-        .into_iter()
-        .map(|path| {
-            fs::canonicalize(&path).map_err(|e| format!("mount identity {}: {e}", path.display()))
-        })
+    no_mount_identity_overlap(target, mount_points()?)
+}
+fn no_mount_identity_overlap(target: &Path, mounts: Vec<PathBuf>) -> Result<(), String> {
+    let physical = mounts
+        .iter()
+        .map(|path| mount_identity(path))
         .collect::<Result<Vec<_>, _>>()?;
     no_mount_overlap(target, &physical)
+}
+/// Physical spelling of a mount point. A stale (ENOENT) or unreadable
+/// (EACCES) entry resolves through its deepest canonicalizable ancestor, so an
+/// unrelated entry no longer aborts preflight while any alias of a mount inside
+/// the canonical target still lands inside it. Mount tables record
+/// kernel-resolved paths, so the unresolved suffix holds no symlink; a suffix
+/// that cannot be placed (`..`, no file name) fails closed.
+fn mount_identity(path: &Path) -> Result<PathBuf, String> {
+    let mut suffix = Vec::new();
+    let mut cursor = path;
+    loop {
+        match fs::canonicalize(cursor) {
+            Ok(mut resolved) => {
+                resolved.extend(suffix.iter().rev());
+                return Ok(resolved);
+            }
+            Err(e) => match (cursor.parent(), cursor.file_name()) {
+                (Some(parent), Some(name)) => {
+                    suffix.push(name);
+                    cursor = parent;
+                }
+                _ => return Err(format!("mount identity {}: {e}", path.display())),
+            },
+        }
+    }
 }
 
 fn ignored_untracked(tree: &Path) -> Result<(), String> {

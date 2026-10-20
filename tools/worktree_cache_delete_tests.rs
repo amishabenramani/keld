@@ -396,6 +396,52 @@ fn mount_inventory_blocks_even_same_device_bind_mounts() {
 }
 
 #[test]
+fn unresolvable_mount_entries_outside_target_do_not_abort_preflight() {
+    // Regression for #935 review r4320898776: a stale or unreadable mount
+    // entry unrelated to the target must not abort preflight, while every
+    // spelling of a mount inside the target is still refused.
+    use super::no_mount_identity_overlap;
+    let f = Fixture::new(true);
+    let target = f.root.join("tree").join("target");
+    fs::create_dir_all(&target).unwrap();
+    let target = fs::canonicalize(&target).unwrap();
+    let check = |mount: PathBuf| no_mount_identity_overlap(&target, vec![mount]);
+    // Stale (ENOENT) entry outside the target, e.g. a Linux "(deleted)" mount.
+    assert!(check(f.root.join("gone").join("mnt")).is_ok());
+    // Stale entries inside the target are refused, not ignored.
+    assert!(check(target.join("gone").join("mnt")).is_err());
+    // An unresolved `..` can never be placed, so it fails closed.
+    let escape = f.root.join("gone").join("..").join("tree").join("target");
+    assert!(check(escape.join("mnt")).is_err());
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{PermissionsExt, symlink};
+        // An alias spelling of the target that cannot be fully resolved.
+        let alias = f.root.join("alias");
+        symlink(&target, &alias).unwrap();
+        assert!(check(alias.join("gone").join("mnt")).is_err());
+        // Unreadable (EACCES) parent outside the target, e.g. another user's
+        // FUSE mount; and the same shape inside the target.
+        let outside = f.root.join("locked");
+        let inside = target.join("locked");
+        for dir in [&outside, &inside] {
+            fs::create_dir_all(dir.join("mnt")).unwrap();
+            fs::set_permissions(dir, fs::Permissions::from_mode(0o000)).unwrap();
+        }
+        let outside_result = check(outside.join("mnt"));
+        let inside_result = check(inside.join("mnt"));
+        for dir in [&outside, &inside] {
+            fs::set_permissions(dir, fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        assert!(outside_result.is_ok(), "{outside_result:?}");
+        assert!(inside_result.is_err());
+    }
+    // Negative control: a resolvable mount inside the target is refused.
+    fs::create_dir(target.join("bind")).unwrap();
+    assert!(check(target.join("bind")).is_err());
+}
+
+#[test]
 fn dry_run_refuses_eligibility_when_the_process_guard_fails() {
     let f = Fixture::new(true);
     let mut args = f.args();
