@@ -16,6 +16,13 @@ trap cleanup EXIT
 fixture="$temp_dir/repo"
 home="$temp_dir/home"
 mkdir -p "$fixture/tools" "$home"
+# The isolated HOME must not hide the caller's rustup toolchains: on Unix,
+# rustup derives RUSTUP_HOME from HOME. The fixture also keeps the repo pin.
+if [[ -z "${RUSTUP_HOME:-}" ]] && command -v rustup >/dev/null 2>&1; then
+    RUSTUP_HOME="$(rustup show home)"
+    export RUSTUP_HOME
+fi
+cp "$repo_root/rust-toolchain.toml" "$fixture/rust-toolchain.toml"
 cp "$repo_root/justfile" "$fixture/justfile"
 cp "$repo_root/tools/worktree_cache.rs" "$repo_root/tools/worktree_cache_delete.rs" \
     "$repo_root/tools/worktree_cache_delete_tests.rs" "$fixture/tools/"
