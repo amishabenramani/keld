@@ -53,6 +53,19 @@ test("source-budget reporting stays advisory, visible and unprivileged", () => {
 
 
 
+test("source-budget tool unit tests run in normal unprivileged CI", () => {
+  const workflow = fixture();
+  const s = step(workflow, "changes", "Source budget tool tests");
+  const command = String(s.run);
+  expect(s["continue-on-error"]).toBeUndefined();
+  expect(s.if).toBeUndefined();
+  expect(command).toContain("tools/test_source_census.py");
+  expect(command).toContain("tools/test_source_budget_report.py");
+  const missing = fixture();
+  missing.jobs.changes!.steps = missing.jobs.changes!.steps.filter(x => x.name !== s.name);
+  expect(() => step(missing, "changes", "Source budget tool tests")).toThrow("missing fixture step");
+});
+
 test("new Rust test imports require explicit names in normal unprivileged CI", () => {
   const workflow = fixture();
   const s = step(workflow, "changes", "Test module import ownership");
