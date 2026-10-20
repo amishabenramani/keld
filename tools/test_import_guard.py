@@ -145,16 +145,18 @@ def added_lines(diff):
 
 
 def violations(repo, base, head):
+    # Three-dot ranges compare from the merge base, so base-branch changes made
+    # after the fork are never attributed to the head as added lines.
     git(repo, "rev-parse", "--verify", base + "^{commit}")
     git(repo, "rev-parse", "--verify", head + "^{commit}")
     paths = git(repo, "diff", "--no-renames", "--name-only", "-z",
-                "--diff-filter=AM", base, head, "--", "crates").decode("utf-8")
+                "--diff-filter=AM", f"{base}...{head}", "--", "crates").decode("utf-8")
     results = []
     for path in filter(None, paths.split("\0")):
         if not is_owner_test(path):
             continue
         content = git(repo, "show", head + ":" + path).decode("utf-8")
-        diff = git(repo, "diff", "--no-renames", "-U0", base, head, "--", path).decode("utf-8")
+        diff = git(repo, "diff", "--no-renames", "-U0", f"{base}...{head}", "--", path).decode("utf-8")
         for line in sorted(active_glob_lines(content) & added_lines(diff)):
             results.append((path, line))
     return results

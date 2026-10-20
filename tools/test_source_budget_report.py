@@ -200,12 +200,12 @@ class RealGitReportContracts(unittest.TestCase):
             census.git(repo, "config", "gc.auto", "0")
             census.git(repo, "config", "maintenance.auto", "false")
 
-            (repo / "legacy.rs").write_text(("x" * 37 + "\n") * 1300, encoding="utf-8")
+            (repo / "legacy.rs").write_text(("x" * 37 + "\n") * 1300, encoding="utf-8", newline="\n")
             census.git(repo, "add", ".")
             self.commit(repo, "baseline over the line cap")
             base = census.git(repo, "rev-parse", "HEAD").decode().strip()
 
-            (repo / "legacy.rs").write_text(("x" * 53 + "\n") * 1100, encoding="utf-8")
+            (repo / "legacy.rs").write_text(("x" * 53 + "\n") * 1100, encoding="utf-8", newline="\n")
             census.git(repo, "add", "-A")
             self.commit(repo, "fewer lines, more bytes, under both caps")
             head = census.git(repo, "rev-parse", "HEAD").decode().strip()

@@ -91,6 +91,10 @@ jobs:
             echo 'test-imports: initial push has no before commit; PR gate remains enforced'
             exit 0
           fi
+          if [[ "$KELD_IMPORT_EVENT" == 'push' ]] && ! git cat-file -e "${KELD_IMPORT_BASE_SHA}^{commit}" 2>/dev/null; then
+            echo 'test-imports: push before commit unavailable (force-push); PR gate remains enforced'
+            exit 0
+          fi
           python3 -B tools/test_import_guard.py --repo . \
             --base "$KELD_IMPORT_BASE_SHA" --head "$KELD_IMPORT_HEAD_SHA"
       # Unit tests for the report-only source-budget tool. The report stays

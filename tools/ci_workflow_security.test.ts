@@ -63,7 +63,7 @@ test("source-budget tool unit tests run in normal unprivileged CI", () => {
   expect(command).toContain("tools/test_source_budget_report.py");
   const missing = fixture();
   missing.jobs.changes!.steps = missing.jobs.changes!.steps.filter(x => x.name !== s.name);
-  expect(() => step(missing, "changes", "Source budget tool tests")).toThrow("missing fixture step");
+  expect(() => check(missing)).toThrow("Source budget tool tests must occur exactly once");
 });
 
 test("new Rust test imports require explicit names in normal unprivileged CI", () => {
@@ -81,7 +81,7 @@ test("new Rust test imports require explicit names in normal unprivileged CI", (
   expect(String(env.KELD_IMPORT_HEAD_SHA)).toContain("github.event.pull_request.head.sha");
   const missing = fixture();
   missing.jobs.changes!.steps = missing.jobs.changes!.steps.filter(x => x.name !== s.name);
-  expect(() => step(missing, "changes", "Test module import ownership")).toThrow("missing fixture step");
+  expect(() => check(missing)).toThrow("Test module import ownership must occur exactly once");
 });
 
 test("Windows media oracle matches its reviewed full-file digest", () => {

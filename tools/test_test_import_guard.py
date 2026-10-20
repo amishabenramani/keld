@@ -64,6 +64,16 @@ class TestDiffGuard(unittest.TestCase):
         head = self.commit()
         self.assertEqual([], guard.violations(self.repo, base, head))
 
+    def test_base_moving_after_fork_is_not_attributed_to_head(self):
+        self.put(EXISTING, "use super::*;\n")
+        fork = self.commit()
+        self.put(EXISTING, "use super::{connected_pair};\n")
+        moved_base = self.commit()
+        self.run_git("checkout", "-q", fork)
+        self.put(PRODUCTION, "pub fn example() {}\n")
+        head = self.commit()
+        self.assertEqual([], guard.violations(self.repo, moved_base, head))
+
     def test_nested_test_paths_and_fixture_precedence(self):
         self.assertTrue(guard.is_owner_test(NESTED))
         self.assertTrue(guard.is_owner_test(NEW))
