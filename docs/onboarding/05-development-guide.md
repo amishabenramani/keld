@@ -107,8 +107,8 @@ CI's Ubuntu `deny` job evaluates the same macOS dependency set.
 | `just` target | Equivalent command |
 |---|---|
 | `just hello` | `cargo run -p keld-host --bin keld-host -- --hello` |
-| `just fmt` | `cargo fmt --all` |
-| `just fmt-check` | `cargo fmt --all --check` |
+| `just fmt` | `cargo fmt --all` then `tools/fmt_included.sh` |
+| `just fmt-check` | `cargo fmt --all --check` then `tools/fmt_included.sh test` and `tools/fmt_included.sh --check` |
 | `just clippy` | `cargo clippy --workspace --all-targets -- -D warnings` |
 | `just test` | `cargo nextest run --workspace --profile ci` |
 | `just doc` | `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps` |
@@ -182,7 +182,7 @@ job count and trigger details. Its stable responsibilities are:
 
 | Job | Runner(s) | What it does |
 |---|---|---|
-| `rustfmt` | ubuntu | `cargo fmt --all --check` |
+| `rustfmt` | ubuntu | `cargo fmt --all --check`, then `tools/fmt_included.sh test` and `--check` for `include!`d files `cargo fmt` never visits |
 | `clippy + test` | ubuntu **and** macos **and** windows, `fail-fast: false` | `cargo clippy --workspace --all-targets -- -D warnings`, then `cargo nextest run --workspace --profile ci`; plus `cargo doc --workspace --no-deps` with `RUSTDOCFLAGS: -D warnings` on ubuntu only |
 | `MSRV` | ubuntu | reads `rust_version` out of `cargo metadata` and runs `cargo check --workspace --all-targets` on that exact toolchain — so the job can never drift from `Cargo.toml` |
 | `cargo-deny` | ubuntu | licenses / advisories / bans / sources per `deny.toml` |

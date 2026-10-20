@@ -150,6 +150,11 @@ jobs:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       - run: cargo fmt --all --check
+      # `cargo fmt` never visits `include!`d files or the `mod` files under them.
+      - name: rustfmt include!d files
+        run: |
+          tools/fmt_included.sh test
+          tools/fmt_included.sh --check
 
   check:
     name: clippy + test (${{ matrix.os }})
