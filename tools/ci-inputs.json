@@ -72,7 +72,7 @@
         "docs/engineering/budget-scoreboard.md",
         "docs/engineering/compat-scoreboard.md"
       ],
-      "contract": "Rust external reads include the CLI recursive tools registry scan, the CLI GH-508 channel-id and capability-literal scan of every crate source tree, the generated docs_search corpus and its reviewed source inventory, security docs assertions, and crate-local reports. Reader-source drift invalidates this recorded scope. Agents still run full format, clippy and workspace tests before completion; ordinary invocation routing selects these gates only when relevant. documentation_inputs are read only as text by keld-cli: docs_search embeds llms-full.txt behind keld_cli::mcp, which no reverse dependent calls (keld-host tests use keld_cli::boot, create and dev only), and the registry and doctor tests are keld-cli's own. A diff whose only matching paths are documentation_inputs therefore selects keld-cli without Cargo reverse dependents (#624). A reverse dependent that starts reading one of these documents, or calling keld_cli::mcp, must move that document into inputs in the same change.",
+      "contract": "Rust external reads include the CLI recursive tools registry scan, the CLI GH-508 channel-id and capability-literal scan of every crate source tree, the generated docs_search corpus and its reviewed source inventory, security docs assertions, and crate-local reports. The native public_fs/project.rs composition reader consumes the public API index through the existing bundle owner and is registered before its feature source lands. Reader-source drift invalidates this recorded scope. Agents still run full format, clippy and workspace tests before completion; ordinary invocation routing selects these gates only when relevant. documentation_inputs are read only as text by keld-cli: docs_search embeds llms-full.txt behind keld_cli::mcp, which no reverse dependent calls (keld-host tests use keld_cli::boot, create and dev only), and the registry and doctor tests are keld-cli's own. A diff whose only matching paths are documentation_inputs therefore selects keld-cli without Cargo reverse dependents (#624). A reverse dependent that starts reading one of these documents, or calling keld_cli::mcp, must move that document into inputs in the same change.",
       "reader_set": "rust-readers"
     },
     {
@@ -91,9 +91,12 @@
         "crates/keld-ipc/src/echo.rs",
         "crates/keld-ipc/src/lifecycle.rs",
         "crates/keld-ipc/src/channel_table.rs",
+        "crates/keld-native/src/fs.rs",
+        "crates/keld-native/src/auth/mod.rs",
+        "crates/keld-native/tests/fixtures/fs-payload-v0.tsv",
         "crates/keld-wv/src/wkwebview/macos_bridge.rs"
       ],
-      "contract": "Bun reads IPC constants and CLI templates, generates and drift-checks the channel-table region from crates/keld-ipc/src/channel_table.rs, scans production TypeScript and the macOS bridge's injected scripts for channel-id literals, echo declaration ownership scans every production .ts under crates and packages, and transport tests census every public-tree filename ending receiver-semantics-v0.tsv. Source-reader drift invalidates exclusions.",
+      "contract": "Bun reads IPC constants and CLI templates, generates and drift-checks the channel-table region from crates/keld-ipc/src/channel_table.rs, scans production TypeScript and the macOS bridge's injected scripts for channel-id literals, echo declaration ownership scans every production .ts under crates and packages, and transport tests census every public-tree filename ending receiver-semantics-v0.tsv. The bounded native FS generator/check reads crates/keld-native/src/fs.rs, and its semantic tests read crates/keld-native/tests/fixtures/fs-payload-v0.tsv. The bounded native auth generator/check and its semantic tests read crates/keld-native/src/auth/mod.rs. Source-reader drift invalidates exclusions.",
       "reader_set": "bun-readers"
     },
     {
@@ -183,7 +186,7 @@
         "crates/keld-cli/tests/support/rust_source_scan.rs",
         "tools/llms_docs.rs"
       ],
-      "contract": "TempRepositoryMaintenanceTests also scans every tracked .py, .sh, .rs and .ts file outside these inputs for a git init that leaves background maintenance on (#670). Those edits deliberately do not select this local gate, so a pure Rust edit stays selective (test_real_rust_content_edit_and_added_reader_have_distinct_scope); the hosted router job runs this suite on every event and enforces the census there.",
+      "contract": "",
       "reader_set": "policy-readers"
     },
     {
@@ -352,16 +355,18 @@
         "crates/keld-cli/tests/channel_table_scan.rs",
         "crates/keld-cli/tests/channel_id_feature.rs",
         "crates/keld-cli/tests/support/rust_source_scan.rs",
-        "tools/llms_docs.rs"
+        "tools/llms_docs.rs",
+        "crates/keld-host/tests/no_flag/macos/public_fs/project.rs",
+        "crates/keld-host/tests/no_flag/macos/public_fs.rs"
       ],
-      "sha256": "2cd170d010ef72746f25ba0e44ba7c459d3fb2b8ff6cf954e12196a0aaaaf595"
+      "sha256": "a8f9fad55d3ce83d3d1c49b5f30f13c16414860b3ef5440ac8c2117fe5df9cce"
     },
     "bun-readers": {
       "patterns": [
         "packages/*",
         "justfile"
       ],
-      "sha256": "1f4265b853233386263a740b22fa3b591cf662e23fb418f50fe9ce157b361242"
+      "sha256": "0ba5714275ae1c8e04b8f4953330a59b7df45a25ddc0b3dd6ea355ebbca96fa9"
     },
     "policy-readers": {
       "patterns": [
@@ -371,14 +376,14 @@
         ".githooks/*",
         "rust-toolchain.toml"
       ],
-      "sha256": "dafa849d764d17d75cbe48b0c75375e409337ca46759b4f0673c7be9092618e1"
+      "sha256": "3507b24a8c87004c34e9fe1d20d9701b36bcb1cedf56b3312459d69637c94ea3"
     },
     "audit-readers": {
       "patterns": [
         "docs/audits/*.py",
         "justfile"
       ],
-      "sha256": "84b3933900ae6029f02b66a9206678da49bf90249fe59beee40d8d44f5f8216d"
+      "sha256": "90aa124decb3cda17a73ac456ebb3b71d1a12285553e0be08f7c1b9f40cabc8d"
     },
     "rustdoc-readers": {
       "patterns": [
@@ -388,13 +393,13 @@
         "rust-toolchain.toml",
         ".cargo/*"
       ],
-      "sha256": "f65bfe69d9add5c915b814c27a1606a3539ac70ce39e52b803448fff0a2586b4"
+      "sha256": "c91883cdce40f196551ff521affd20c155e269472b1ec29ae0f0b7b729ce0463"
     },
     "dependency-command": {
       "patterns": [
         "justfile"
       ],
-      "sha256": "05684d6c898c75bf3c8e9898fcfad33e50b17a5b70a3335d8cbb8c0d5d9b679b"
+      "sha256": "e6c180fb95911435aedf92ae051c52cd530e11e77d4a3151cd4d8af18e547280"
     },
     "status-test-readers": {
       "patterns": [
@@ -404,7 +409,7 @@
         "rust-toolchain.toml",
         "justfile"
       ],
-      "sha256": "f181d61b1d40e4c47cf5dbfdd8612c5de9eba556a925b74276d40332b6666da9"
+      "sha256": "2248e15eba9ec3bd061a3bacfd83c65fa8c3caffc67a2629ce57386a1ee49f1f"
     }
   },
   "live_inputs": {
@@ -417,7 +422,7 @@
     "patterns": [
       "crates/*"
     ],
-    "membership_sha256": "1d6b5e46c76889547b6bc99c440db40d157f36273f9a258de8119784dfd782a0",
+    "membership_sha256": "d87fd58a87c0540efdbfa1a6fd0f22dc60b154829e47453100f88cb28075e834",
     "contract": "Broad census binds path membership only: new/removed crate paths fail closed. Existing crate-content edits select Rust through the crates/* input edge. A new cross-tree read in an existing source must register that reader and its input edge in the same change; exact-reader content digests then guard future drift."
   },
   "rust_package_inputs": {

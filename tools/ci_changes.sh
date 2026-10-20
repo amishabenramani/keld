@@ -754,6 +754,15 @@ classify_path() {
             ;;
     esac
 
+    # KEL-270 F56: tools/ci_workflow_security.ts pins the reviewed SHA-256 of the
+    # Windows media oracle, and the hosted bun "Contract tests" step that checks
+    # that pin runs only when hygiene is true. Additive: owners below still apply.
+    case "$changed_file" in
+        crates/keld-wv/tests/windows_media_guard.ps1)
+            hygiene="$TRUE"
+            ;;
+    esac
+
     case "$changed_file" in
         # Agent instruction and assembly changes must run both generated-doc
         # freshness and the merge-blocking instruction-context/hygiene gates.
@@ -946,9 +955,9 @@ classify_stream() {
         contract_options+=(--paths-only)
     fi
     if [[ ${#changed_files[@]} -gt 0 ]]; then
-        apply_consumer_contract "${contract_options[@]}" < <(printf '%s\0' "${changed_files[@]}")
+        apply_consumer_contract ${contract_options[@]+"${contract_options[@]}"} < <(printf '%s\0' "${changed_files[@]}")
     else
-        apply_consumer_contract "${contract_options[@]}" </dev/null
+        apply_consumer_contract ${contract_options[@]+"${contract_options[@]}"} </dev/null
     fi
     finalize_selection
     if [[ "$mode" == worktree && "$markdown_changed" != "$TRUE" ]]; then
