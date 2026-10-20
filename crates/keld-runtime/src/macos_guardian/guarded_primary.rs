@@ -215,6 +215,10 @@ impl GuardedPrimary {
 
     /// Records accepted host shutdown before a correlated reply is published.
     ///
+    /// Use it only for a Quit accepted from a bound generation. The Guardian
+    /// refuses Q before its first generation exists; cancel an unbound
+    /// startup with [`Self::shutdown`], whose S is acknowledged at every stage.
+    ///
     /// # Errors
     ///
     /// Returns a typed lifecycle error when the guardian cannot acknowledge
