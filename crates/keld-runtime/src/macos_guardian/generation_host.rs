@@ -1,8 +1,6 @@
 //! One owner for host-side primary generation control and recovery transitions.
 use super::generation_wire::initial_generation_record_timeout;
-use super::process_group::{
-    require_attested_group_absence, terminate_attested_group, validate_guardian_child_group,
-};
+use super::process_group::{require_attested_group_absence, validate_guardian_child_group};
 use super::{
     BoundRoleGeneration, CONTROL_CLEAR, CONTROL_CLEARED, CONTROL_PREPARE, CONTROL_PREPARED,
     CONTROL_REGISTERED, CONTROL_REVOKE, CONTROL_REVOKED, CONTROL_SPAWNED,
@@ -229,11 +227,14 @@ pub(super) fn run_generation_host(
                         // fail-safe retains its original birth on an OS fault.
                         // Never trust the caller's raw numeric group alone.
                         let mut retained = lock_generation(current_generation);
-                        *retained = Some(RegisteredPrimaryGeneration::authenticated(
-                            record.attempt,
-                            group_identity,
-                        ));
-                        let native_cleanup = terminate_attested_group(group_identity);
+                        // A failed attempt spends the retained generation's
+                        // signal authority; later host paths only probe.
+                        let native_cleanup = retained
+                            .insert(RegisteredPrimaryGeneration::authenticated(
+                                record.attempt,
+                                group_identity,
+                            ))
+                            .terminate();
                         if native_cleanup.is_ok() {
                             retained.take();
                         }
@@ -357,10 +358,15 @@ pub(super) fn run_generation_host(
                     // make a still-running descendant invisible to the host.
                     // SIGKILL success is not sufficient: a held zombie still
                     // has a live PGID. Only dual ESRCH permits CLEARED.
-                    if let Some(generation) = registered_generation {
+                    if let Some(mut generation) = registered_generation {
                         match generation.group_identity {
                             Some(group) => {
-                                terminate_attested_group(group)?;
+                                // Never a second signal after an earlier
+                                // failed attempt for this same generation:
+                                // persist a newly spent authority before `?`.
+                                let signalled = generation.signal_if_armed();
+                                *current_generation_owner = Some(generation);
+                                signalled?;
                                 require_attested_group_absence(group, absence_deadline)?;
                             }
                             #[cfg(test)]

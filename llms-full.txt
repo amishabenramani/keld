@@ -2813,7 +2813,14 @@ screencast on Wayland) on Linux, with portal-first behavior so sandboxed formats
   fresh command in an isolated process group, revokes registered resources on
   every post-start failure, signals the group once, and waits its direct child.
   `HostGuardian` consumes the group identity on every terminal path, so an API
-  retry cannot signal a reused PGID. Unexpected guardian exit produces
+  retry cannot signal a reused PGID. `GuardedPrimary` instead retains a
+  generation's birth after a failed native cleanup, but that retained record
+  is custody, not repeated signal authority: the first failed or refused
+  host-side attempt makes the generation probe-only, so every later fail-safe,
+  shutdown or KGC1 CLEAR for it runs only the read-only dual-ESRCH absence
+  check and never `killpg`. Terminal-path retries share that first attempt's
+  single reap budget, and one shutdown makes at most one native attempt.
+  Unexpected guardian exit produces
   `KELD-RUNTIME-013` only after the host fail-safe; orderly shutdown closes the
   same writer. The KEL-96 supervised variant may first write one fixed
   non-authority accepted-Quit byte through that host-exclusive pipe; the

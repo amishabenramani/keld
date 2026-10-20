@@ -234,6 +234,15 @@ pub(super) fn validate_guardian_child_group(
 /// while that group has members. This is not a kernel-held group handle, so an
 /// empty/recycled group between inspections remains a documented race.
 pub(super) fn terminate_attested_group(group: GroupIdentity) -> Result<(), RuntimeError> {
+    terminate_attested_group_until(group, Instant::now() + GUARDIAN_SHUTDOWN_DEADLINE / 4)
+}
+
+/// [`terminate_attested_group`] with a caller-owned absolute reap deadline,
+/// so a retained owner can bound every attempt by one shared budget.
+pub(super) fn terminate_attested_group_until(
+    group: GroupIdentity,
+    reap_deadline: Instant,
+) -> Result<(), RuntimeError> {
     match observe_group_identity(group.pid) {
         Ok(current) if current == group => terminate_registered_group(group.pid),
         Ok(_) => Err(lifecycle_error(
@@ -253,7 +262,6 @@ pub(super) fn terminate_attested_group(group: GroupIdentity) -> Result<(), Runti
             // Retain the original fail-closed rule and retry ONLY the safe
             // absence probe, within a fraction of the existing shutdown
             // deadline. Never signal on an ambiguous EPERM or an extant PID.
-            let reap_deadline = Instant::now() + GUARDIAN_SHUTDOWN_DEADLINE / 4;
             let mut saw_ambiguous_group = false;
             loop {
                 let leader = getpgid(Some(Pid::from_raw(raw)));
