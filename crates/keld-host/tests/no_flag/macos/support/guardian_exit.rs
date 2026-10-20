@@ -11,11 +11,16 @@
 //!   verified Quit-body receipt.
 //!
 //! An absent event is never evidence of liveness. A refused registration, a
-//! failed read, or a read that finishes past the caller's deadline never
-//! becomes a successful kernel-exit observation.
+//! failed or interrupted read, or a read that finishes past the caller's
+//! deadline never becomes a successful kernel-exit observation.
 
 use crate::support::process::ProcessExitObserver;
+use std::process::ExitStatus;
 use std::time::Instant;
+
+/// One native read of the armed observer; tests inject a fault here.
+type NativeRead<'a> =
+    dyn FnMut(&mut ProcessExitObserver) -> std::io::Result<Option<ExitStatus>> + 'a;
 
 /// Fixed, payload-free classes. Markers never carry a PID or event data.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -37,7 +42,7 @@ pub(crate) enum GuardianExitPhase {
     ObservedUnorderedWithBodyReceipt,
     /// An empty read followed receipt verification, then the exit arrived.
     ObservedAfterBodyReceipt,
-    /// A failed read, or a read that ended past the caller's deadline.
+    /// A failed or interrupted read, or one that ended past the deadline.
     Unproved,
 }
 
@@ -109,10 +114,14 @@ impl GuardianExitWitness {
     /// Quit, with no other work in between: an event read here happened before
     /// the release, and an empty read here orders every later event after it.
     pub(crate) fn seal_before_quit_release(&mut self) {
+        self.seal_with(&mut ProcessExitObserver::try_read_exit);
+    }
+
+    fn seal_with(&mut self, read: &mut NativeRead<'_>) {
         if self.phase != GuardianExitPhase::Registered {
             return;
         }
-        self.phase = match self.read() {
+        self.phase = match self.read_with(read) {
             Ok(Some(())) => GuardianExitPhase::ObservedBeforeQuitRelease,
             Ok(None) => GuardianExitPhase::NotObserved,
             Err(()) => GuardianExitPhase::Unproved,
@@ -130,16 +139,31 @@ impl GuardianExitWitness {
     /// One zero-time read; the Host wait callback calls this only while the
     /// Host Child is live. A read ending at or past `deadline` is unproved.
     pub(crate) fn poll(&mut self, deadline: Instant) {
+        self.poll_with(
+            deadline,
+            &mut Instant::now,
+            &mut ProcessExitObserver::try_read_exit,
+        );
+    }
+
+    /// `poll` with the clock and the native read injectable, so tests can place
+    /// the deadline between the two clock reads without sleeping.
+    fn poll_with(
+        &mut self,
+        deadline: Instant,
+        now: &mut dyn FnMut() -> Instant,
+        read: &mut NativeRead<'_>,
+    ) {
         if self.phase != GuardianExitPhase::NotObserved {
             return;
         }
-        if Instant::now() >= deadline {
+        if now() >= deadline {
             self.phase = GuardianExitPhase::Unproved;
             return;
         }
-        let event = self.read();
+        let event = self.read_with(read);
         // A zero-time kernel read can still be scheduled past the Host clock.
-        if Instant::now() >= deadline {
+        if now() >= deadline {
             self.phase = GuardianExitPhase::Unproved;
             return;
         }
@@ -173,10 +197,11 @@ impl GuardianExitWitness {
         self.phase.marker()
     }
 
-    fn read(&mut self) -> Result<Option<()>, ()> {
+    /// Only a completed empty read is evidence. Every error, including an
+    /// interrupted read that may not have scanned the queue, is unproved.
+    fn read_with(&mut self, read: &mut NativeRead<'_>) -> Result<Option<()>, ()> {
         let observer = self.observer.as_mut().ok_or(())?;
-        observer
-            .try_poll_exit()
+        read(observer)
             .map(|status| status.map(|_| ()))
             .map_err(|_| ())
     }
@@ -187,7 +212,7 @@ mod tests {
     use super::{GuardianExitPhase, GuardianExitWitness};
     use crate::support::PROCESS_DEADLINE;
     use crate::support::process::ProcessExitObserver;
-    use std::process::{Child, Command, Stdio};
+    use std::process::{Child, Command, ExitStatus, Stdio};
     use std::thread;
     use std::time::Instant;
 
@@ -391,8 +416,9 @@ mod tests {
         assert_eq!(witness.phase(), GuardianExitPhase::RegistrationRefused);
     }
 
-    /// A read at or past the caller's deadline is unproved even when the real
-    /// exit event is already queued.
+    /// A poll that starts at or past the caller's deadline is unproved even
+    /// when the real exit event is already queued. This reaches only the check
+    /// before the read; the check after it is pinned by the next test.
     #[test]
     fn native_exit_read_past_deadline_is_unproved() {
         let mut child = OwnedShell::status23();
@@ -403,6 +429,82 @@ mod tests {
         await_exit_independently(&mut oracle);
         witness.poll(Instant::now());
         assert_eq!(witness.phase(), GuardianExitPhase::Unproved);
+        child.reap_status23();
+    }
+
+    /// A read that starts before the deadline but ends at it is unproved even
+    /// though the real queued exit was dequeued. The injected clock is before
+    /// the deadline for the pre-read check and at it for the post-read check;
+    /// without the post-read check this reads as `ObservedAfterQuitRelease`.
+    #[test]
+    fn native_exit_read_ending_at_deadline_is_unproved() {
+        let mut child = OwnedShell::status23();
+        let mut oracle = ProcessExitObserver::arm(child.0.id());
+        let mut witness = GuardianExitWitness::register(child.0.id());
+        child.assert_live();
+        witness.seal_before_quit_release();
+        assert_eq!(witness.phase(), GuardianExitPhase::NotObserved);
+        child.release();
+        await_exit_independently(&mut oracle);
+        let before_deadline = Instant::now();
+        let deadline = before_deadline + PROCESS_DEADLINE;
+        let mut clock = [before_deadline, deadline].into_iter();
+        let mut reads = 0_u8;
+        witness.poll_with(
+            deadline,
+            &mut || clock.next().expect("poll reads the clock exactly twice"),
+            &mut |observer| {
+                reads += 1;
+                observer.try_read_exit()
+            },
+        );
+        assert_eq!(reads, 1, "the pre-read check let the native read run");
+        assert_eq!(
+            witness.phase(),
+            GuardianExitPhase::Unproved,
+            "a dequeued exit from a read that ended at the deadline is unproved"
+        );
+        assert_eq!(
+            clock.next(),
+            None,
+            "both deadline checks consulted the clock"
+        );
+        child.reap_status23();
+    }
+
+    fn interrupted(_: &mut ProcessExitObserver) -> std::io::Result<Option<ExitStatus>> {
+        Err(std::io::Error::from(std::io::ErrorKind::Interrupted))
+    }
+
+    /// An interrupted read may not have scanned the queue, so it is never a
+    /// proven-empty read: neither the seal nor the post-receipt fence may
+    /// advance on it. Mapping `Interrupted` to "no event" fails both asserts.
+    #[test]
+    fn interrupted_native_read_is_unproved_not_empty() {
+        let mut child = OwnedShell::status23();
+        let mut sealed = GuardianExitWitness::register(child.0.id());
+        let mut fenced = GuardianExitWitness::register_with_body_receipt_fence(child.0.id());
+        child.assert_live();
+        sealed.seal_with(&mut interrupted);
+        assert_eq!(
+            sealed.phase(),
+            GuardianExitPhase::Unproved,
+            "an interrupted sealing read must not order later exits after Quit"
+        );
+        fenced.seal_before_quit_release();
+        assert_eq!(fenced.phase(), GuardianExitPhase::NotObserved);
+        fenced.note_body_receipt_verified();
+        fenced.poll_with(
+            Instant::now() + PROCESS_DEADLINE,
+            &mut Instant::now,
+            &mut interrupted,
+        );
+        assert_eq!(
+            fenced.phase(),
+            GuardianExitPhase::Unproved,
+            "an interrupted post-receipt read must not order the fence"
+        );
+        child.release();
         child.reap_status23();
     }
 }

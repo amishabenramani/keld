@@ -407,8 +407,19 @@ impl ProcessExitObserver {
     }
 
     /// Read an already armed process-exit event without delaying Host shutdown.
-    /// No event never proves the original process is still live.
+    /// No event never proves the original process is still live. An
+    /// interrupted read is reported as no event; retry loops rely on that.
     pub(crate) fn try_poll_exit(&mut self) -> std::io::Result<Option<std::process::ExitStatus>> {
+        match self.try_read_exit() {
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => Ok(None),
+            outcome => outcome,
+        }
+    }
+
+    /// The one zero-time native read. Unlike [`Self::try_poll_exit`], an
+    /// interrupted read stays an `Interrupted` error, so an ordering witness
+    /// never mistakes a read that did not complete for a proven-empty queue.
+    pub(crate) fn try_read_exit(&mut self) -> std::io::Result<Option<std::process::ExitStatus>> {
         use std::os::fd::AsRawFd as _;
         if let Some(status) = self.observed_status {
             return Ok(Some(status));
@@ -437,12 +448,7 @@ impl ProcessExitObserver {
             return Ok(None);
         }
         if received < 0 {
-            let error = std::io::Error::last_os_error();
-            return if error.kind() == std::io::ErrorKind::Interrupted {
-                Ok(None)
-            } else {
-                Err(error)
-            };
+            return Err(std::io::Error::last_os_error());
         }
         if received != 1
             || event.ident != u64::from(self.pid)
