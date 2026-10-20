@@ -2,7 +2,7 @@
 
 **Conservative, source-reviewed-LIMITED documentation. It does not change any production behavior, re-run native tests, certify process custody, approve a merge, or complete the architecture review.**
 
-This isolated docs-only child builds directly on **draft #984** at exact head `54ac81e57f676a7805520b2cc7cb12a0fa3d13e9`. Source receipts remain pinned to historical **#949** `899e287ea487f38ec1cd347f7c9db8f1927348ef` and original **#952** `77b1c5aef9202a6cc0d84195fc1f4c32e1eb1cba`, not to an arbitrarily later branch. All seven reviewed paths have the **same exact Git blob** in both snapshots and were previously `pending-source-review` in #984.
+This isolated docs-only child builds directly on **draft #984** at exact head `7cf35e99dd02f4aa58158eb0b40f9a4ea82e0224`. Source receipts remain pinned to historical **#949** `899e287ea487f38ec1cd347f7c9db8f1927348ef` and original **#952** `77b1c5aef9202a6cc0d84195fc1f4c32e1eb1cba`, not to an arbitrarily later branch. All seven reviewed paths have the **same exact Git blob** in both snapshots and were previously `pending-source-review` in #984.
 
 ## Exact reviewed scope
 
