@@ -3,6 +3,7 @@
 use crate::support::EVENT_DEADLINE;
 use crate::support::control::{wait_child_output, wait_child_output_observing};
 use crate::support::dev_cycle::ShippingLaunchCleanup;
+use crate::support::guardian_exit::GuardianExitWitness;
 use crate::support::native_window::{
     NativeWindowObserver, await_same_native_windows, native_windows,
 };
@@ -25,8 +26,6 @@ mod application_link;
 mod component;
 #[path = "public_fs/descendant_quit.rs"]
 mod descendant_quit;
-#[path = "public_fs/guardian_exit_witness.rs"]
-mod guardian_exit_witness;
 #[path = "public_fs/observer.rs"]
 mod observer;
 #[path = "public_fs/outcomes.rs"]
@@ -44,7 +43,6 @@ mod quit_body_receipt;
 #[path = "public_fs/retirement.rs"]
 mod retirement;
 use application_link::assert_single_application_link;
-use guardian_exit_witness::GuardianExitWitness;
 use observer::{Observation, RecoveryCommand, RecoveryPhase};
 use outcomes::{
     assert_component_outcomes, assert_component_trace, assert_handler_attribution,
@@ -183,11 +181,15 @@ fn wait_public_host_with_phase(
             if let Some(receipt) = body_receipt.as_deref_mut() {
                 receipt.poll(receipt_deadline);
                 last_live_bun_body_stage = receipt.stage();
-                if receipt.is_verified()
-                    && let Some(exit) = guardian_exit.as_deref_mut()
-                {
+                // Read the Guardian on every live callback from the seal on. The
+                // read right after the receipt is first seen verified is the one
+                // that can order a later exit after that receipt.
+                if let Some(exit) = guardian_exit.as_deref_mut() {
+                    if receipt.is_verified() {
+                        exit.note_body_receipt_verified();
+                    }
                     exit.poll(receipt_deadline);
-                    last_live_guardian_stage = exit.stage();
+                    last_live_guardian_stage = exit.marker();
                 }
             }
         })
@@ -277,13 +279,12 @@ fn report_public_launch_witness(
     );
 }
 
-fn arm_selected_original_guardian(
-    observation_succeeded: bool,
+fn register_selected_original_guardian(
     receipt_armed: bool,
     family: Option<ProcessFamily>,
 ) -> Option<GuardianExitWitness> {
-    (observation_succeeded && receipt_armed).then(|| {
-        GuardianExitWitness::arm(
+    receipt_armed.then(|| {
+        GuardianExitWitness::register_with_body_receipt_fence(
             family
                 .expect("independently attested original Guardian before Quit")
                 .guardian,
@@ -294,7 +295,7 @@ fn arm_selected_original_guardian(
 fn report_selected_guardian_exit(guardian_exit: Option<&GuardianExitWitness>) {
     if let Some(exit) = guardian_exit {
         // Fixed kernel-event class only, never a PID or event payload.
-        eprintln!("KELD_KEL140_GUARDIAN_EXIT_STAGE stage={}", exit.stage());
+        eprintln!("KELD_KEL140_GUARDIAN_EXIT_STAGE stage={}", exit.marker());
     }
 }
 
@@ -353,16 +354,19 @@ fn run_launch_with_causal_receipt(
         }
         report_public_launch_witness(fixture, &prepared, launch, host_pid, &evidence, exercise);
     }));
-    // Arm only the source-attested original Guardian, before releasing Quit.
-    let mut guardian_exit = arm_selected_original_guardian(
-        observation_result.is_ok(),
-        body_receipt.is_some(),
-        evidence.family,
-    );
+    let mut guardian_exit = None;
     if observation_result.is_err() {
         // Capture pipes even if the host exited first. Fallback is never success.
         let _ = cleanup.cli.as_mut().expect("retained failed host").kill();
     } else {
+        // Register only the source-attested original Guardian, then seal it
+        // with one read immediately before releasing Quit: an exit queued by
+        // then is classified as pre-Quit, never as a post-Quit observation.
+        guardian_exit =
+            register_selected_original_guardian(body_receipt.is_some(), evidence.family);
+        if let Some(exit) = guardian_exit.as_mut() {
+            exit.seal_before_quit_release();
+        }
         observer
             .quit
             .send(())
