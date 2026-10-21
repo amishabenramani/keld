@@ -879,20 +879,130 @@ class ProductionConsumerTests(unittest.TestCase):
 # itself; ubuntu-latest has 2.55.0.
 QUOTED_GIT_INIT = re.compile(r"""["']init["']""")
 SHELL_GIT_INIT = re.compile(r"^\s*git\b.*\sinit(\s|$)")
+# A quoted "init" is a `git init` only when it is an argument of a git
+# invocation: a git callee or argv[0] earlier in the same statement on its line
+# (`self.git("init")`, `git_fixture(root, &["init"])`, `["git", "init"]`), or an
+# element of a `for NAME in/of` iterable whose first loop statement passes NAME to
+# git (`for args in (("init", "-q"), ...): subprocess.run(["git", *args])`, and
+# the Rust `Command::new("git").args(args)` chain). `state = "init"` is neither.
+GIT_TOKEN = re.compile(r"(?<![A-Za-z0-9])git(?![A-Za-z0-9])")
+FOR_HEADER = re.compile(r"\bfor\s*\(?\s*(?:(?:const|let|var)\s+)?(\w+)\s+(?:in|of)\b")
+FOR_HEADER_LOOKBACK = 2
+STATEMENT_LOOKBACK = 4
 # Only an executable `config` call counts: a comment that names the setting, or
 # the key without `config`, configures nothing.
 MAINTENANCE_OFF = re.compile(r"\bconfig\W+maintenance\.auto\W+false\b")
-COMMENT_LINE = re.compile(r"^\s*(#|//)")
 MAINTENANCE_OFF_WINDOW = 4
 TEMP_REPOSITORY_SOURCES = ("*.py", "*.sh", "*.rs", "*.ts")
+# Per language: (string delimiters, line-comment marker, `/* */` block comments,
+# triple-quoted strings, a `#` comment needs a word start). Strings stay, since
+# git argv lives in them; comments go.
+SOURCE_SYNTAX = {".py": ("'\"", "#", False, True, False), ".sh": ("'\"", "#", False, False, True),
+                 ".rs": ('"', "//", True, False, False), ".ts": ("'\"`", "//", True, False, False)}
+STRING_LITERAL = re.compile(r""""(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|`(?:\\.|[^`\\])*`""")
+GIT_STRING = re.compile(r"""^["'`]git["'`]$""")
+
+
+def source_code_lines(relative: str, text: str) -> list[str]:
+    """Return each line of `text` with its comments blanked and its strings kept.
+
+    A trailing `#` or `//` comment and every `/* */` block comment configure
+    nothing, so the census reads only code. A shell `#` starts a comment only at a
+    word start. Strings are tracked per line. Python triple-quoted strings are
+    kept verbatim: a test may write and run the script one holds, so the census
+    cannot tell a docstring from code.
+    """
+    quotes, marker, block, triples, word_start = SOURCE_SYNTAX[Path(relative).suffix]
+    code, in_block, triple = [], False, None
+    for line in text.splitlines():
+        out, index, quote = [], 0, None
+        while index < len(line):
+            if triple:
+                end = line.find(triple, index)
+                stop = len(line) if end < 0 else end + 3
+                out.append(line[index:stop])
+                triple, index = (triple if end < 0 else None), stop
+            elif in_block:
+                end = line.find("*/", index)
+                in_block, index = end < 0, len(line) if end < 0 else end + 2
+            elif quote:
+                out.append(line[index:index + 2] if line[index] == "\\" else line[index])
+                quote = None if line[index] == quote else quote
+                index += 2 if line[index] == "\\" else 1
+            elif triples and line.startswith(('"""', "'''"), index):
+                triple = line[index:index + 3]
+                out.append(triple)
+                index += 3
+            elif line[index] in quotes:
+                quote = line[index]
+                out.append(quote)
+                index += 1
+            elif block and line.startswith("/*", index):
+                in_block, index = True, index + 2
+            elif line.startswith(marker, index) and not (word_start and index and not line[index - 1].isspace()):
+                break
+            else:
+                out.append(line[index])
+                index += 1
+        code.append("".join(out))
+    return code
+
+
+def bracket_depth(text: str) -> int:
+    """Net open brackets in `text`, ignoring brackets inside string literals."""
+    text = STRING_LITERAL.sub("", text)
+    return sum(text.count(c) for c in "([{") - sum(text.count(c) for c in ")]}")
+
+
+def quoted_init_is_git_argument(code: list[str], index: int, column: int) -> bool:
+    """Whether the quoted "init" at code[index][column] is an argument of a git call."""
+    # A git callee (`self.git(`, `git_fixture(`) or a "git" argv[0] earlier in the
+    # same statement. Other strings are dropped so `log("git:", "init")` does not count.
+    # The statement reaches back over a `.method(` chain line and over lines that
+    # end open (`(`, `[` or `,`), as in `Command::new("git")` / `.args(["init"])`.
+    statement, start = code[index][:column], index
+    while start > 0 and index - start < STATEMENT_LOOKBACK and (
+            statement.lstrip().startswith(".") or code[start - 1].rstrip().endswith(("(", "[", ","))):
+        start -= 1
+        statement = code[start] + "\n" + statement
+    statement = statement.rsplit(";", 1)[-1]
+    if GIT_TOKEN.search(STRING_LITERAL.sub(lambda m: m.group(0) if GIT_STRING.match(m.group(0)) else "", statement)):
+        return True
+    for start in range(index, max(index - FOR_HEADER_LOOKBACK, 0) - 1, -1):
+        header = FOR_HEADER.search(code[start])
+        if not header or (start == index and header.start() > column):
+            continue
+        # The header runs from `for` until its brackets balance, ignoring the body opener.
+        depth, end = 0, start
+        for end in range(start, len(code)):
+            text = STRING_LITERAL.sub("", code[end][header.start() if end == start else 0:]).rstrip()
+            depth += bracket_depth(text[:-1] if text.endswith(("{", ":")) else text)
+            if depth <= 0:
+                break
+        if end < index:
+            return False
+        # The loop's first statement: one line plus any open brackets or `.method` chain.
+        body = end + 1
+        while body < len(code) and not code[body].strip():
+            body += 1
+        statement, depth = [], 0
+        for line in code[body:]:
+            if statement and depth <= 0 and not line.lstrip().startswith("."):
+                break
+            statement.append(line)
+            depth += bracket_depth(line)
+        joined = "\n".join(statement)
+        return bool(GIT_TOKEN.search(joined) and re.search(rf"\b{re.escape(header.group(1))}\b", joined))
+    return False
 
 
 def temp_repository_init_sites(root: Path) -> dict[str, bool]:
     """Map each `git init` site in tracked source to whether it disables maintenance.
 
-    Source is every tracked .py, .sh, .rs and .ts file. A non-comment `config
-    maintenance.auto false` call must appear on the init line or within the next
-    MAINTENANCE_OFF_WINDOW lines, so it is the repository's next configuration step.
+    Source is every tracked .py, .sh, .rs and .ts file, read with comments blanked.
+    A `config maintenance.auto false` call must appear on the init line or within
+    the next MAINTENANCE_OFF_WINDOW lines, so it is the repository's next
+    configuration step.
     """
     tracked = subprocess.check_output(["git", "ls-files", "-z", "--", *TEMP_REPOSITORY_SOURCES], cwd=root)
     sites = {}
@@ -901,15 +1011,16 @@ def temp_repository_init_sites(root: Path) -> dict[str, bool]:
             continue
         relative = raw.decode("utf-8")
         try:
-            lines = (root / relative).read_text(encoding="utf-8").splitlines()
+            code = source_code_lines(relative, (root / relative).read_text(encoding="utf-8"))
         except UnicodeDecodeError as error:
             raise AssertionError(f"#670 census cannot read tracked {relative} as UTF-8 ({error}); "
                                  "a tracked source file must be text") from error
-        for index, line in enumerate(lines):
-            if QUOTED_GIT_INIT.search(line) or SHELL_GIT_INIT.search(line):
-                window = lines[index:index + 1 + MAINTENANCE_OFF_WINDOW]
-                sites[f"{relative}:{index + 1}"] = any(
-                    MAINTENANCE_OFF.search(item) and not COMMENT_LINE.match(item) for item in window)
+        for index, line in enumerate(code):
+            if SHELL_GIT_INIT.search(line) or any(
+                    quoted_init_is_git_argument(code, index, match.start())
+                    for match in QUOTED_GIT_INIT.finditer(line)):
+                window = code[index:index + 1 + MAINTENANCE_OFF_WINDOW]
+                sites[f"{relative}:{index + 1}"] = any(MAINTENANCE_OFF.search(item) for item in window)
     return sites
 
 
@@ -961,6 +1072,13 @@ class TempRepositoryMaintenanceTests(unittest.TestCase):
             "tools/commented.sh": 'git {verb} -q\n# git config maintenance.auto false\n',
             "tools/commented.rs": 'git_fixture(root, &["{verb}"]);\n    // config maintenance.auto false\n',
             "tools/no_call.py": 'git("{verb}")  # maintenance.auto false\n',
+            # A trailing or block comment that holds the whole call configures nothing.
+            "tools/trailing.py": 'git("{verb}")  # git("config", "maintenance.auto", "false")\n',
+            "tools/trailing.sh": 'git {verb} -q  # git config maintenance.auto false\n',
+            "tools/trailing.rs": 'git_fixture(root, &["{verb}"]); // git config maintenance.auto false\n',
+            "tools/block.rs": 'git_fixture(root, &["{verb}"]);\n/*\n'
+                              'git_fixture(root, &["config", "maintenance.auto", "false"]);\n*/\n',
+            "tools/inline_block.ts": 'git("{verb}"); /* git("config", "maintenance.auto", "false"); */\n',
             # Outside tools/: a Python audit test and a Rust crate test are in the census.
             "docs/audits/bare.py": 'subprocess.run(["git", "{verb}", "-q"], cwd=repo, check=True)\n',
             "crates/x/tests/bare.rs": 'Command::new("git")\n    .args(["{verb}", "-q"])\n',
@@ -971,19 +1089,55 @@ class TempRepositoryMaintenanceTests(unittest.TestCase):
                                  "tools/bare.rs:1": False, "tools/enabled.ts:1": False,
                                  "tools/late.py:1": False, "tools/wrong_key.sh:1": False,
                                  "tools/commented.sh:1": False, "tools/commented.rs:1": False,
-                                 "tools/no_call.py:1": False,
+                                 "tools/no_call.py:1": False, "tools/trailing.py:1": False,
+                                 "tools/trailing.sh:1": False, "tools/trailing.rs:1": False,
+                                 "tools/block.rs:1": False, "tools/inline_block.ts:1": False,
                                  "docs/audits/bare.py:1": False, "crates/x/tests/bare.rs:2": False})
 
     def test_census_accepts_each_supported_form(self):
         sites = self.census({
-            "tools/a.py": 'for args in (("{verb}", "-q"), ("config", "maintenance.auto", "false")):\n',
+            "tools/a.py": 'for args in (("{verb}", "-q"), ("config", "maintenance.auto", "false")):\n'
+                          '    subprocess.run(["git", *args], cwd=root, check=True)\n',
             "tools/b.sh": 'git -C "$d" {verb} -q\ngit -C "$d" config maintenance.auto false\n',
             "tools/c.rs": 'git_fixture(root, &["{verb}", "--quiet"]);\n'
                           'git_fixture(root, &["config", "maintenance.auto", "false"]);\n',
             "tools/d.ts": 'git("{verb}");\n' + "\n" * 3 + 'git("config", "maintenance.auto", "false");\n',
+            # A trailing comment after the call, a `#` inside a string, or a shell `#`
+            # inside a word keeps the call.
+            "tools/e.py": 'self.git("{verb}")\nself.git("config", "maintenance.auto", "false")  # #670\n',
+            "tools/f.sh": 'git -C "$d#1" {verb} -q\ngit -C $d#1 config maintenance.auto false\n',
         })
-        self.assertEqual(sites, {"tools/a.py:1": True, "tools/b.sh:1": True,
-                                 "tools/c.rs:1": True, "tools/d.ts:1": True})
+        self.assertEqual(sites, {"tools/a.py:1": True, "tools/b.sh:1": True, "tools/c.rs:1": True,
+                                 "tools/d.ts:1": True, "tools/e.py:1": True, "tools/f.sh:1": True})
+
+    def test_census_counts_only_a_quoted_init_passed_to_git(self):
+        # Each git-argument shape in the tree is a site, so none can escape the census.
+        sites = self.census({
+            "tools/callee.py": 'census.git(repo, "{verb}", "-q")\n',
+            "tools/argv.py": 'subprocess.run(["git", "{verb}", "-q"], cwd=repo, check=True)\n',
+            "tools/method.rs": 'temp.git(&["{verb}", "--quiet"]);\n',
+            "tools/wrapped.rs": 'git_fixture(\n    root,\n    &["{verb}", "--quiet"],\n);\n',
+            "tools/tuple_loop.py": 'for args in (("{verb}", "-q"),\n             ("add", ".")):\n'
+                                   '    subprocess.run(["git", *args], cwd=repo, check=True)\n',
+            "tools/command_loop.rs": 'for args in [\n    &["-c", "x=y", "{verb}", "-q"][..],\n] {{\n'
+                                     '    let status = std::process::Command::new("git")\n'
+                                     '        .args(args)\n        .status();\n}}\n',
+            "tools/of_loop.ts": 'for (const args of [["{verb}"], ["add", "."]]) {{\n  git(...args);\n}}\n',
+            # Not git arguments: a value, a comparison, a match arm, another callee, a
+            # loop that never reaches git, a "git" inside another string, and comments.
+            "tools/state.py": 'state = "{verb}"\nif phase == "{verb}":\n    log("{verb}")\n',
+            "tools/arm.rs": 'match phase {{\n    "{verb}" => Phase::Start,\n}}\n',
+            "tools/other_loop.py": 'for step in (("{verb}", "-q"),):\n    print(step)\n',
+            "tools/loop_other_name.py": 'for step in (("{verb}",),):\n    subprocess.run(["git", *args])\n',
+            "tools/label.ts": 'log("git:", "{verb}");\n',
+            "tools/separate.ts": 'git("status"); phase("{verb}");\n',
+            "tools/commented.rs": '// git_fixture(root, &["{verb}"]);\n/* git("{verb}") */\n',
+            "tools/commented.py": 'x = 1  # self.git("{verb}")\n',
+        })
+        self.assertEqual(sites, {"tools/callee.py:1": False, "tools/argv.py:1": False,
+                                 "tools/method.rs:1": False, "tools/wrapped.rs:3": False,
+                                 "tools/tuple_loop.py:1": False,
+                                 "tools/command_loop.rs:2": False, "tools/of_loop.ts:1": False})
 
     def test_tracked_snapshot_commit_starts_no_background_maintenance(self):
         with tempfile.TemporaryDirectory(prefix="keld-ci-maintenance-") as temporary:
