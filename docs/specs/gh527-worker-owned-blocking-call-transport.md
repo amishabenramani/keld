@@ -1297,11 +1297,12 @@ named pipe), and the host closes with the production `shutdown_app_link`. The ke
 router cases (criteria 6, 7 and the host half of 8) run on every OS on the shared
 `primary_test_stream_pair`, except the Unix cases recorded in §10. A real platform
 difference is a per-OS expectation that cites its OS fact, never a skip. Until
-findings W1 and W2 are fixed, the criterion 6 and 7 router cases assert today's
+findings W1 and W2 (#1073) are fixed, the criterion 6 and 7 router cases assert today's
 Windows behaviour, which their fix flips. The CI `ubuntu-latest` and `windows-latest`
-legs are the Linux and Windows evidence. A Windows pass that writes and then closes is
-marked "inherited from W2, unproven until W2 is fixed" (§10): two or three green runs
-of a case that rests on an unobserved pending read prove nothing.
+legs are the Linux and Windows evidence. A case that writes and then closes rests on
+an unobserved pending read on Windows, and with every CPU busy it fails there (§10).
+Such a case runs on Unix only until W2 is fixed, unless its Windows outcome set is
+deterministic; two or three green runs of it would prove nothing.
 
 ## 8. Review gates triggered
 
@@ -1370,26 +1371,37 @@ the `WriteQueue` promise chain are as unbounded as today's main-thread `WriteQue
 4. Confirm the liveness constants (100 ms heartbeat, 1 s window). Recommendation:
    keep them. Criterion 9 falsifies the window if it is too tight under load.
 
-**T5 qualification record (#528 T5, #666, amended by #666).** CI's `ubuntu-latest`
+**T5 qualification record (#528 T5, #666).** CI's `ubuntu-latest`
 and `windows-latest` legs are the real hosts.
 
 | Criterion | Linux | Windows |
 |---|---|---|
 | 1–4, 8–10, 12–14, 18–20 (T1 harness) | pass | pass |
-| 5 (a close without `ERR` throws 022 and keeps prior records) | pass | pass, inherited from W2, unproven until W2 is fixed |
-| 6 (retire answers pending calls with `KELD-IPC-023`) | pass | does not hold (W2). The router case asserts today's behaviour: a non-reading peer reads only the close. The Bun end-to-end pass is inherited from W2, unproven until W2 is fixed |
+| 5 (a close without `ERR` throws 022 and keeps prior records) | pass | does not hold (W2): the prior records can be discarded. Unix only until W2 is fixed |
+| 6 (retire answers pending calls with `KELD-IPC-023`) | pass | does not hold (W2). The router case asserts today's behaviour: a non-reading peer reads only the close. The Bun end-to-end case asserts W2's two outcomes: the 023, or only the close (`KELD-IPC-022`) |
 | 7 (post-Quit calls get `KELD-IPC-024`, none run) | pass | does not hold (W1, and W2 for the REPLY). The router case asserts today's behaviour: no `KELD-IPC-024`, the unread Quit REPLY is discarded, and the router's join reports `KELD-CORE-037`. The 7(a) Bun case gets the real REPLY, but its trailing CALL also faults the tail (W1) |
 | 8, host half (Worker death fails the generation) | pass | pass |
 | 11 (second open and second connect refused) | pass (`KELD-IPC-005`; role sees `ENOENT`) | pass (`KELD-IPC-005`; host-side open gets `ERROR_PIPE_BUSY`) |
 
 The extra harness cases for criteria 21, 22 and 25–27 and the T3 cases also pass on
-both OSes. Three of them write and then close: `on_end_reports_the_close_after_retained_records`,
-`review_reply_published_before_the_close_wins`, and
-`bun_role_parked_on_fs_throws_023_when_the_host_retires`. Together with criterion 5,
-their Windows passes are **inherited from W2, unproven until W2 is fixed**. Each rests
-on the inference that the role already has a read pending when the host calls
-`DisconnectNamedPipe`, which is the W2 mechanism, and no observable in those cases
-proves it.
+both OSes, except three that write and then close. On Windows each of those, and the
+end-to-end criterion 6 case, rests on the role already having a read pending when the
+host calls `DisconnectNamedPipe`, the W2 mechanism. That inference fails under load.
+Native Windows 11 runs on 2026-10-21, idle and then with one busy loop per logical CPU,
+gave these results (#666 low-finding follow-up):
+
+| Case | Idle | Every CPU busy | Windows assertion now |
+|---|---|---|---|
+| `bun_role_parked_on_fs_throws_023_when_the_host_retires` | 100/100 got the 023 | 5 of 60 got only the close (`KELD-IPC-022`) | the 023 or `KELD-IPC-022` (W2's two outcomes) |
+| `criterion5_close_without_err_throws_022_and_keeps_prior_records` | pass | 10 of 10 lost the records (`EPIPE` on read); the role then waited for them until the kill switch | Unix only until W2 is fixed |
+| `on_end_reports_the_close_after_retained_records` | pass | 6 of 6 lost `event:1` (`EPIPE` on read) | Unix only until W2 is fixed |
+| `review_reply_published_before_the_close_wins` | pass | 1 of 6 lost the REPLY (`call-returned=false`) | Unix only until W2 is fixed |
+
+So W2 also loses data that a reading role should get, whenever its transport Worker
+is late to read: the effect is not limited to a non-reading peer.
+
+W1 and W2 are Windows production defects. Their fix is tracked by #1073, whose
+completion checks are the two *First check* flips below.
 
 - **Finding W1 (criterion 7, Windows).** Windows has no post-Quit drain. After the
   Quit REPLY, its tail waits for the peer's close, and any byte is a fault ("app sent
@@ -1428,8 +1440,9 @@ proves it.
     `DisconnectNamedPipe`, or close the handle without disconnecting, if a Windows
     probe shows that this keeps buffered data readable.
   - *First check:* `retire_answers_pending_fs_and_quit_calls_with_023_before_close`
-    flips to the Unix expectation on `windows-latest`. The Windows passes marked
-    inherited from W2 then become proven.
+    flips to the Unix expectation on `windows-latest`. Then the three Unix-only W2
+    cases above run on Windows again, and the end-to-end criterion 6 case asserts
+    only the 023, each passing with every CPU busy.
 - **Unix by OS fact.** `quit_close_reaches_a_half_closed_role_before_the_guardian_stops_it`:
   a named pipe has no half-close.
 - **Unknown on Windows.** `retire_answers_are_bounded_when_the_peer_stops_reading`: its

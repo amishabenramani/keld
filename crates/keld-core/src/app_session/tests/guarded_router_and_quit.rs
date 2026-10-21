@@ -394,7 +394,8 @@ fn quit_drain_answers_received_calls_with_024_and_runs_none() {
 /// (#528 T5, finding W1 in gh527 §10): its Quit tail
 /// (`await_windows_quit_peer_close_until`) treats any byte after the Quit
 /// REPLY as a fault, so the router's join reports `KELD-CORE-037`. The UI
-/// still quits. The W1 fix flips this to the Unix expectation.
+/// still quits. The W1 fix, tracked by #1073, flips this to the Unix
+/// expectation.
 #[cfg(any(target_os = "macos", target_os = "linux", windows))]
 fn assert_router_shutdown_after_quit_with_trailing_call(router: PrimaryRouter) {
     let shutdown = router.shutdown();
