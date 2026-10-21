@@ -367,7 +367,7 @@
         "crates/keld-host/tests/no_flag/macos/public_fs/project.rs",
         "crates/keld-host/tests/no_flag/macos/public_fs.rs"
       ],
-      "sha256": "ddd47714b720eae66aa8414befbd180383c08e20bf2a9bdd4231918b982fecf5"
+      "sha256": "15a594f113a63fe52fe239c94d3eac90c35bb7e75e4af6587d8cb9030ac6cab5"
     },
     "bun-readers": {
       "patterns": [
@@ -384,7 +384,7 @@
         ".githooks/*",
         "rust-toolchain.toml"
       ],
-      "sha256": "0c3ec15c6ca59430c08062973a674ea1a05f281f6f91c939af6e7cc7e85517c4"
+      "sha256": "e7b2dcbbcb7ffc7e72b223fd2484238e997d177bdf91383dc595eea6638f53c3"
     },
     "audit-readers": {
       "patterns": [
@@ -401,7 +401,7 @@
         "rust-toolchain.toml",
         ".cargo/*"
       ],
-      "sha256": "2510ca75a6e3cd8c866a2d6cdf0629b190577f6c9e0af2410c06f14b2edc8277"
+      "sha256": "d9f8dba8f146432443dcbc74dfab262fdaf8eb4aa33f81354b7c64a21c894f6f"
     },
     "dependency-command": {
       "patterns": [
@@ -417,7 +417,7 @@
         "rust-toolchain.toml",
         "justfile"
       ],
-      "sha256": "c10a67cee65856a0b4ea525d36a8221884b092057bda65bbad6145335196c98f"
+      "sha256": "b0212fceb77e8d35f167449c12e732224b5c5b278f24b3380cd4b66d3cf09330"
     }
   },
   "live_inputs": {
