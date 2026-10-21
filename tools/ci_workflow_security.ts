@@ -292,9 +292,16 @@ export function checkPullRequestTargetWorkflow(source: string, label: string): v
 /**
  * All CI toolchain installers must select the canonical compiler pin.
  * The action commit and its `with: toolchain` input are separate identities:
- * a uniformly updated immutable action SHA is allowed, but mixed SHAs or a
- * single stale compiler pin are not. This uses the existing semantic YAML owner.
+ * each update to the reviewed immutable action SHA is a separate security
+ * decision, and no job may fall back to runner-installed Rust.
  */
+const approvedRustToolchainAction =
+  "dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8";
+const rustToolchainInstallerJobs = new Set([
+  "changes", "fmt", "check", "doctest", "linux-gui-smoke",
+  "msrv", "deny", "hygiene", "mermaid", "codeql-rust",
+]);
+
 export function checkRustToolchainPins(source: string, toolchainToml: string): void {
   let parsedToolchain: unknown;
   try { parsedToolchain = Bun.TOML.parse(toolchainToml); }
@@ -310,7 +317,7 @@ export function checkRustToolchainPins(source: string, toolchainToml: string): v
   finiteGraph(parsed);
   const jobs = mapping(mapping(parsed, "workflow").jobs, "workflow.jobs");
   let pinnedAction: string | undefined;
-  let installers = 0;
+  const installedJobs = new Set<string>();
   for (const [jobName, value] of Object.entries(jobs)) {
     const job = mapping(value, `jobs.${jobName}`);
     if (!Array.isArray(job.steps)) fail(`jobs.${jobName} must contain concrete steps.`);
@@ -320,18 +327,37 @@ export function checkRustToolchainPins(source: string, toolchainToml: string): v
       const label = `jobs.${jobName}.steps[${index}]`;
       const action = actionRef(step.uses, label);
       if (actionName(action) !== "dtolnay/rust-toolchain") continue;
-      installers++;
+      if (!rustToolchainInstallerJobs.has(jobName) || installedJobs.has(jobName)) {
+        fail(`${label} is not the single approved Rust toolchain installer for its job.`);
+      }
+      // The selected compiler must be installed before any executable work.
+      // A skipped or fail-open setup step silently falls back to runner Rust.
+      const firstStep = mapping(job.steps[0], `jobs.${jobName}.steps[0]`);
+      if (index !== 1 || actionName(actionRef(firstStep.uses, `jobs.${jobName}.steps[0]`)) !== "actions/checkout") {
+        fail(`${label} must install Rust immediately after checkout, before any other step.`);
+      }
+      if (Object.hasOwn(step, "if") || Object.hasOwn(step, "continue-on-error")) {
+        fail(`${label} must run unconditionally and refuse installer failures.`);
+      }
       if (pinnedAction && action !== pinnedAction) {
         fail(`${label} must use the same reviewed immutable dtolnay/rust-toolchain action SHA as every other job.`);
       }
       pinnedAction = action;
+      installedJobs.add(jobName);
       const inputs = mapping(step.with, `${label}.with`);
       if (scalar(inputs.toolchain) !== selected) {
         fail(`${label}.with.toolchain must select Rust ${selected} from rust-toolchain.toml; a stale compiler pin changes cache and MSRV behavior.`);
       }
     }
   }
-  if (installers === 0) fail("workflow must install the pinned Rust toolchain through reviewed dtolnay/rust-toolchain steps.");
+  for (const jobName of rustToolchainInstallerJobs) {
+    if (!installedJobs.has(jobName)) {
+      fail(`jobs.${jobName} requires a pinned Rust toolchain installer; runner-default Rust is not admitted.`);
+    }
+  }
+  if (pinnedAction !== approvedRustToolchainAction) {
+    fail("all Rust toolchain installers must use the approved immutable action SHA.");
+  }
 }
 
 /** Validate security effects over parsed workflow objects, never YAML line shapes. */

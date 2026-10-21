@@ -19,6 +19,10 @@ const source = readFileSync(join(import.meta.dir, "../.github/workflows/ci.yml")
 const windowsMediaOracle = readFileSync(join(import.meta.dir, "../crates/keld-wv/tests/windows_media_guard.ps1"));
 const selectedRustToolchain = readFileSync(join(import.meta.dir, "../rust-toolchain.toml"), "utf8");
 const checkout = "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1";
+const requiredRustInstallerJobs = [
+  "changes", "fmt", "check", "doctest", "linux-gui-smoke",
+  "msrv", "deny", "hygiene", "mermaid", "codeql-rust",
+];
 
 function fixture(): Fixture {
   checkWorkflowSecurity(source);
@@ -42,7 +46,7 @@ test("every Rust installer agrees with the exact pin and immutable action commit
   const workflow = fixture();
   const installers = Object.values(workflow.jobs).flatMap(job => job.steps)
     .filter(s => String(s.uses ?? "").startsWith("dtolnay/rust-toolchain@"));
-  expect(installers.length).toBe(10);
+  expect(installers.length).toBe(requiredRustInstallerJobs.length);
 
   // A single stale installer may not hide behind nine current copies.
   (installers[3]!.with as Record<string, unknown>).toolchain = "1.97.1";
@@ -64,6 +68,58 @@ test("Rust toolchain admission reads the actual TOML toolchain table, never a de
   expect(() => checkRustToolchainPins(source, decoy)).toThrow("must select Rust");
   const duplicate = '[toolchain]\nchannel = "1.99.1"\nchannel = "1.97.1"\n';
   expect(() => checkRustToolchainPins(source, duplicate)).toThrow();
+});
+
+test("dropping any one required Rust installer cannot silently use runner Rust", () => {
+  for (const name of requiredRustInstallerJobs) {
+    const workflow = fixture();
+    workflow.jobs[name]!.steps = workflow.jobs[name]!.steps.filter(
+      step => !String(step.uses ?? "").startsWith("dtolnay/rust-toolchain@"),
+    );
+    expect(() => checkRustToolchainPins(Bun.YAML.stringify(workflow), selectedRustToolchain))
+      .toThrow("requires a pinned Rust toolchain installer");
+  }
+});
+
+test("a uniformly replaced unknown action SHA is not an approved installer", () => {
+  const workflow = fixture();
+  for (const job of Object.values(workflow.jobs)) {
+    for (const step of job.steps) {
+      if (String(step.uses ?? "").startsWith("dtolnay/rust-toolchain@")) {
+        step.uses = "dtolnay/rust-toolchain@" + "0".repeat(40);
+      }
+    }
+  }
+  expect(() => checkRustToolchainPins(Bun.YAML.stringify(workflow), selectedRustToolchain))
+    .toThrow("approved immutable action SHA");
+});
+
+test("a pinned Rust installer cannot be conditional or failure-tolerant", () => {
+  for (const name of requiredRustInstallerJobs) {
+    for (const mutation of [
+      (installer: Step) => { installer.if = "${{ false }}"; },
+      (installer: Step) => { installer["continue-on-error"] = true; },
+    ]) {
+      const workflow = fixture();
+      mutation(workflow.jobs[name]!.steps[1]!);
+      expect(() => checkRustToolchainPins(Bun.YAML.stringify(workflow), selectedRustToolchain))
+        .toThrow("must run unconditionally and refuse installer failures");
+    }
+  }
+});
+
+test("Rust setup must run immediately after checkout, before other steps", () => {
+  for (const name of requiredRustInstallerJobs) {
+    for (const mutation of [
+      (steps: Step[]) => { steps.splice(1, 0, { run: "cargo --version" }); },
+      (steps: Step[]) => { steps.unshift(steps.splice(1, 1)[0]!); },
+    ]) {
+      const workflow = fixture();
+      mutation(workflow.jobs[name]!.steps);
+      expect(() => checkRustToolchainPins(Bun.YAML.stringify(workflow), selectedRustToolchain))
+        .toThrow("must install Rust immediately after checkout");
+    }
+  }
 });
 
 test("source-budget reporting stays advisory, visible and unprivileged", () => {
