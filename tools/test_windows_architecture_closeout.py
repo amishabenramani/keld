@@ -90,6 +90,11 @@ class LedgerReconciliationTests(unittest.TestCase):
     def test_empty_or_invented_evidence_rejected(self):
         with self.assertRaisesRegex(ValueError, "public evidence"):
             self.apply([evidence(review_evidence="https://example.com/not-a-review")])
+        # A bare issue or PR page names no specific review comment.
+        for bare in ("https://github.com/gyldlab/keld/issues/824",
+                     "https://github.com/gyldlab/keld/pull/942"):
+            with self.assertRaisesRegex(ValueError, "public evidence"):
+                self.apply([evidence(review_evidence=bare)])
 
     def test_missing_falsifier_or_owner_rejected(self):
         with self.assertRaisesRegex(ValueError, "falsifier"):

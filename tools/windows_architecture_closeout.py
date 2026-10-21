@@ -27,9 +27,12 @@ SUMMARY = AUDIT / "windows-2026-10-18-b9b3c10a-ledger.summary.json"
 EXTRAS = ("review_evidence", "review_disposition", "review_owner", "independent_falsifier")
 STATUS = {"REVIEWED_NO_CHANGE", "REVIEWED_CONDITIONAL_RISK"}
 EVIDENCE_FIELDS = ("path", "git_blob_sha", *EXTRAS)
+# One specific public review comment, never a bare issue or PR page. Whether that
+# comment covers the blob is the reviewer's attestation: proving it needs the
+# network, so this offline --check binds the URL syntax only (#942).
 EVIDENCE_URL = re.compile(
     r"^https://github\.com/gyldlab/keld/(?:issues|pull)/[0-9]+"
-    r"(?:#issuecomment-[0-9]+)?$"
+    r"#issuecomment-[0-9]+$"
 )
 
 
