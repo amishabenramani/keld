@@ -314,8 +314,8 @@ fn a_live_candidate_that_never_connects_ends_the_claim_wait_at_the_deadline() {
 fn without_the_handle_watcher_a_killed_candidate_ends_the_claim_wait_only_at_the_floor() {
     let (job, mut launched) = held_candidate();
     let endpoint = own_endpoint();
-    let started = Instant::now();
-    let (owner, ended) = spawn_owner(endpoint, started + FLOOR);
+    let floor = Instant::now() + FLOOR;
+    let (owner, ended) = spawn_owner(endpoint, floor);
     job.terminate_and_wait(launched.child(), KILL_SWITCH)
         .expect("end the candidate family");
     let kill_returned_at = Instant::now();
@@ -323,7 +323,14 @@ fn without_the_handle_watcher_a_killed_candidate_ends_the_claim_wait_only_at_the
         .recv_timeout(KILL_SWITCH)
         .expect("the claim wait ends within the kill switch");
     let outcome = join_owner(owner);
-    let from_kill_return = ended_at.saturating_duration_since(kill_returned_at);
+    // Fixture check, the handle cell's own precondition: the kill returned before the
+    // floor, so the owner was still waiting on a dead candidate. A later return would make
+    // this run the live-candidate case, which proves nothing about a killed one.
+    assert!(
+        kill_returned_at < floor,
+        "the kill returned {:?} after the floor",
+        kill_returned_at.saturating_duration_since(floor)
+    );
     assert!(
         launched.has_exited().expect("query the launch"),
         "the launch handle is signaled, and nothing watched it"
@@ -332,15 +339,15 @@ fn without_the_handle_watcher_a_killed_candidate_ends_the_claim_wait_only_at_the
         matches!(outcome, Err(WindowsAttemptExchangeError::ClaimDeadline)),
         "only the deadline ended the wait: {outcome:?}"
     );
+    // At the floor, not at once. The origin is the handle cell's, the kill's return; the
+    // bound is the floor itself, not "the kill's return plus `AT_ONCE`". The kill's own
+    // latency is the OS's (see [`AT_ONCE`]): a kill that returns within `AT_ONCE` of the
+    // floor still leaves a correct deadline-only wait ending at the floor, and the typed
+    // outcome above, not the clock, then separates it from the handle cell.
     assert!(
-        ended_at.duration_since(started) >= FLOOR,
-        "at the floor, not before"
-    );
-    // The same origin as the handle cell: from the kill's return, when the candidate is
-    // known dead.
-    assert!(
-        from_kill_return >= AT_ONCE,
-        "not at once: {from_kill_return:?} after the kill returned"
+        ended_at >= floor,
+        "at the floor, not before: {:?} after the kill returned",
+        ended_at.saturating_duration_since(kill_returned_at)
     );
     assert_eq!(
         launched.wait(10_000).expect("reap the killed candidate"),
