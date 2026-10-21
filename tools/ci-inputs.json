@@ -213,7 +213,7 @@
         "README.md",
         "docs/audits/*"
       ],
-      "contract": "Copies README and the audit tree and reads historical publication anchors. Live verifier runs unconditionally for ancestry/history changes.",
+      "contract": "Copies README and the audit tree and reads historical publication anchors. Live verifier runs unconditionally for ancestry/history changes. The Windows architecture closeout tests (tools/test_windows_architecture_closeout.py, importing the closeout tool and the ledger generator) are offline unit tests over in-memory CSV (#942).",
       "reader_set": "audit-readers"
     },
     {
@@ -374,7 +374,7 @@
         "packages/*",
         "justfile"
       ],
-      "sha256": "816056f310848a675df1598767f22b838446c58270c92c2522445b1ad4a3b395"
+      "sha256": "84c70db30184c4d6452967cba903811eb7febd0fc63bbb0cb51292e1ea5590cd"
     },
     "policy-readers": {
       "patterns": [
@@ -384,14 +384,17 @@
         ".githooks/*",
         "rust-toolchain.toml"
       ],
-      "sha256": "420379005935bcb48dad6b2d0ba1c6317179033aea122db81c8abfd87e5e7c3b"
+      "sha256": "b667f0c26dbcbaece3a7ffe62fb452440746a89ca77d1802def98f0ea9f45db4"
     },
     "audit-readers": {
       "patterns": [
         "docs/audits/*.py",
-        "justfile"
+        "justfile",
+        "tools/windows_architecture_closeout.py",
+        "tools/test_windows_architecture_closeout.py",
+        "tools/windows_architecture_ledger.py"
       ],
-      "sha256": "f941a3d1deb6ba0fe78e75079b163a4c2855ed3afa0b1417d1ca3a74c5727c49"
+      "sha256": "9f55e247684735cefccaf74d40c3d67a522e9f0f2695e82ac57253d2702e51e7"
     },
     "rustdoc-readers": {
       "patterns": [
@@ -401,13 +404,13 @@
         "rust-toolchain.toml",
         ".cargo/*"
       ],
-      "sha256": "fa1ab0af14a16df566fc3835d64528518e6e54f723e70bf1dd0da4b3f23f6ba5"
+      "sha256": "96e1d3de5cf240f8b45e50e32bdccdeaa99c2fea992a39f952f1484956bc0848"
     },
     "dependency-command": {
       "patterns": [
         "justfile"
       ],
-      "sha256": "6d6ffa3863f13ed4a05fbdcc1a43d3fe40bfe01724dc5a0e84c616ab589bbeb7"
+      "sha256": "8b8b9c8c2e932b0733c6f31a6ecf4e3630fdddb1189877e414eee316f9882218"
     },
     "status-test-readers": {
       "patterns": [
@@ -417,12 +420,12 @@
         "rust-toolchain.toml",
         "justfile"
       ],
-      "sha256": "e423e589dc19cdb6dbeca8299c550b47a9a8ef6230b7eb77d7b3eaf1c55c5e3a"
+      "sha256": "bad335fd87f7362aa87ddc63eec6f36d3c40d2cc40735bbf9dab870194f51364"
     }
   },
   "live_inputs": {
     "agent-context": "Ignored/local workspace task and resource records are read by tools/workspace.py check; malformed records can fail with identical tracked bytes.",
-    "audit-docs": "Publication ancestry, historical report bytes and Git object availability are read by docs/audits/verify.py; missing/replaced history can fail with identical tracked bytes.",
+    "audit-docs": "Publication ancestry, historical report bytes and Git object availability are read by docs/audits/verify.py, and tools/windows_architecture_closeout.py --check reads the pinned b9b3c10a tree objects; missing/replaced history can fail with identical tracked bytes.",
     "product-status-check": "The ledger names evidence commits whose object availability and ancestry are validated; that live Git state is not represented by changed source paths.",
     "deny": "cargo deny check consumes the mutable advisory database as well as the lockfile; a new advisory can change its result with identical tracked bytes."
   },

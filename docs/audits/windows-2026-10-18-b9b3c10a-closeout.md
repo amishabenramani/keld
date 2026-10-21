@@ -72,11 +72,15 @@ objects available:
   under the existing `just`/workflow contracts.
 
 `tools/windows_architecture_closeout.py` extends, **without modifying**, the
-existing reviewed queue generator `tools/windows_architecture_ledger.py`. The
-new checker runs only when explicitly invoked; it introduces no new CI reader
-of runtime source into an existing router consumer. `tools/ci-inputs.json`
-has only its policy-reader source digest rebound for the newly added Python
-files; no reader or consumer input scope was weakened.
+existing reviewed queue generator `tools/windows_architecture_ledger.py`. Both
+commands above run in the `audit-docs` lane: locally through `just audit-docs`
+(`audit-docs-test` runs the unit tests) and in hosted CI through the hygiene
+job's "Public audit registry contracts" step, whose exact command list
+`tools/ci_hygiene.rs` owns. The three Python files are `audit-readers` in
+`tools/ci-inputs.json`; `--check` reads the pinned tree's Git objects, a live
+input already declared for `audit-docs`. Evidence must cite one specific
+public review comment (`#issuecomment-N`); the offline check cannot prove the
+comment's content covers the blob, which stays the reviewer's attestation.
 
 ## Still blocking whole-program closeout
 
