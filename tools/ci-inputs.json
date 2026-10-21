@@ -178,6 +178,10 @@
         "crates/keld-host/tests/no_flag/macos/support/product.rs",
         "crates/keld-host/tests/no_flag/macos/renderer_bridge.rs",
         "crates/keld-update/src/windows_extraction/tests.rs",
+        "crates/keld-update/src/windows_extraction/tests/readback_integrity.rs",
+        "crates/keld-update/src/windows_extraction/tests/root_admission.rs",
+        "crates/keld-update/src/windows_extraction/tests/source_admission.rs",
+        "crates/keld-update/src/windows_extraction/tests/stage_refusals.rs",
         "crates/keld-update/src/windows_baseline/tests/support.rs",
         "crates/keld-update/src/records/tests.rs",
         "crates/keld-updater-helper/tests/lint_config.rs",
@@ -349,6 +353,10 @@
         "crates/keld-host/tests/no_flag/macos/support/product.rs",
         "crates/keld-host/tests/no_flag/macos/renderer_bridge.rs",
         "crates/keld-update/src/windows_extraction/tests.rs",
+        "crates/keld-update/src/windows_extraction/tests/readback_integrity.rs",
+        "crates/keld-update/src/windows_extraction/tests/root_admission.rs",
+        "crates/keld-update/src/windows_extraction/tests/source_admission.rs",
+        "crates/keld-update/src/windows_extraction/tests/stage_refusals.rs",
         "crates/keld-update/src/windows_baseline/tests/support.rs",
         "crates/keld-update/src/records/tests.rs",
         "crates/keld-updater-helper/tests/lint_config.rs",
@@ -359,14 +367,14 @@
         "crates/keld-host/tests/no_flag/macos/public_fs/project.rs",
         "crates/keld-host/tests/no_flag/macos/public_fs.rs"
       ],
-      "sha256": "a8f9fad55d3ce83d3d1c49b5f30f13c16414860b3ef5440ac8c2117fe5df9cce"
+      "sha256": "ddd47714b720eae66aa8414befbd180383c08e20bf2a9bdd4231918b982fecf5"
     },
     "bun-readers": {
       "patterns": [
         "packages/*",
         "justfile"
       ],
-      "sha256": "0ba5714275ae1c8e04b8f4953330a59b7df45a25ddc0b3dd6ea355ebbca96fa9"
+      "sha256": "3b496a050db47263b84073ab4393b617be136cd6d58ed6f29f13f4c62314da50"
     },
     "policy-readers": {
       "patterns": [
@@ -376,14 +384,14 @@
         ".githooks/*",
         "rust-toolchain.toml"
       ],
-      "sha256": "2e32ae47aff6ea7d4ebfb8ca55cb2288f8c356c6ce316f676a94eb4c403e28f7"
+      "sha256": "1670f1a5218fd6c8b4629c5fb8ef3e6fcb9273313d9c63c2d631c9f8d5b7aafa"
     },
     "audit-readers": {
       "patterns": [
         "docs/audits/*.py",
         "justfile"
       ],
-      "sha256": "8c1985ec1bb3748944ae0a24f054d6b3892771677d5a087f7e63237e1d032007"
+      "sha256": "71cf5d629952e885d8c93b55a116ac49aea10148914bd43478af8a24685ffd6f"
     },
     "rustdoc-readers": {
       "patterns": [
@@ -393,13 +401,13 @@
         "rust-toolchain.toml",
         ".cargo/*"
       ],
-      "sha256": "c91883cdce40f196551ff521affd20c155e269472b1ec29ae0f0b7b729ce0463"
+      "sha256": "36549935c09cad8ca7b71d72281796f337acf3a4beb4423033e1cd9184c9b5d8"
     },
     "dependency-command": {
       "patterns": [
         "justfile"
       ],
-      "sha256": "e6c180fb95911435aedf92ae051c52cd530e11e77d4a3151cd4d8af18e547280"
+      "sha256": "ea7f53dabfa860ab57e65be2707918ed385c4bb038ef1d00269e8c2cf78ac4db"
     },
     "status-test-readers": {
       "patterns": [
@@ -409,7 +417,7 @@
         "rust-toolchain.toml",
         "justfile"
       ],
-      "sha256": "6c6945cdec11d3ed275f40385bed9c5cb35d2f281b696b1363d249583aa67b7f"
+      "sha256": "6e52c7f9bfcce0fcf573f8ef7b0f6b8edb98c4640178fced300b888d10e3a43c"
     }
   },
   "live_inputs": {
@@ -422,7 +430,7 @@
     "patterns": [
       "crates/*"
     ],
-    "membership_sha256": "d87fd58a87c0540efdbfa1a6fd0f22dc60b154829e47453100f88cb28075e834",
+    "membership_sha256": "b81a9cf77774980502f73e7a8a1ce84e81a69afafedcf89eb9c3f5825b72a5ea",
     "contract": "Broad census binds path membership only: new/removed crate paths fail closed. Existing crate-content edits select Rust through the crates/* input edge. A new cross-tree read in an existing source must register that reader and its input edge in the same change; exact-reader content digests then guard future drift."
   },
   "rust_package_inputs": {
