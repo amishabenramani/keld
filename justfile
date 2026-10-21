@@ -49,6 +49,9 @@ ci-route:
 #   of test_ci_local.py run hosted through tools/ci_changes_test.sh.
 # agent-context's workspace.py check also runs hosted, but only a developer
 # checkout has task records for it to validate.
+# cache-check-test also runs hosted, as the "Worktree cache tool native tests"
+# step of the clippy + test matrix, on ubuntu, macos and windows: its cfg(windows)
+# and cfg(unix) paths each compile only on their own OS.
 [parallel]
 ci-policy: agents-md atomic-protocol agent-context-test agent-context cache-check-test ci-router-test hooks-test audit-docs-test audit-docs doc-placeholders-test doc-placeholders-check mermaid-ci product-status-test product-status-check llms-test llms-check hygiene
 
@@ -141,7 +144,10 @@ work-clean *args:
 work-check:
     {{python_command}} -B tools/workspace.py check
 
-# Source-versioned executable outside target/ survives full cache deletion.
+# Build a fresh executable from a verified source snapshot on every run. No
+# executable from an earlier run is ever trusted or executed: a cache under
+# $HOME cannot prove which bytes it holds. The private scratch directory lives
+# outside every worktree target/, so full cache deletion never removes it.
 [private]
 cache-tool-exec mode *args:
     #!/usr/bin/env bash
@@ -154,34 +160,25 @@ cache-tool-exec mode *args:
             git hash-object "$dir/worktree_cache.rs"
             git hash-object "$dir/worktree_cache_delete.rs"
             git hash-object "$dir/worktree_cache_delete_tests.rs"
-            rustc -vV
         } | git hash-object --stdin
     }
     stamp=$(source_stamp tools)
-    base="$HOME/.cache/keld/worktree-tool/$stamp"
-    mkdir -p "$base"
     name="worktree-cache"
     if [[ "{{os()}}" == "windows" ]]; then name="worktree-cache.exe"; fi
-    binary="$base/$name"
-    if [[ ! -x "$binary" ]]; then
-        scratch=$(mktemp -d "$base/.build.XXXXXXXX")
-        trap 'rm -rf "$scratch"' EXIT
-        # Compile a verified immutable source snapshot, never mutable checkout bytes.
-        cp tools/worktree_cache.rs tools/worktree_cache_delete.rs tools/worktree_cache_delete_tests.rs "$scratch/"
-        [[ "$(source_stamp "$scratch")" == "$stamp" ]] || {
-            echo "cache source changed during snapshot; refusing compilation" >&2; exit 1;
-        }
-        rustc --edition=2024 -D warnings -C opt-level=s -C strip=symbols "$scratch/worktree_cache.rs" -o "$scratch/$name"
-        if ! ln "$scratch/$name" "$binary" 2>/dev/null; then
-            [[ -x "$binary" ]] || { echo "cache binary publication failed" >&2; exit 1; }
-        fi
-    fi
+    scratch=$(mktemp -d)
+    trap 'rm -rf "$scratch"' EXIT
+    # Compile a verified immutable source snapshot, never mutable checkout bytes.
+    cp tools/worktree_cache.rs tools/worktree_cache_delete.rs tools/worktree_cache_delete_tests.rs "$scratch/"
+    [[ "$(source_stamp "$scratch")" == "$stamp" ]] || {
+        echo "cache source changed during snapshot; refusing compilation" >&2; exit 1;
+    }
+    rustc --edition=2024 -D warnings -C opt-level=s -C strip=symbols "$scratch/worktree_cache.rs" -o "$scratch/$name"
     [[ "$(source_stamp tools)" == "$stamp" ]] || {
-        echo "cache source changed during lookup; refusing stale executable" >&2; exit 1;
+        echo "cache source changed during compilation; refusing stale executable" >&2; exit 1;
     }
     # set positional-arguments includes the named mode as $1.
     shift
-    "$binary" "{{mode}}" . "$@"
+    "$scratch/$name" "{{mode}}" . "$@"
 
 # Read-only census of every registered Git worktree build cache.
 cache-check *args:
@@ -203,6 +200,7 @@ cache-check-test:
     trap 'rm -rf "$scratch"' EXIT
     rustc --edition=2024 -D warnings --test tools/worktree_cache.rs -o "$scratch/cache-tests"
     "$scratch/cache-tests"
+    bash tools/cache_tool_provenance_test.sh
 
 work-test:
     {{python_command}} -B tools/test_workspace.py
