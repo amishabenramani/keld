@@ -1296,13 +1296,16 @@ and Windows against the platform's `BootstrapStream` (a Unix socket, or the KEL-
 named pipe), and the host closes with the production `shutdown_app_link`. The keld-core
 router cases (criteria 6, 7 and the host half of 8) run on every OS on the shared
 `primary_test_stream_pair`, except the Unix cases recorded in §10. A real platform
-difference is a per-OS expectation that cites its OS fact, never a skip. Until
-findings W1 and W2 (#1073) are fixed, the criterion 6 and 7 router cases assert today's
-Windows behaviour, which their fix flips. The CI `ubuntu-latest` and `windows-latest`
-legs are the Linux and Windows evidence. A case that writes and then closes rests on
-an unobserved pending read on Windows, and with every CPU busy it fails there (§10).
-Such a case runs on Unix only until W2 is fixed, unless its Windows outcome set is
-deterministic; two or three green runs of it would prove nothing.
+difference is a per-OS expectation that cites its OS fact, never a skip. A tracked
+product defect is not an OS fact, so it is the one exception: a case that a tracked
+Windows defect (#1073) makes nondeterministic may be gated to Unix, citing that issue,
+whose completion check removes the gate. Until findings W1 and W2 (#1073) are fixed,
+the criterion 6 and 7 router cases assert today's Windows behaviour, which their fix
+flips. The CI `ubuntu-latest` and `windows-latest` legs are the Linux and Windows
+evidence. A case that writes and then closes rests on an unobserved pending read on
+Windows, and with every CPU busy it fails there (§10). Such a case runs on Unix only
+until W2 is fixed, unless its Windows outcome set is deterministic; two or three green
+runs of it would prove nothing.
 
 ## 8. Review gates triggered
 
