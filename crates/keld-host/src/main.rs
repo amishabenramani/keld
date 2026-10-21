@@ -11,7 +11,6 @@ use std::fs;
 use std::fs::File;
 #[cfg(target_os = "macos")]
 use std::io;
-#[cfg(any(target_os = "macos", windows))]
 use std::io::Write as _;
 #[cfg(target_os = "macos")]
 use std::os::unix::fs::MetadataExt;
@@ -29,21 +28,18 @@ use std::process::{Command, Stdio};
 const WINDOWS_DEV_STAGE_CLEANUP_ARG: &str = "--keld-windows-dev-stage-cleanup-v1";
 
 fn main() {
+    let native_args: Vec<std::ffi::OsString> = env::args_os().collect();
+    // Private Windows roles consume the untouched native argv first.
     #[cfg(windows)]
-    let windows_args: Vec<std::ffi::OsString> = env::args_os().collect();
-    #[cfg(windows)]
-    if windows_args.get(1).map(std::ffi::OsString::as_os_str)
-        == Some(std::ffi::OsStr::new(WINDOWS_DEV_STAGE_CLEANUP_ARG))
-    {
-        if let Err(error) = run_windows_dev_stage_cleanup(&windows_args) {
-            let mut output = std::io::stdout().lock();
-            let _ = writeln!(output, "{error}");
-            let _ = output.flush();
-            process::exit(1);
-        }
+    if handle_windows_private_role(&native_args) {
         return;
     }
-    let args: Vec<String> = env::args().collect();
+    // Native argv may be non-Unicode on every OS. Refuse it before boot
+    // selection or any WebView/OS authority instead of panicking in args().
+    let args = keld_core::unicode_args(native_args).unwrap_or_else(|error| {
+        eprintln!("{error}");
+        process::exit(2);
+    });
     #[cfg(all(target_os = "macos", feature = "profile-test-hooks", debug_assertions))]
     if run_macos_profile_fixture_role(&args) {
         return;
@@ -97,9 +93,7 @@ fn main() {
         process::exit(1);
     }
 
-    // The capability is kept until the host exits; nothing closes its handle
-    // (KEL-53 §4 "Candidate release after commit"). S6c adds the one
-    // `release_for_exit` call on the committed `PerUserDirect` exit path.
+    // Keep the Job until exit (KEL-53 §4); S6c owns the committed release_for_exit call.
     #[cfg(windows)]
     let _host_death_job = match keld_runtime::windows_job::install_host_death_job() {
         Ok(host_death_job) => host_death_job,
@@ -117,14 +111,24 @@ fn main() {
     #[cfg(any(target_os = "macos", target_os = "linux"))]
     let dev_stage_cleanup = dev_stage_cleanup_root();
     let result = keld_core::app_session::ValidatedBootSelection::from_current_exe_unprivileged()
+        .map_err(keld_core::app_session::HostRunFailure::from)
         .and_then(keld_core::app_session::run_guarded);
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    let retains_main_custody = result
+        .as_ref()
+        .err()
+        .is_some_and(keld_core::app_session::HostRunFailure::retains_main_custody);
     let mut failed = false;
-    if let Err(error) = result {
-        eprintln!("{error}");
+    if let Err(error) = &result {
+        // Reporting failure must not unwind/drop an owned main-custody payload.
+        let mut output = std::io::stderr().lock();
+        let _ = writeln!(output, "{error}");
+        let _ = output.flush();
         failed = true;
     }
     #[cfg(any(target_os = "macos", target_os = "linux"))]
-    if let Some(root) = dev_stage_cleanup
+    if !retains_main_custody
+        && let Some(root) = dev_stage_cleanup
         && let Err(source) = fs::remove_dir_all(&root)
         && source.kind() != std::io::ErrorKind::NotFound
     {
@@ -135,8 +139,29 @@ fn main() {
         failed = true;
     }
     if failed {
+        // The result and any !Send unproved-custody payload are still owned.
+        // This existing fatal exit is failure, never a physical-drain receipt.
         process::exit(1);
     }
+}
+
+#[cfg(windows)]
+fn handle_windows_private_role(args: &[std::ffi::OsString]) -> bool {
+    if handle_profile_test_root_probe(args) {
+        return true;
+    }
+    if args.get(1).map(std::ffi::OsString::as_os_str)
+        == Some(std::ffi::OsStr::new(WINDOWS_DEV_STAGE_CLEANUP_ARG))
+    {
+        if let Err(error) = run_windows_dev_stage_cleanup(args) {
+            let mut output = std::io::stdout().lock();
+            let _ = writeln!(output, "{error}");
+            let _ = output.flush();
+            process::exit(1);
+        }
+        return true;
+    }
+    false
 }
 
 #[cfg(all(target_os = "macos", feature = "profile-test-hooks", debug_assertions))]
@@ -196,6 +221,33 @@ fn run_macos_profile_fixture_role(args: &[String]) -> bool {
             true
         }
         _ => false,
+    }
+}
+
+#[cfg(windows)]
+fn handle_profile_test_root_probe(args: &[std::ffi::OsString]) -> bool {
+    if args.get(1).map(std::ffi::OsString::as_os_str)
+        != Some(std::ffi::OsStr::new("--keld-profile-test-root-probe-v1"))
+    {
+        return false;
+    }
+    #[cfg(feature = "kel135-profile-test-root")]
+    {
+        if args.len() != 2 {
+            eprintln!("KELD-CORE-037: profile test-root probe arguments are malformed.");
+            process::exit(2);
+        }
+        let Some(root) = env::var_os("KELD_PROFILE_TEST_ROOT") else {
+            eprintln!("KELD-CORE-037: profile test-root probe has no selected root.");
+            process::exit(2);
+        };
+        println!("KELD_PROFILE_TEST_ROOT_FEATURE {}", root.to_string_lossy());
+        return true;
+    }
+    #[cfg(not(feature = "kel135-profile-test-root"))]
+    {
+        eprintln!("KELD-CORE-037: profile test-root probe is unavailable in this host.");
+        process::exit(2);
     }
 }
 

@@ -337,3 +337,11 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
+
+mod auth_config;
+pub use self::auth_config::{AuthConfigError, auth_configuration_from_config_ts};
+
+#[cfg(test)]
+mod auth_config_tests {
+    include!("hello/auth_config/tests.rs");
+}
