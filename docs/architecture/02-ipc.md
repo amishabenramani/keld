@@ -279,7 +279,17 @@ payload:= postcard-encoded schema type (structured) | raw bytes (flags.RAW)
   the echo server's single accept, so a crash before authentication still
   restarts (KEL-70 AC1/AC3) and a crash after it ends supervision as
   `SupervisorOutcome::Stopped` with the crash in the ledger, so a host never
-  reads that `Stopped` as a clean exit without `Supervisor::crash_ledger`. Before GH-674 those successors were restarted, failed to
+  reads that `Stopped` as a clean exit without `Supervisor::crash_ledger`. Two
+  bounded cases still differ, and both fail the run. The echo worker records its
+  admission only after `accept_authenticated` returns, so a client that dies
+  between its HELLO reply and that record, while the worker is descheduled past
+  the first restart backoff, gets one successor; that successor's failed connect
+  becomes `ledger.last`, and the gate, closed by then, stops supervision at its
+  crash. Closing this exactly needs kipc to publish admission before
+  `write_hello`. The crash-loop breaker is checked before the gate, so two crashes
+  before authentication and one after it, inside the breaker window, end as
+  `KELD-RUNTIME-002`: three crashes really happened. A crash after any echo REPLY
+  is strictly after the record. Before GH-674 those successors were restarted, failed to
   connect, and tripped the crash-loop breaker whenever teardown came late.
   `keld dev` does not paper over the death. It reports it
   rather than pretending the app is alive: teardown reads the supervisor's
