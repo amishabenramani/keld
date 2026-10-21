@@ -3,6 +3,7 @@
 use std::io::{BufReader, Write};
 use std::net::{TcpListener, TcpStream};
 use std::process::{Command, Stdio};
+use std::thread;
 use std::time::{Duration, Instant};
 
 use crate::support::control::{
@@ -241,5 +242,52 @@ fn startup_ready_echo_sequence_preserves_generation_values() {
     assert!(
         child.stdout.is_some() && child.stderr.is_some(),
         "successful startup must not consume diagnostic captures"
+    );
+}
+
+/// A session's READY arrives only after the host's `WebView2` startup, whose own
+/// bounded phases (keld-wv's `WEBVIEW2_STARTUP_BOUND`) sum past the per-step product
+/// deadline. The harness must accept a READY that is late by product-deadline
+/// standards while the host is still alive, and must not stop at that deadline.
+#[test]
+fn startup_ready_after_the_product_deadline_is_accepted_within_the_startup_bound() {
+    let listener = TcpListener::bind(("127.0.0.1", 0)).expect("slow-startup control listener");
+    let mut peer = TcpStream::connect(listener.local_addr().expect("control address"))
+        .expect("slow-startup control peer");
+    peer.write_all(b"HELLO 31337 fixture-private-app-link-token\nDESCENDANT 31338\n")
+        .expect("pre-startup records");
+    // The live, stdin-blocked child stands in for a host that is still starting.
+    let mut child = Command::new("cmd.exe")
+        .args(["/d", "/c", "set /p KEL824_INPUT="])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("stdin-blocked slow-startup child");
+    let late_by = PRODUCT_DEADLINE + Duration::from_secs(2);
+    let started = Instant::now();
+    // Fault injection, not synchronization: this peer is a startup that takes longer
+    // than the product deadline, which the startup bound admits.
+    let slow_startup = thread::spawn(move || {
+        thread::sleep(late_by);
+        peer.write_all(b"READY\nECHO1\nECHO2\n")
+            .expect("late startup records");
+        peer
+    });
+    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        accept_ready_generation_with_descendant(&listener, &mut child)
+    }));
+    let elapsed = started.elapsed();
+    let _peer = slow_startup.join().expect("slow startup peer");
+    child.kill().expect("clean up stdin-blocked child");
+    wait_child(&mut child, Instant::now() + PRODUCT_DEADLINE);
+    let (_, _, pid, link, descendant_pid) =
+        outcome.expect("a live host's READY within the startup bound must be accepted");
+    assert_eq!(pid, 31337);
+    assert_eq!(link, "fixture-private-app-link-token");
+    assert_eq!(descendant_pid, 31338);
+    assert!(
+        elapsed >= late_by,
+        "READY was accepted before the injected startup delay: {elapsed:?}"
     );
 }

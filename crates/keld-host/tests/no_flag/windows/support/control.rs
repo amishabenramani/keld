@@ -6,7 +6,7 @@ use std::process::Child;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use crate::{CONTROL_LINE_LIMIT, PRODUCT_DEADLINE};
+use crate::{CONTROL_LINE_LIMIT, PRODUCT_DEADLINE, startup_kill_switch};
 
 pub(crate) fn accept_ready_generation(
     listener: &TcpListener,
@@ -79,6 +79,7 @@ fn accept_ready_generation_inner(
         child,
         "HELLO",
         "CONTROL_CONNECTED",
+        PRODUCT_DEADLINE,
     );
     let mut fields = hello.split_whitespace();
     assert_eq!(fields.next(), Some("HELLO"), "{hello}");
@@ -89,8 +90,13 @@ fn accept_ready_generation_inner(
         .expect("numeric generation pid");
     let link = fields.next().expect("generation app link").to_owned();
     assert!(fields.next().is_none(), "{hello}");
-    let descendant_record =
-        read_control_line_or_host_failure_after_phase(&mut reader, child, "DESCENDANT", "HELLO");
+    let descendant_record = read_control_line_or_host_failure_after_phase(
+        &mut reader,
+        child,
+        "DESCENDANT",
+        "HELLO",
+        PRODUCT_DEADLINE,
+    );
     let descendant_pid = parse_descendant_pid(&descendant_record);
     let (lease_handle, last_valid_phase) = if expect_lease_handle {
         let lease_record = read_control_line_or_host_failure_after_phase(
@@ -98,6 +104,7 @@ fn accept_ready_generation_inner(
             child,
             "LEASE_HANDLE",
             "DESCENDANT",
+            PRODUCT_DEADLINE,
         );
         let value = lease_record
             .strip_prefix("LEASE_HANDLE ")
@@ -109,21 +116,39 @@ fn accept_ready_generation_inner(
     } else {
         (None, "DESCENDANT")
     };
+    // A generation's READY can follow the host's WebView2 startup, which begins only
+    // after that generation is bound, so READY reads under the startup kill switch.
+    // A later generation in an already running engine (recovery) has no startup; the
+    // larger kill switch only delays such a failure, it never accepts a missing READY.
+    // Every other record keeps the per-step product deadline.
     assert_eq!(
         read_control_line_or_host_failure_after_phase(
             &mut reader,
             child,
             "READY",
-            last_valid_phase
+            last_valid_phase,
+            startup_kill_switch(),
         ),
         "READY"
     );
     assert_eq!(
-        read_control_line_or_host_failure_after_phase(&mut reader, child, "ECHO1", "READY"),
+        read_control_line_or_host_failure_after_phase(
+            &mut reader,
+            child,
+            "ECHO1",
+            "READY",
+            PRODUCT_DEADLINE,
+        ),
         "ECHO1"
     );
     assert_eq!(
-        read_control_line_or_host_failure_after_phase(&mut reader, child, "ECHO2", "ECHO1"),
+        read_control_line_or_host_failure_after_phase(
+            &mut reader,
+            child,
+            "ECHO2",
+            "ECHO1",
+            PRODUCT_DEADLINE,
+        ),
         "ECHO2"
     );
     (reader, writer, pid, link, descendant_pid, lease_handle)
@@ -242,7 +267,29 @@ pub(crate) fn read_control_line_or_host_failure(
     child: &mut Child,
     label: &str,
 ) -> String {
-    read_control_line_or_host_failure_after_phase(reader, child, label, "not tracked")
+    read_control_line_or_host_failure_after_phase(
+        reader,
+        child,
+        label,
+        "not tracked",
+        PRODUCT_DEADLINE,
+    )
+}
+
+/// [`read_control_line_or_host_failure`] for a session's `READY`, which follows the
+/// host's `WebView2` startup and is therefore bounded by [`startup_kill_switch`].
+pub(crate) fn read_ready_or_host_failure(
+    reader: &mut BufReader<TcpStream>,
+    child: &mut Child,
+    label: &str,
+) -> String {
+    read_control_line_or_host_failure_after_phase(
+        reader,
+        child,
+        label,
+        "not tracked",
+        startup_kill_switch(),
+    )
 }
 
 fn read_control_line_or_host_failure_after_phase(
@@ -250,8 +297,9 @@ fn read_control_line_or_host_failure_after_phase(
     child: &mut Child,
     label: &str,
     last_valid_phase: &'static str,
+    kill_switch: Duration,
 ) -> String {
-    match try_read_control_line(reader, Instant::now() + PRODUCT_DEADLINE) {
+    match try_read_control_line(reader, Instant::now() + kill_switch) {
         Ok(line) if line != "LINK_EOF" => line,
         result => {
             let deadline = Instant::now() + Duration::from_secs(2);

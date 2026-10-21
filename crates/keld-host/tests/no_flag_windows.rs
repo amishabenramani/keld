@@ -89,11 +89,22 @@ const CONTROL_LINE_LIMIT: usize = 4096;
 /// Kill switch over a host exit that includes a `WebView2` UI end (after `Quit` or a
 /// host-fatal Bun exit), never a synchronization wait. The UI end is bounded by its
 /// one owner, `keld_wv::webview2::WEBVIEW2_UI_END_BOUND`; `PRODUCT_DEADLINE` covers
-/// the rest of the exit. A healthy UI end is not bounded by `PRODUCT_DEADLINE`: the
-/// owner records healthy host releases of up to 59.1 s under full-core load and
-/// hosted `windows-latest` shutdowns past 15 s.
+/// the rest of the exit. A healthy UI end is not bounded by `PRODUCT_DEADLINE`; the
+/// owner's documentation records the measured healthy releases that exceed it.
 fn ui_end_kill_switch() -> Duration {
     keld_wv::webview2::WEBVIEW2_UI_END_BOUND + PRODUCT_DEADLINE
+}
+
+/// Kill switch over a wait that includes a `WebView2` startup (a session's `Ready`
+/// after its Bun generation is bound, or a renderer request made by the initial
+/// navigation), never a synchronization wait. The host builds its engine only after
+/// Bun binds, so the startup is bounded by its one owner,
+/// `keld_wv::webview2::WEBVIEW2_STARTUP_BOUND`; `PRODUCT_DEADLINE` covers the rest
+/// of the wait (the Ready event's delivery and Bun's control record). A healthy
+/// startup is not bounded by `PRODUCT_DEADLINE`: its launch and navigation deadlines
+/// alone sum past it.
+fn startup_kill_switch() -> Duration {
+    keld_wv::webview2::WEBVIEW2_STARTUP_BOUND + PRODUCT_DEADLINE
 }
 
 #[test]
