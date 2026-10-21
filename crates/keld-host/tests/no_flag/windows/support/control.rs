@@ -8,12 +8,36 @@ use std::time::{Duration, Instant};
 
 use crate::{CONTROL_LINE_LIMIT, PRODUCT_DEADLINE, startup_kill_switch};
 
+/// The kill switches of one generation's control handshake.
+///
+/// `ready` bounds the `READY` read, which can follow the host's `WebView2` startup;
+/// `record` bounds the accept and every other record. Product handshakes use
+/// [`HandshakeKillSwitches::product`]; only the harness contract tests pass smaller
+/// values, so they can prove which record reads under which switch without waiting
+/// out the product deadline.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct HandshakeKillSwitches {
+    pub(crate) record: Duration,
+    pub(crate) ready: Duration,
+}
+
+impl HandshakeKillSwitches {
+    /// The per-step product deadline for every record, and the startup kill switch
+    /// for `READY`.
+    pub(crate) fn product() -> Self {
+        Self {
+            record: PRODUCT_DEADLINE,
+            ready: startup_kill_switch(),
+        }
+    }
+}
+
 pub(crate) fn accept_ready_generation(
     listener: &TcpListener,
     child: &mut Child,
 ) -> (BufReader<TcpStream>, TcpStream, u32, String) {
     let (reader, writer, pid, link, _, lease_handle) =
-        accept_ready_generation_inner(listener, child, false);
+        accept_ready_generation_inner(listener, child, false, HandshakeKillSwitches::product());
     assert!(lease_handle.is_none(), "unexpected lease census disclosure");
     (reader, writer, pid, link)
 }
@@ -31,7 +55,7 @@ pub(crate) fn accept_ready_generation_with_lease(
     child: &mut Child,
 ) -> (BufReader<TcpStream>, TcpStream, u32, String, usize) {
     let (reader, writer, pid, link, _, lease_handle) =
-        accept_ready_generation_inner(listener, child, true);
+        accept_ready_generation_inner(listener, child, true, HandshakeKillSwitches::product());
     (
         reader,
         writer,
@@ -45,8 +69,21 @@ pub(crate) fn accept_ready_generation_with_descendant(
     listener: &TcpListener,
     child: &mut Child,
 ) -> (BufReader<TcpStream>, TcpStream, u32, String, u32) {
+    accept_ready_generation_with_descendant_within(
+        listener,
+        child,
+        HandshakeKillSwitches::product(),
+    )
+}
+
+/// [`accept_ready_generation_with_descendant`] under explicit kill switches.
+pub(crate) fn accept_ready_generation_with_descendant_within(
+    listener: &TcpListener,
+    child: &mut Child,
+    kill_switches: HandshakeKillSwitches,
+) -> (BufReader<TcpStream>, TcpStream, u32, String, u32) {
     let (reader, writer, pid, link, descendant_pid, lease_handle) =
-        accept_ready_generation_inner(listener, child, false);
+        accept_ready_generation_inner(listener, child, false, kill_switches);
     assert!(lease_handle.is_none(), "unexpected lease census disclosure");
     assert_ne!(
         descendant_pid, 0,
@@ -59,6 +96,7 @@ fn accept_ready_generation_inner(
     listener: &TcpListener,
     child: &mut Child,
     expect_lease_handle: bool,
+    kill_switches: HandshakeKillSwitches,
 ) -> (
     BufReader<TcpStream>,
     TcpStream,
@@ -68,9 +106,9 @@ fn accept_ready_generation_inner(
     Option<usize>,
 ) {
     let control =
-        accept_control_or_host_failure(listener, child, Instant::now() + PRODUCT_DEADLINE);
+        accept_control_or_host_failure(listener, child, Instant::now() + kill_switches.record);
     control
-        .set_read_timeout(Some(PRODUCT_DEADLINE))
+        .set_read_timeout(Some(kill_switches.record))
         .expect("generation control read deadline");
     let writer = control.try_clone().expect("generation control writer");
     let mut reader = BufReader::new(control);
@@ -79,7 +117,7 @@ fn accept_ready_generation_inner(
         child,
         "HELLO",
         "CONTROL_CONNECTED",
-        PRODUCT_DEADLINE,
+        kill_switches.record,
     );
     let mut fields = hello.split_whitespace();
     assert_eq!(fields.next(), Some("HELLO"), "{hello}");
@@ -95,7 +133,7 @@ fn accept_ready_generation_inner(
         child,
         "DESCENDANT",
         "HELLO",
-        PRODUCT_DEADLINE,
+        kill_switches.record,
     );
     let descendant_pid = parse_descendant_pid(&descendant_record);
     let (lease_handle, last_valid_phase) = if expect_lease_handle {
@@ -104,7 +142,7 @@ fn accept_ready_generation_inner(
             child,
             "LEASE_HANDLE",
             "DESCENDANT",
-            PRODUCT_DEADLINE,
+            kill_switches.record,
         );
         let value = lease_record
             .strip_prefix("LEASE_HANDLE ")
@@ -127,7 +165,7 @@ fn accept_ready_generation_inner(
             child,
             "READY",
             last_valid_phase,
-            startup_kill_switch(),
+            kill_switches.ready,
         ),
         "READY"
     );
@@ -137,7 +175,7 @@ fn accept_ready_generation_inner(
             child,
             "ECHO1",
             "READY",
-            PRODUCT_DEADLINE,
+            kill_switches.record,
         ),
         "ECHO1"
     );
@@ -147,7 +185,7 @@ fn accept_ready_generation_inner(
             child,
             "ECHO2",
             "ECHO1",
-            PRODUCT_DEADLINE,
+            kill_switches.record,
         ),
         "ECHO2"
     );

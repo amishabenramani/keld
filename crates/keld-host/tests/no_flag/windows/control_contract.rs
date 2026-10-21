@@ -7,10 +7,11 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use crate::support::control::{
-    accept_ready_generation_with_descendant, read_control_line_or_host_failure,
+    HandshakeKillSwitches, accept_ready_generation_with_descendant,
+    accept_ready_generation_with_descendant_within, read_control_line_or_host_failure,
     try_read_control_line,
 };
-use crate::{CONTROL_LINE_LIMIT, PRODUCT_DEADLINE, wait_child};
+use crate::{CONTROL_LINE_LIMIT, PRODUCT_DEADLINE, startup_kill_switch, wait_child};
 
 #[test]
 fn control_line_preserves_the_byte_limit_and_expired_read_does_not_consume_data() {
@@ -247,10 +248,27 @@ fn startup_ready_echo_sequence_preserves_generation_values() {
 
 /// A session's READY arrives only after the host's `WebView2` startup, whose own
 /// bounded phases (keld-wv's `WEBVIEW2_STARTUP_BOUND`) sum past the per-step product
-/// deadline. The harness must accept a READY that is late by product-deadline
-/// standards while the host is still alive, and must not stop at that deadline.
+/// deadline. The harness must accept a READY that is late by per-step standards while
+/// the host is still alive, and must not stop at that per-step deadline.
+///
+/// The handshake runs under injected kill switches: a 250 ms per-step `record`
+/// switch stands in for the product deadline, so a READY delayed past it proves the
+/// READY read uses the `ready` switch without waiting out 20 s. The product pairing of
+/// the two switches is pinned separately below.
 #[test]
 fn startup_ready_after_the_product_deadline_is_accepted_within_the_startup_bound() {
+    let product = HandshakeKillSwitches::product();
+    assert_eq!(product.record, PRODUCT_DEADLINE);
+    assert_eq!(product.ready, startup_kill_switch());
+    assert!(
+        product.ready > product.record,
+        "a product READY must outlast the per-step deadline: {product:?}"
+    );
+
+    let injected = HandshakeKillSwitches {
+        record: Duration::from_millis(250),
+        ready: Duration::from_secs(30),
+    };
     let listener = TcpListener::bind(("127.0.0.1", 0)).expect("slow-startup control listener");
     let mut peer = TcpStream::connect(listener.local_addr().expect("control address"))
         .expect("slow-startup control peer");
@@ -264,10 +282,10 @@ fn startup_ready_after_the_product_deadline_is_accepted_within_the_startup_bound
         .stderr(Stdio::piped())
         .spawn()
         .expect("stdin-blocked slow-startup child");
-    let late_by = PRODUCT_DEADLINE + Duration::from_secs(2);
+    let late_by = injected.record * 4;
     let started = Instant::now();
-    // Fault injection, not synchronization: this peer is a startup that takes longer
-    // than the product deadline, which the startup bound admits.
+    // Fault injection, not synchronization: this peer is a startup that outlasts the
+    // per-step switch, which the ready switch admits.
     let slow_startup = thread::spawn(move || {
         thread::sleep(late_by);
         peer.write_all(b"READY\nECHO1\nECHO2\n")
@@ -275,14 +293,14 @@ fn startup_ready_after_the_product_deadline_is_accepted_within_the_startup_bound
         peer
     });
     let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        accept_ready_generation_with_descendant(&listener, &mut child)
+        accept_ready_generation_with_descendant_within(&listener, &mut child, injected)
     }));
     let elapsed = started.elapsed();
     let _peer = slow_startup.join().expect("slow startup peer");
     child.kill().expect("clean up stdin-blocked child");
     wait_child(&mut child, Instant::now() + PRODUCT_DEADLINE);
     let (_, _, pid, link, descendant_pid) =
-        outcome.expect("a live host's READY within the startup bound must be accepted");
+        outcome.expect("a live host's READY within the ready switch must be accepted");
     assert_eq!(pid, 31337);
     assert_eq!(link, "fixture-private-app-link-token");
     assert_eq!(descendant_pid, 31338);
