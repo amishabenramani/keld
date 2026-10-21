@@ -296,8 +296,14 @@ export function checkPullRequestTargetWorkflow(source: string, label: string): v
  * single stale compiler pin are not. This uses the existing semantic YAML owner.
  */
 export function checkRustToolchainPins(source: string, toolchainToml: string): void {
-  const selected = /^channel\s*=\s*"([0-9]+\.[0-9]+\.[0-9]+)"\s*$/m.exec(toolchainToml)?.[1];
-  if (!selected) fail("rust-toolchain.toml must select an exact stable X.Y.Z release.");
+  let parsedToolchain: unknown;
+  try { parsedToolchain = Bun.TOML.parse(toolchainToml); }
+  catch (error) { fail(`cannot parse rust-toolchain.toml: ${error instanceof Error ? error.message : String(error)}`); }
+  const toolchain = mapping(mapping(parsedToolchain, "rust-toolchain.toml").toolchain, "rust-toolchain.toml [toolchain]");
+  const selected = toolchain.channel;
+  if (typeof selected !== "string" || !/^[0-9]+\.[0-9]+\.[0-9]+$/.test(selected)) {
+    fail("rust-toolchain.toml [toolchain].channel must select an exact stable X.Y.Z release.");
+  }
   let parsed: unknown;
   try { parsed = Bun.YAML.parse(source); }
   catch (error) { fail(`cannot parse workflow YAML: ${error instanceof Error ? error.message : String(error)}`); }

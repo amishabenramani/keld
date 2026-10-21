@@ -59,6 +59,13 @@ test("every Rust installer agrees with the exact pin and immutable action commit
     .toThrow("must select Rust");
 });
 
+test("Rust toolchain admission reads the actual TOML toolchain table, never a decoy", () => {
+  const decoy = '[decoy]\nchannel = "1.99.1"\n[toolchain]\nchannel = "1.97.1"\ncomponents = ["rustfmt", "clippy"]\n';
+  expect(() => checkRustToolchainPins(source, decoy)).toThrow("must select Rust");
+  const duplicate = '[toolchain]\nchannel = "1.99.1"\nchannel = "1.97.1"\n';
+  expect(() => checkRustToolchainPins(source, duplicate)).toThrow();
+});
+
 test("source-budget reporting stays advisory, visible and unprivileged", () => {
   const workflow = fixture();
   const s = step(workflow, "changes", "Source budget proposals (report only)");

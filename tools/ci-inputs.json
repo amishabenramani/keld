@@ -367,7 +367,7 @@
         "crates/keld-host/tests/no_flag/macos/public_fs/project.rs",
         "crates/keld-host/tests/no_flag/macos/public_fs.rs"
       ],
-      "sha256": "ddd47714b720eae66aa8414befbd180383c08e20bf2a9bdd4231918b982fecf5"
+      "sha256": "15a594f113a63fe52fe239c94d3eac90c35bb7e75e4af6587d8cb9030ac6cab5"
     },
     "bun-readers": {
       "patterns": [
@@ -384,7 +384,7 @@
         ".githooks/*",
         "rust-toolchain.toml"
       ],
-      "sha256": "ac0ad840bc21d21dabeffdf9d5816945099b82d744fdb2461a29ee527c2cebb6"
+      "sha256": "e30f18abe5e88e052537d085325846bdd21fdc668079c9eee68725723387109b"
     },
     "audit-readers": {
       "patterns": [
