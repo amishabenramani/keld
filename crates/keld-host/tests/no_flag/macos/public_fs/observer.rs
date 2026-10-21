@@ -1,4 +1,5 @@
 use crate::support::EVENT_DEADLINE;
+use crate::support::control::accept_before;
 use std::io::{Read as _, Write as _};
 use std::net::{TcpListener, TcpStream};
 use std::sync::mpsc;
@@ -189,14 +190,15 @@ fn accepted_observation_stream_preserves_split_header_and_body() {
     listener
         .set_nonblocking(true)
         .expect("same observer accept mode");
+    // One original deadline covers connect and accept: a completed connect
+    // does not mean the nonblocking listener can already dequeue the peer.
+    let deadline = std::time::Instant::now() + EVENT_DEADLINE;
     let mut client = TcpStream::connect_timeout(
         &listener.local_addr().expect("listener address"),
         EVENT_DEADLINE,
     )
     .expect("real TCP client");
-    let (mut accepted, _) = listener
-        .accept()
-        .expect("completed TCP connection is queued");
+    let mut accepted = accept_before(&listener, deadline);
     // Force the failing starting state even on platforms that reset flags at accept.
     accepted
         .set_nonblocking(true)
