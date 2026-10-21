@@ -255,7 +255,10 @@ pub(super) fn terminate_attested_group(group: GroupIdentity) -> Result<(), Runti
                 return terminate_registered_group(group.pid);
             }
             let reap_deadline = Instant::now() + GUARDIAN_SHUTDOWN_DEADLINE / 4;
-            require_attested_group_absence(group, reap_deadline).map_err(|absence| {
+            // Keep this fallback's existing typed failure: callers and
+            // their native oracles distinguish it from a later probe-only
+            // absence timeout of a retained generation.
+            require_attested_group_absence(group, reap_deadline).map_err(|_| {
                 collapse_failures(vec![
                     observation,
                     lifecycle_error(
@@ -265,7 +268,6 @@ pub(super) fn terminate_attested_group(group: GroupIdentity) -> Result<(), Runti
                             "live process-group leader identity is unproven",
                         ),
                     ),
-                    absence,
                 ])
             })
         }
