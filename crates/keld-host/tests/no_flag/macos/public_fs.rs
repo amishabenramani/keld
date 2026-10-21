@@ -47,7 +47,9 @@ use outcomes::{
     assert_component_outcomes, assert_component_trace, assert_handler_attribution,
     assert_natural_outcomes, assert_page_outcomes,
 };
-use private_diagnostics::{Phase as PrivatePhase, host_exit_summary, observed_marker};
+use private_diagnostics::{
+    Phase as PrivatePhase, assert_report_phase, host_exit_summary, observed_marker, output_summary,
+};
 use process_image::process_image_path;
 use project::{
     CONTENT, Exercise, Policy, PreparedLaunch, PublicFsProject, RECOVERY_AFTER_CONTENT, SENTINEL,
@@ -392,7 +394,11 @@ fn observe_recovery_before_loss(
             .reports
             .recv_timeout(EVENT_DEADLINE)
             .expect("actual pending renderer request");
-        assert_eq!(started["phase"], "recovery-pending-start", "{started}");
+        assert_report_phase(
+            &started,
+            "recovery-pending-start",
+            PrivatePhase::RecoveryPage,
+        );
         assert_eq!(
             started["requests"]
                 .as_array()
@@ -408,7 +414,11 @@ fn observe_recovery_before_loss(
             .reports
             .recv_timeout(EVENT_DEADLINE)
             .expect("actual application handler HTTP barrier");
-        assert_eq!(admitted["phase"], "recovery-handler-pending", "{admitted}");
+        assert_report_phase(
+            &admitted,
+            "recovery-handler-pending",
+            PrivatePhase::RecoveryPage,
+        );
         assert_eq!(admitted["barrier"], "application-handler-only");
         assert_eq!(pid(&admitted, "pid"), first_bun);
         assert_eq!(admitted["nonce"], started["requests"][2]["nonce"]);
@@ -538,7 +548,7 @@ fn observe_recovery_actions(
         .reports
         .recv_timeout(EVENT_DEADLINE)
         .expect("G2 public whenReady returned after fresh host admission");
-    assert_eq!(ready["phase"], "app-ready", "{ready}");
+    assert_report_phase(&ready, "app-ready", PrivatePhase::RecoveryBoot);
     assert_eq!(pid(&ready, "pid"), successor_boot.pid);
     let successor = ProcessFamily {
         bun: successor_boot.pid,
@@ -969,8 +979,8 @@ fn observe_pointer_actions(
             .expect("retained click result")
             .status
             .success(),
-        "{:?}",
-        evidence.click
+        "real CoreGraphics pointer action failed: {}",
+        output_summary(evidence.click.as_ref().expect("retained click result"))
     );
     observer.await_page_result(&mut evidence.reports);
     assert_page_outcomes(
@@ -1097,9 +1107,18 @@ fn assert_product_quit(
         "KELD_KEL142_KIPC_CALL webview=",
         "KELD_KEL140_PUBLIC_HANDLER ",
     ] {
-        assert_eq!(stderr.matches(marker).count(), expected_calls, "{stderr}");
+        assert_eq!(
+            stderr.matches(marker).count(),
+            expected_calls,
+            "{marker} count; {}",
+            host_exit_summary(output, evidence.reports.len())
+        );
     }
-    assert!(stderr.contains("KELD_KEL142_BIND webview="), "{stderr}");
+    assert!(
+        stderr.contains("KELD_KEL142_BIND webview="),
+        "KELD_KEL142_BIND missing; {}",
+        host_exit_summary(output, evidence.reports.len())
+    );
     let quit_calls = if matches!(
         exercise,
         Exercise::RendererRecovery
@@ -1114,7 +1133,8 @@ fn assert_product_quit(
         stderr.contains(&format!(
             "KELD_KEL140_PUBLIC_QUIT_REQUEST calls={quit_calls}"
         )),
-        "{stderr}"
+        "KELD_KEL140_PUBLIC_QUIT_REQUEST calls={quit_calls} missing; {}",
+        host_exit_summary(output, evidence.reports.len())
     );
     let ProcessFamily {
         bun,
@@ -1341,7 +1361,7 @@ impl JointReportJournal {
                 Err(std::sync::mpsc::TryRecvError::Empty
                     | std::sync::mpsc::TryRecvError::Disconnected)
             ),
-            "HTTP observer queued a report beyond the eight-row journal: {late_report:?}"
+            "HTTP observer queued a report beyond the eight-row journal (payload withheld)"
         );
     }
 }
