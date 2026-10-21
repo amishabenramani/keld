@@ -49,10 +49,11 @@ ci-route:
 #   of test_ci_local.py run hosted through tools/ci_changes_test.sh.
 # agent-context's workspace.py check also runs hosted, but only a developer
 # checkout has task records for it to validate.
-# cache-check-test also runs hosted, unchanged (worktree_cache.rs unit tests plus
-# tools/cache_tool_provenance_test.sh), as the "Worktree cache tool native tests"
-# step of the clippy + test matrix, on ubuntu, macos and windows: its cfg(windows)
-# and cfg(unix) paths each compile only on their own OS.
+# cache-check-test also runs hosted, unchanged, as two steps of the clippy + test
+# matrix on ubuntu, macos and windows: "Worktree cache tool native tests" (the
+# worktree_cache.rs unit tests) and "Worktree cache tool provenance test"
+# (tools/cache_tool_provenance_test.sh). Its cfg(windows) and cfg(unix) paths each
+# compile only on their own OS.
 [parallel]
 ci-policy: agents-md atomic-protocol agent-context-test agent-context cache-check-test ci-router-test hooks-test audit-docs-test audit-docs doc-placeholders-test doc-placeholders-check mermaid-ci product-status-test product-status-check llms-test llms-check hygiene
 
@@ -302,13 +303,18 @@ ci-router-test:
 hooks-test:
     tools/hooks_test.sh
 
-# Format the workspace in place.
+# Format the workspace in place. `cargo fmt` never visits `include!`d files or
+# `#[path]` mods declared inside macro bodies, so tools/fmt_included.sh formats
+# those (and the `mod` files under them) too.
 fmt:
     cargo fmt --all
+    tools/fmt_included.sh
 
-# CI gate: formatting.
+# CI gate: formatting, including `include!`d and macro-body `#[path]` files (#834, #1055).
 fmt-check:
     cargo fmt --all --check
+    tools/fmt_included.sh test
+    tools/fmt_included.sh --check
 
 # CI gate: lints (warnings are errors, matching CI).
 clippy:
