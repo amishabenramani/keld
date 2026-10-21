@@ -290,8 +290,8 @@ impl WindowsLpacProfile {
         // This handle owns both the identity and the authority to read/write
         // its DACL. The share mode does not stop a rename: this handle asks
         // for no data or DELETE access, so Windows does not check sharing
-        // against it, and the race test observes the rename succeed while it
-        // is open. Identity rests on this retained HANDLE alone.
+        // against it; on Windows 11 a rename succeeds while it is open.
+        // Identity rests on this retained HANDLE alone.
         // OPEN_REPARSE_POINT permits fail-closed inspection of the final leaf.
         let original = OpenOptions::new()
             .access_mode(READ_CONTROL | WRITE_DAC | FILE_READ_ATTRIBUTES)
@@ -1072,7 +1072,7 @@ impl InheritedHandleCopies {
 /// A merged DACL ready to be written to the exact object
 /// [`WindowsLpacProfile::prepare_grant`] opened and read.
 struct PreparedGrant {
-    /// The retained READ_CONTROL | WRITE_DAC handle the DACL was read from.
+    /// The retained `READ_CONTROL | WRITE_DAC` handle the DACL was read from.
     original: std::fs::File,
     /// The merged DACL, one `LocalAlloc` allocation from `SetEntriesInAclW`.
     new_acl: LocalAllocation,
