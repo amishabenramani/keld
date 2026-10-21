@@ -16,6 +16,7 @@ use super::super::process_group::{
 };
 
 mod cleanup_authority;
+mod exiting_member_race;
 mod native_descendant;
 use self::native_descendant::spawn_held_native_descendant;
 

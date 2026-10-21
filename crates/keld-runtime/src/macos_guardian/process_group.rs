@@ -110,6 +110,44 @@ fn report_test_ambiguous_probe(group: u32) {
     });
 }
 
+// Exact native fault point for the GH-824 CLEAR race: runs on the calling
+// test thread after the real kernel reported (leader ESRCH, group live) and
+// before the single group signal, so a test can let the last live member
+// finish exiting in that window instead of hoping the scheduler does.
+#[cfg(test)]
+type TestGroupSignalHook = (u32, Box<dyn FnOnce()>);
+
+#[cfg(test)]
+thread_local! {
+    static BEFORE_GROUP_SIGNAL: RefCell<Option<TestGroupSignalHook>> = const { RefCell::new(None) };
+}
+
+#[cfg(test)]
+pub(super) fn install_test_before_group_signal(group: u32, hook: Box<dyn FnOnce()>) {
+    BEFORE_GROUP_SIGNAL.with(|slot| {
+        assert!(slot.borrow().is_none(), "only one native signal hook owner");
+        *slot.borrow_mut() = Some((group, hook));
+    });
+}
+
+#[cfg(test)]
+fn run_test_before_group_signal(group: u32) {
+    let hook = BEFORE_GROUP_SIGNAL.with(|slot| {
+        let mut slot = slot.borrow_mut();
+        if slot
+            .as_ref()
+            .is_some_and(|(expected, _)| *expected == group)
+        {
+            slot.take().map(|(_, hook)| hook)
+        } else {
+            None
+        }
+    });
+    if let Some(hook) = hook {
+        hook();
+    }
+}
+
 #[cfg(test)]
 impl GroupIdentity {
     pub(super) fn altered_birth_for_test(mut self) -> Self {
@@ -270,7 +308,24 @@ pub(super) fn terminate_attested_group(group: GroupIdentity) -> Result<(), Runti
                     // A reaped leader can still have a live same-group
                     // descendant; retain the original group-wide cleanup.
                     (Err(Errno::ESRCH), Ok(())) if !saw_ambiguous_group => {
-                        break terminate_registered_group(group.pid);
+                        #[cfg(test)]
+                        run_test_before_group_signal(group.pid);
+                        match terminate_registered_group(group.pid) {
+                            // XNU killpg1 counts an *exiting* member as found
+                            // (the zero-signal probe above succeeds) but skips
+                            // SZOMB members, and returns EPERM when it found
+                            // none. So the last member finishing its exit
+                            // between that probe and this one signal turns the
+                            // group zombie-only: EPERM. That is the same
+                            // ambiguous state as above, not a failed signal
+                            // and not proof of absence. Never signal again;
+                            // only a later read-only ESRCH within this one
+                            // budget may succeed (GH-824 host CLEAR hang).
+                            Err(denied) if is_denied_group_signal(&denied) => {
+                                saw_ambiguous_group = true;
+                            }
+                            result => break result,
+                        }
                     }
                     (Err(Errno::ESRCH), Err(Errno::EPERM)) if Instant::now() < reap_deadline => {
                         // EPERM may also denote an inaccessible group. If
@@ -299,6 +354,21 @@ pub(super) fn terminate_attested_group(group: GroupIdentity) -> Result<(), Runti
     }
 }
 
+/// The exact typed result of one group SIGKILL that the kernel denied and a
+/// follow-up zero-signal probe did not prove absent (see
+/// [`finish_group_termination`]). Any other error stays a hard failure.
+fn is_denied_group_signal(error: &RuntimeError) -> bool {
+    matches!(
+        error,
+        RuntimeError::Lifecycle {
+            phase: GROUP_SIGNAL_PHASE,
+            source,
+        } if source.raw_os_error() == Some(libc::EPERM)
+    )
+}
+
+const GROUP_SIGNAL_PHASE: &str = "macOS guardian process-group signal";
+
 pub(super) fn terminate_registered_group(group: u32) -> Result<(), RuntimeError> {
     let group = validate_group_pid(group)?;
     let result = killpg(Pid::from_raw(group), Signal::SIGKILL);
@@ -316,7 +386,7 @@ pub(super) fn finish_group_termination(
         Ok(()) | Err(Errno::ESRCH) => Ok(()),
         Err(Errno::EPERM) if matches!(probe_group(), Err(Errno::ESRCH)) => Ok(()),
         Err(error) => Err(lifecycle_error(
-            "macOS guardian process-group signal",
+            GROUP_SIGNAL_PHASE,
             io::Error::from_raw_os_error(error as i32),
         )),
     }
