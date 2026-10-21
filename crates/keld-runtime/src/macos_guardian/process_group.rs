@@ -314,19 +314,40 @@ pub(super) fn require_attested_group_absence(
     group: GroupIdentity,
     deadline: Instant,
 ) -> Result<(), RuntimeError> {
+    require_attested_group_absence_with_observers(
+        group,
+        deadline,
+        Instant::now,
+        probe_group_absence,
+    )
+}
+
+// Keep time-of-observation and the read-only kernel witnesses explicit, so
+// native tests can independently falsify both deadline guards. Shipping
+// callers always supply the real monotonic clock and exact kernel probes;
+// neither observer carries process-group signal authority. This injected
+// seam stays private to the module, not another production absence API.
+fn require_attested_group_absence_with_observers(
+    group: GroupIdentity,
+    deadline: Instant,
+    mut now: impl FnMut() -> Instant,
+    mut probe: impl FnMut(i32) -> (Result<Pid, Errno>, Result<(), Errno>),
+) -> Result<(), RuntimeError> {
     let raw = validate_group_pid(group.pid)?;
     loop {
-        if Instant::now() >= deadline {
+        if now() >= deadline {
             return Err(absence_timeout());
         }
-        let (leader, whole_group) = probe_group_absence(raw);
+        let (leader, whole_group) = probe(raw);
         // Both reads and the decision must fall inside the original budget;
         // dual ESRCH observed only after expiration cannot authorize success.
-        if leader == Err(Errno::ESRCH)
-            && whole_group == Err(Errno::ESRCH)
-            && Instant::now() < deadline
-        {
-            return Ok(());
+        let in_budget = now() < deadline;
+        if leader == Err(Errno::ESRCH) && whole_group == Err(Errno::ESRCH) {
+            return if in_budget {
+                Ok(())
+            } else {
+                Err(absence_timeout())
+            };
         }
         match leader {
             Ok(_) => {
@@ -358,11 +379,23 @@ pub(super) fn require_attested_group_absence(
                 nix_io_error(error),
             ));
         }
-        if Instant::now() >= deadline {
+        if !in_budget {
             return Err(absence_timeout());
         }
         std::thread::sleep(GENERATION_CONTROL_POLL);
     }
+}
+
+// Native tests falsify each deadline guard of the one absence owner through
+// the same private observer seam; shipping callers never reach it.
+#[cfg(test)]
+pub(super) fn require_attested_group_absence_for_test(
+    group: GroupIdentity,
+    deadline: Instant,
+    now: impl FnMut() -> Instant,
+    probe: impl FnMut(i32) -> (Result<Pid, Errno>, Result<(), Errno>),
+) -> Result<(), RuntimeError> {
+    require_attested_group_absence_with_observers(group, deadline, now, probe)
 }
 
 pub(super) fn terminate_registered_group(group: u32) -> Result<(), RuntimeError> {
