@@ -40,7 +40,7 @@ fn renderer_beacon_rechecks_the_absolute_deadline_before_replying() {
     assert_eq!(
         result,
         Err(
-            "renderer beacon deadline elapsed before the exact request; phase=reply_write"
+            "renderer beacon deadline elapsed before replying to the exact request; phase=reply_write"
                 .to_owned()
         )
     );
