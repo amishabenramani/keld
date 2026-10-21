@@ -29,7 +29,8 @@ addition.
 Observable outcome: gh532 AC1–AC12, AC16 and AC17 (as amended by A1), plus this spec's
 C1–C10 (and C11, added by A5), pass as tests in `crates/keld-compat/tests/`, each with
 its named negative control. And
-`git diff origin/main -- crates/keld-compat/fixtures/` is empty.
+`git diff origin/main -- crates/keld-compat/fixtures/` is empty (X01-T4; A5, in
+#659, moves the two window-corpus snapshots into the shared store).
 
 Non-goals:
 

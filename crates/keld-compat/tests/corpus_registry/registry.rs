@@ -89,13 +89,26 @@ fn doc_snapshots_live_in_one_store() {
         .unwrap_or_else(|error| panic!("{error}"));
 
     let lifecycle = LIFECYCLE_V0.fixture_dir;
-    match snapshot_store_census(&found, &|dir| dir == lifecycle) {
+    match snapshot_store_census(&found, &|dir| Ok(dir == lifecycle)) {
         Err(CorpusError::CorpusLocalSnapshot { dirs }) => assert_eq!(dirs, [lifecycle]),
         other => panic!("a corpus-local snapshot must be rejected: {other:?}"),
     }
-    match snapshot_store_census(&found, &|_| true) {
+    match snapshot_store_census(&found, &|_| Ok(true)) {
         Err(CorpusError::CorpusLocalSnapshot { dirs }) => assert_eq!(dirs, found),
         other => panic!("every corpus-local snapshot must be named: {other:?}"),
+    }
+    // A probe that cannot answer fails the census; it never counts as "no copy".
+    let unreadable = |dir: &str| -> Result<bool, CorpusError> {
+        Err(CorpusError::Io {
+            path: format!("{dir}/doc-snapshots"),
+            error: "permission denied".to_owned(),
+        })
+    };
+    match snapshot_store_census(&found, &unreadable) {
+        Err(CorpusError::Io { path, .. }) => {
+            assert_eq!(path, format!("{}/doc-snapshots", found[0]));
+        }
+        other => panic!("a failed probe must fail the census: {other:?}"),
     }
 
     // The filesystem probe itself, on a throwaway tree: a corpus directory with its own
@@ -108,8 +121,14 @@ fn doc_snapshots_live_in_one_store() {
     let with_copy = has_local_snapshots(&root, "fixtures/with-copy");
     let without_copy = has_local_snapshots(&root, "fixtures/without-copy");
     let _ = fs::remove_dir_all(&root);
-    assert!(with_copy, "a corpus-local doc-snapshots/ must be found");
-    assert!(!without_copy, "a corpus without doc-snapshots/ must pass");
+    assert!(
+        matches!(with_copy, Ok(true)),
+        "a corpus-local doc-snapshots/ must be found: {with_copy:?}"
+    );
+    assert!(
+        matches!(without_copy, Ok(false)),
+        "a corpus without doc-snapshots/ must pass: {without_copy:?}"
+    );
 }
 
 /// Every registered corpus passes the static rules, and its committed records pass the
