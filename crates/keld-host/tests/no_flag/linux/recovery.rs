@@ -103,7 +103,7 @@ fn linux_no_flag_host_recovers_bun_in_the_same_renderer_window() {
     beacon.join().expect("recovery beacon thread");
 }
 
-fn accept_generation(
+pub(crate) fn accept_generation(
     listener: &UnixListener,
     host: &mut Child,
 ) -> (
