@@ -3,17 +3,28 @@
 //! It rejects the known ways a diagnostic or assertion failure can render an
 //! untrusted page/app record, captured child `Output`/stream, or a private
 //! token, nonce or endpoint: inline captures, positional, indexed and named
-//! format arguments, positional Debug, and `assert_eq!`/`assert_ne!` operands
-//! that name a private field. It is a textual check, not a Rust parser or a
-//! comprehensive secret scan; the sentinel formatter tests in the parent
-//! module remain the behavioural proof of the fixed diagnostics.
+//! format arguments, positional Debug, any `dbg!`, and `assert_eq!`/
+//! `assert_ne!` operands that name a private field or call a local closure or
+//! fn whose body indexes a private key (best effort, by name).
+//!
+//! It is a textual check, not a Rust parser or a comprehensive secret scan.
+//! Known shapes it cannot see, which review and the sentinel tests must cover:
+//! - a rename before printing (`let r = report; eprintln!("{r}")`), including
+//!   a renamed private value used as an equality operand;
+//! - raw byte writes (`stderr().write_all(report.as_bytes())`);
+//! - `Result::expect`/`unwrap` panics that render an `Err`'s `Debug`;
+//! - accessors that index a private value through a variable key, or that
+//!   are defined outside the public-FS fixture.
+//!
+//! The sentinel formatter tests in the parent module remain the behavioural
+//! proof of the fixed diagnostics.
 
 use std::fs;
 use std::path::{Path, PathBuf};
 
 /// Bindings that hold untrusted records, captured child output or private
 /// values in the public-FS fixture.
-const UNTRUSTED: [&str; 30] = [
+const UNTRUSTED: [&str; 31] = [
     "report",
     "reports",
     "result",
@@ -44,10 +55,12 @@ const UNTRUSTED: [&str; 30] = [
     "old_endpoint",
     "initial_document",
     "raw_bytes",
+    "path",
 ];
 
 /// Macros whose arguments are rendered into a message or log line.
-const FORMAT_MACROS: [&str; 12] = [
+const FORMAT_MACROS: [&str; 13] = [
+    "dbg!",
     "eprintln!",
     "println!",
     "eprint!",
@@ -63,8 +76,9 @@ const FORMAT_MACROS: [&str; 12] = [
 ];
 
 /// Owners that reduce an untrusted value to a fixed marker or counts.
-const SAFE_WRAPPERS: [&str; 5] = [
+const SAFE_WRAPPERS: [&str; 6] = [
     "output_summary(",
+    "route_summary(",
     "host_exit_summary(",
     "observed_marker(",
     "PrivatePhase::",
@@ -84,6 +98,12 @@ const SCALAR_PROJECTIONS: [&str; 5] = [
 const PRIVATE_FIELDS: [&str; 4] = ["nonce", "token", "endpoint", "[key]"];
 
 fn untrusted_interpolations(source: &str) -> Vec<String> {
+    untrusted_interpolations_with(source, &private_accessors(source))
+}
+
+/// `accessors` are local closures/fns whose body indexes a private key; the
+/// fixture-wide check passes the union over every public-FS source.
+fn untrusted_interpolations_with(source: &str, accessors: &[&str]) -> Vec<String> {
     let mut found = Vec::new();
     for binding in UNTRUSTED {
         for shape in [format!("{{{binding}}}"), format!("{{{binding}:")] {
@@ -99,10 +119,15 @@ fn untrusted_interpolations(source: &str) -> Vec<String> {
         }
     }
     for (name, args) in invocations(source) {
+        if name == "dbg!" {
+            // dbg! renders the Debug of every argument to stderr.
+            found.push(format!("dbg!({})", args.trim()));
+            continue;
+        }
         let parts = split_top_level(args);
         if matches!(name, "assert_eq!" | "assert_ne!") {
             for operand in parts.iter().take(2) {
-                if names_private_field(operand) {
+                if names_private_field(operand) || calls_any(operand, accessors) {
                     found.push(format!("{name} operand `{}`", operand.trim()));
                 }
             }
@@ -146,6 +171,90 @@ fn names_private_field(operand: &str) -> bool {
     }
     let lower = operand.to_ascii_lowercase();
     PRIVATE_FIELDS.iter().any(|field| lower.contains(field))
+}
+
+/// Private keys whose indexing marks a local closure/fn as a private accessor.
+const PRIVATE_KEYS: [&str; 3] = ["nonce\"]", "token\"]", "endpoint\"]"];
+
+/// Names of `let name = |..| ..;` closures and `fn name(..) {..}` items whose
+/// body indexes a private key literal (for example `["documentNonce"]`).
+fn private_accessors(source: &str) -> Vec<&str> {
+    let bytes = source.as_bytes();
+    let mut found = Vec::new();
+    let mut at = 0;
+    while at < bytes.len() {
+        if let Some(end) = opaque_end(bytes, at) {
+            at = end;
+            continue;
+        }
+        let boundary = at == 0 || !is_ident(bytes[at - 1]);
+        let keyword = [&b"let "[..], &b"fn "[..]]
+            .into_iter()
+            .find(|keyword| boundary && bytes[at..].starts_with(keyword));
+        let Some(keyword) = keyword else {
+            at += 1;
+            continue;
+        };
+        let name_start = at + keyword.len();
+        let name_end = bytes[name_start..]
+            .iter()
+            .position(|byte| !is_ident(*byte))
+            .map_or(bytes.len(), |end| name_start + end);
+        let name = &source[name_start..name_end];
+        let rest = source[name_end..].trim_start();
+        let body = if keyword == b"fn " {
+            source[name_end..].find('{').map(|open| {
+                let open = name_end + open;
+                &source[open..matching_close(bytes, open)]
+            })
+        } else if let Some(closure) = rest.strip_prefix('=') {
+            let closure = closure.trim_start();
+            let closure = closure.strip_prefix("move ").unwrap_or(closure);
+            closure.starts_with('|').then(|| statement(closure))
+        } else {
+            None
+        };
+        if let Some(body) = body {
+            let lower = body.to_ascii_lowercase();
+            if !name.is_empty() && PRIVATE_KEYS.iter().any(|key| lower.contains(key)) {
+                found.push(name);
+            }
+        }
+        at = name_end.max(at + 1);
+    }
+    found
+}
+
+/// Text up to the first top-level `;`.
+fn statement(text: &str) -> &str {
+    let bytes = text.as_bytes();
+    let (mut depth, mut at) = (0_usize, 0);
+    while at < bytes.len() {
+        if let Some(end) = opaque_end(bytes, at) {
+            at = end;
+            continue;
+        }
+        match bytes[at] {
+            b'(' | b'[' | b'{' => depth += 1,
+            b')' | b']' | b'}' => depth = depth.saturating_sub(1),
+            b';' if depth == 0 => return &text[..at],
+            _ => {}
+        }
+        at += 1;
+    }
+    text
+}
+
+/// Whether `operand` calls one of `names` (`name(` at an identifier boundary).
+fn calls_any(operand: &str, names: &[&str]) -> bool {
+    names.iter().any(|name| {
+        operand.match_indices(name).any(|(at, _)| {
+            let bytes = operand.as_bytes();
+            let before = at == 0 || !is_ident(bytes[at - 1]);
+            let after = operand[at + name.len()..].trim_start();
+            before && after.starts_with('(')
+        })
+    })
 }
 
 /// `name = expression` (an explicitly named format argument) yields `expression`.
@@ -368,10 +477,14 @@ fn no_public_fs_fixture_source_renders_an_untrusted_or_private_value() {
             "guard walk missed {required}"
         );
     }
+    let accessors: Vec<&str> = sources
+        .iter()
+        .flat_map(|(_, source)| private_accessors(source))
+        .collect();
     let leaks: Vec<String> = sources
         .iter()
         .flat_map(|(path, source)| {
-            untrusted_interpolations(source)
+            untrusted_interpolations_with(source, &accessors)
                 .into_iter()
                 .map(move |leak| format!("{}: {leak}", path.display()))
         })
@@ -417,6 +530,21 @@ fn untrusted_interpolation_guard_sees_every_known_binding_shape() {
         r#"assert_eq!(report[key], other[key], "same {key}");"#,
         r#"assert_ne!(old_endpoint, endpoint, "fresh endpoint");"#,
         r#"assert_eq!(admitted["nonce"], started["requests"][2]["nonce"]);"#,
+        // Any dbg!.
+        "dbg!(report);",
+        "dbg!(&evidence.reports[0]);",
+        // A local closure or fn returning a private field (the D1 shape).
+        r#"let document = |evidence: &LaunchEvidence| {
+            evidence.reports[0]["documentNonce"].clone()
+        };
+        assert_ne!(document(&recovered), document(&relaunched), "new document");"#,
+        r#"let document = move |e: &E| e.page["javascriptToken"].clone();
+        assert_eq!(document(&a), b);"#,
+        r#"fn first_request(report: &Value) -> &Value { &report["requests"][0]["nonce"] }
+        fn check(a: &Value, b: &Value) { assert_eq!(first_request(a), b); }"#,
+        // Route paths carry a pending-handler nonce.
+        r#"panic!("unexpected route {path}");"#,
+        r#"panic!("unexpected route {}", path);"#,
     ] {
         assert!(
             !untrusted_interpolations(leaked).is_empty(),
@@ -434,6 +562,11 @@ fn untrusted_interpolation_guard_sees_every_known_binding_shape() {
         r#"format!("recovery-{}", phase.as_str())"#,
         r#"eprintln!("calls={n}", n = quit_calls);"#,
         r#"// eprintln!("{}", report) is not an invocation inside a comment"#,
+        r#"fn pid(report: &Value, key: &str) -> u32 { report[key].as_u64().unwrap() as u32 }
+        fn check(a: &Value) { assert_eq!(pid(a, "pid"), 7); }"#,
+        r#"let document = |e: &E| e.page["phase"].clone();
+        assert_eq!(document(&a), "page-ready");"#,
+        r#"panic!("unexpected route; {}", route_summary(path));"#,
     ] {
         assert!(
             untrusted_interpolations(fixed).is_empty(),

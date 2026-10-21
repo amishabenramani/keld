@@ -125,9 +125,11 @@ impl DescendantQuit {
         );
         let bun_pipe = pipe_identity(family.bun, "1");
         let child_pipe = pipe_identity(family.descendant, "1");
-        assert_eq!(
-            bun_pipe, child_pipe,
-            "descendant must inherit exact Bun stdout endpoint"
+        // Kernel pipe identities stay out of the failure text, as in the log line.
+        assert_private_eq(
+            &bun_pipe,
+            &child_pipe,
+            "descendant must inherit exact Bun stdout endpoint",
         );
         self.bun_exit = Some(ProcessExitObserver::arm(family.bun));
         self.child_exit = Some(ProcessExitObserver::arm(family.descendant));

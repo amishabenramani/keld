@@ -135,10 +135,10 @@ fn renderer_pending_public_fs_call_rejects_once_and_rebinds_replaced_root() {
             .expect("actual document")["documentNonce"]
             .clone()
     };
-    assert_ne!(
-        document(&recovered),
-        document(&relaunched),
-        "healthy relaunch creates a new document"
+    assert_private_ne(
+        &document(&recovered),
+        &document(&relaunched),
+        "healthy relaunch creates a new document",
     );
 }
 

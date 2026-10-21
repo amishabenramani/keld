@@ -76,6 +76,24 @@ where
     assert!(left != right, "{what} (private values withheld)");
 }
 
+/// Fixed kind and byte length of an observer HTTP route, never the path:
+/// the pending-handler route carries a request nonce.
+pub(super) fn route_summary(path: &str) -> String {
+    const ROUTES: [(&str, &str); 6] = [
+        ("/observe", "observe"),
+        ("/quit", "quit"),
+        ("/recovery-page", "recovery-page"),
+        ("/recovery-pending/", "recovery-pending"),
+        ("/recovery-admit/", "recovery-admit"),
+        ("/recovery-quit/", "recovery-quit"),
+    ];
+    let kind = ROUTES
+        .iter()
+        .find(|(prefix, _)| path.starts_with(prefix))
+        .map_or("unknown", |(_, kind)| kind);
+    format!("route_kind={kind} path_bytes={}", path.len())
+}
+
 /// Success and byte counts of a captured child `Output`, never its bytes.
 pub(super) fn output_summary(output: &Output) -> String {
     format!(
@@ -118,6 +136,19 @@ mod tests {
             stdout: PRIVATE.as_bytes().to_vec(),
             stderr: PRIVATE.as_bytes().to_vec(),
         };
+        let route = route_summary(&format!("/recovery-pending/42/{PRIVATE}"));
+        assert_eq!(
+            route,
+            format!(
+                "route_kind=recovery-pending path_bytes={}",
+                21 + PRIVATE.len()
+            )
+        );
+        assert!(!route.contains(PRIVATE));
+        assert_eq!(
+            route_summary(PRIVATE),
+            format!("route_kind=unknown path_bytes={}", PRIVATE.len())
+        );
         let safe_host = host_exit_summary(&output, 3);
         assert!(safe_host.contains("host_success=true"));
         assert!(safe_host.contains("reports=3"));
