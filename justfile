@@ -49,11 +49,14 @@ ci-route:
 #   of test_ci_local.py run hosted through tools/ci_changes_test.sh.
 # agent-context's workspace.py check also runs hosted, but only a developer
 # checkout has task records for it to validate.
+# cache-check-test also runs hosted, as the "Worktree cache tool native tests"
+# step of the clippy + test matrix, on ubuntu, macos and windows: its cfg(windows)
+# and cfg(unix) paths each compile only on their own OS.
 [parallel]
-ci-policy: agents-md atomic-protocol agent-context-test agent-context ci-router-test hooks-test audit-docs-test audit-docs doc-placeholders-test doc-placeholders-check mermaid-ci product-status-test product-status-check llms-test llms-check hygiene
+ci-policy: agents-md atomic-protocol agent-context-test agent-context cache-check-test ci-router-test hooks-test audit-docs-test audit-docs doc-placeholders-test doc-placeholders-check mermaid-ci product-status-test product-status-check llms-test llms-check hygiene
 
 [parallel]
-ci-policy-full: agents-md atomic-protocol agent-context-test agent-context ci-router-test hooks-test audit-docs-test audit-docs doc-placeholders-test doc-placeholders-check mermaid-full product-status-test product-status-check llms-test llms-check hygiene
+ci-policy-full: agents-md atomic-protocol agent-context-test agent-context cache-check-test ci-router-test hooks-test audit-docs-test audit-docs doc-placeholders-test doc-placeholders-check mermaid-full product-status-test product-status-check llms-test llms-check hygiene
 
 mermaid-ci:
     #!/usr/bin/env bash
@@ -144,6 +147,64 @@ work-clean *args:
 
 work-check:
     {{python_command}} -B tools/workspace.py check
+
+# Build a fresh executable from a verified source snapshot on every run. No
+# executable from an earlier run is ever trusted or executed: a cache under
+# $HOME cannot prove which bytes it holds. The private scratch directory lives
+# outside every worktree target/, so full cache deletion never removes it.
+[private]
+cache-tool-exec mode *args:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    repo_root=$(git rev-parse --show-toplevel)
+    cd "$repo_root"
+    source_stamp() {
+        local dir="$1"
+        {
+            git hash-object "$dir/worktree_cache.rs"
+            git hash-object "$dir/worktree_cache_delete.rs"
+            git hash-object "$dir/worktree_cache_delete_tests.rs"
+        } | git hash-object --stdin
+    }
+    stamp=$(source_stamp tools)
+    name="worktree-cache"
+    if [[ "{{os()}}" == "windows" ]]; then name="worktree-cache.exe"; fi
+    scratch=$(mktemp -d)
+    trap 'rm -rf "$scratch"' EXIT
+    # Compile a verified immutable source snapshot, never mutable checkout bytes.
+    cp tools/worktree_cache.rs tools/worktree_cache_delete.rs tools/worktree_cache_delete_tests.rs "$scratch/"
+    [[ "$(source_stamp "$scratch")" == "$stamp" ]] || {
+        echo "cache source changed during snapshot; refusing compilation" >&2; exit 1;
+    }
+    rustc --edition=2024 -D warnings -C opt-level=s -C strip=symbols "$scratch/worktree_cache.rs" -o "$scratch/$name"
+    [[ "$(source_stamp tools)" == "$stamp" ]] || {
+        echo "cache source changed during compilation; refusing stale executable" >&2; exit 1;
+    }
+    # set positional-arguments includes the named mode as $1.
+    shift
+    "$scratch/$name" "{{mode}}" . "$@"
+
+# Read-only census of every registered Git worktree build cache.
+cache-check *args:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    just cache-tool-exec check "$@"
+
+# Explicit --all or --worktree PATH with --yes is required for deletion.
+cache-delete *args:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    just cache-tool-exec delete "$@"
+
+# Native tests compile without the workspace Cargo graph.
+cache-check-test:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    scratch=$(mktemp -d)
+    trap 'rm -rf "$scratch"' EXIT
+    rustc --edition=2024 -D warnings --test tools/worktree_cache.rs -o "$scratch/cache-tests"
+    "$scratch/cache-tests"
+    bash tools/cache_tool_provenance_test.sh
 
 work-test:
     {{python_command}} -B tools/test_workspace.py
@@ -240,13 +301,18 @@ ci-router-test:
 hooks-test:
     tools/hooks_test.sh
 
-# Format the workspace in place.
+# Format the workspace in place. `cargo fmt` never visits `include!`d files or
+# `#[path]` mods declared inside macro bodies, so tools/fmt_included.sh formats
+# those (and the `mod` files under them) too.
 fmt:
     cargo fmt --all
+    tools/fmt_included.sh
 
-# CI gate: formatting.
+# CI gate: formatting, including `include!`d and macro-body `#[path]` files (#834, #1055).
 fmt-check:
     cargo fmt --all --check
+    tools/fmt_included.sh test
+    tools/fmt_included.sh --check
 
 # CI gate: lints (warnings are errors, matching CI).
 clippy:
