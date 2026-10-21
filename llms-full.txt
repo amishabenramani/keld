@@ -1570,7 +1570,7 @@ payload:= postcard-encoded schema type (structured) | raw bytes (flags.RAW)
   the first restart backoff, gets one successor; that successor's failed connect
   becomes `ledger.last`, and the gate, closed by then, stops supervision at its
   crash. Closing this exactly needs kipc to publish admission before
-  `write_hello`. The crash-loop breaker is checked before the gate, so two crashes
+  `write_hello`. The crash-loop breaker runs before the gate, so two crashes
   before authentication and one after it, inside the breaker window, end as
   `KELD-RUNTIME-002`: three crashes really happened. A crash after any echo REPLY
   is strictly after the record. Before GH-674 those successors were restarted, failed to
