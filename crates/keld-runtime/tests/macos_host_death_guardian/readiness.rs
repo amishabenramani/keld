@@ -2,7 +2,7 @@
 use super::roles::spawn_link_peer;
 use super::support::{
     NativeBirth, accept_line_before, parse_pid, process_group, process_rss_kib,
-    retain_parented_birth,
+    retain_group_member_birth, retain_parented_birth,
 };
 use super::{
     CycleCleanup, Duration, EVENT_DEADLINE, FileTypeExt, Instant, Path, PathBuf, UnixListener, fs,
@@ -100,6 +100,13 @@ pub(super) fn await_ready(
         "guardian and group leader must identify the same process group"
     );
     let descendant_pid = descendant_pid.expect("descendant ready");
+    // Arm member-based emergency group cleanup while the descendant is live
+    // and still the leader's direct child in the original group.
+    cleanup.descendant_birth = Some(retain_group_member_birth(
+        descendant_pid,
+        leader_pid,
+        leader_pid,
+    ));
     let guardian_pid = guardian_pid.expect("guardian ready");
     let app_link = app_link.expect("app link ready");
     let registered_link = registered_link.expect("registered link ready");
