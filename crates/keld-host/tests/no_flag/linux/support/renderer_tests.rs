@@ -205,21 +205,80 @@ fn activated_timeout_cancels_joins_and_releases_its_listener() {
 }
 
 #[test]
-fn rejected_request_does_not_poison_a_healthy_follow_up() {
-    let bad_server = TestServer::spawn(TEST_DEADLINE);
-    let mut bad_client = TcpStream::connect(bad_server.address).expect("connect bad beacon");
+fn rejected_request_does_not_poison_a_healthy_follow_up_on_the_same_listener() {
+    let listener = TcpListener::bind(("127.0.0.1", 0)).expect("bind shared beacon listener");
+    let address = listener.local_addr().expect("shared beacon address");
+    // Queue both peers on the one listener before either observation runs, so the
+    // follow-up shares the listener, its backlog and the rejected peer's aftermath.
+    let mut bad_client = TcpStream::connect(address).expect("connect bad beacon");
     bad_client
         .write_all(b"GET /wrong.png HTTP/1.1\r\nHost: localhost\r\n\r\n")
         .expect("write bad beacon");
-    assert!(
-        bad_server.finish().is_err(),
-        "first malformed request must fail"
-    );
-
-    let good_server = TestServer::spawn(TEST_DEADLINE);
-    let mut good_client = TcpStream::connect(good_server.address).expect("connect healthy beacon");
+    let mut good_client = TcpStream::connect(address).expect("connect healthy beacon");
     good_client
         .write_all(VALID_REQUEST)
         .expect("write healthy follow-up");
-    assert_eq!(good_server.finish(), Ok(()));
+    for client in [&bad_client, &good_client] {
+        client
+            .set_read_timeout(Some(TEST_DEADLINE))
+            .expect("set reply read deadline");
+    }
+    let (_cancellation, cancellation_rx) = mpsc::channel();
+
+    let rejected =
+        serve_renderer_beacon_until(&listener, Instant::now() + TEST_DEADLINE, &cancellation_rx)
+            .expect_err("first malformed request must fail");
+    assert!(rejected.contains("unexpected beacon"), "{rejected}");
+    let mut bad_reply = Vec::new();
+    bad_client
+        .read_to_end(&mut bad_reply)
+        .expect("rejected peer sees its stream close");
+    assert!(
+        bad_reply.is_empty(),
+        "a rejected request must not be acknowledged: {bad_reply:?}"
+    );
+
+    assert_eq!(
+        serve_renderer_beacon_until(&listener, Instant::now() + TEST_DEADLINE, &cancellation_rx),
+        Ok(()),
+        "the queued healthy follow-up on the same listener must still be observed"
+    );
+    let mut good_reply = Vec::new();
+    good_client
+        .read_to_end(&mut good_reply)
+        .expect("read healthy reply");
+    assert_eq!(good_reply, RENDERER_RESPONSE);
+}
+
+#[test]
+fn empty_preconnect_is_skipped_before_the_exact_request() {
+    let server = TestServer::spawn(TEST_DEADLINE);
+    drop(TcpStream::connect(server.address).expect("connect empty preconnect"));
+    let mut client = TcpStream::connect(server.address).expect("connect exact request");
+    client
+        .set_read_timeout(Some(TEST_DEADLINE))
+        .expect("set response read deadline");
+    client
+        .write_all(VALID_REQUEST)
+        .expect("write exact request after empty preconnect");
+
+    let mut response = Vec::new();
+    client
+        .read_to_end(&mut response)
+        .expect("read renderer response");
+    assert_eq!(response, RENDERER_RESPONSE);
+    assert_eq!(server.finish(), Ok(()));
+}
+
+#[test]
+fn empty_preconnect_alone_still_ends_at_the_original_deadline() {
+    let listener = TcpListener::bind(("127.0.0.1", 0)).expect("bind preconnect-only beacon");
+    let address = listener.local_addr().expect("preconnect-only address");
+    drop(TcpStream::connect(address).expect("queue empty preconnect"));
+    let (_cancellation, cancellation_rx) = mpsc::channel();
+
+    let error =
+        serve_renderer_beacon_until(&listener, Instant::now() + SHORT_DEADLINE, &cancellation_rx)
+            .expect_err("an empty preconnect is not a renderer request");
+    assert!(error.contains("deadline elapsed"), "{error}");
 }
