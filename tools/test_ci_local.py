@@ -938,7 +938,7 @@ class TempRepositoryMaintenanceTests(unittest.TestCase):
         # Non-vacuous: every helper language and call shape is recognized.
         helpers = {site.rsplit(":", 1)[0] for site in sites}
         for helper in ("tools/test_ci_local.py", "tools/ci_changes_test.sh", "tools/hooks_test.sh",
-                       "tools/ci_hygiene.rs", "tools/mermaid_docs.rs", "tools/product_status.rs",
+                       "tools/ci_hygiene_tests.rs", "tools/mermaid_docs.rs", "tools/product_status.rs",
                        "tools/ci_workflow_security.test.ts", "tools/retained_fs_artifact_test.py",
                        "tools/test_session_closeout.py", "tools/test_workspace.py",
                        "docs/audits/test_verify.py", "crates/keld-wv/tests/linux_media_checkout_test.sh",

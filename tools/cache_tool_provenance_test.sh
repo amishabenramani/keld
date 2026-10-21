@@ -27,6 +27,7 @@ cp "$repo_root/justfile" "$fixture/justfile"
 cp "$repo_root/tools/worktree_cache.rs" "$repo_root/tools/worktree_cache_delete.rs" \
     "$repo_root/tools/worktree_cache_delete_tests.rs" "$fixture/tools/"
 git -C "$fixture" init -q
+git -C "$fixture" config maintenance.auto false
 
 # The previous recipe's cache key: tool sources plus `rustc -vV`.
 stamp=$(
