@@ -68,9 +68,48 @@ describe("app.quit vs Electron void", () => {
   });
 });
 
+describe("Electron ready event over the shared lifecycle owner", () => {
+  test("a ready listener alone starts shared-link readiness observation, isolated from a throwing one", async () => {
+    child = Bun.spawn({
+      cmd: ["bun", "./ready_listener_only.ts"],
+      cwd: fixtures,
+      stdout: "pipe",
+      stderr: "pipe",
+      env: {
+        ...process.env,
+        KELD_APP_LINK: `1#${"ab".repeat(32)}`,
+      },
+    });
+    const { stdout, stderr, code } = await waitChildOrKill(child, 4_000);
+    expect(stderr).toBe("");
+    expect(code).toBe(0);
+    expect(stdout).toContain("KEL142_READY_LISTENER_ONLY");
+    expect(stdout).toContain("KEL72_READY_SECOND");
+    expect(stdout).toContain("KEL142_CONNECT_CALLS=1");
+  });
+
+  test("quit opening the shared link still delivers the host Ready event", async () => {
+    child = Bun.spawn({
+      cmd: ["bun", "./ready_via_quit.ts"],
+      cwd: fixtures,
+      stdout: "pipe",
+      stderr: "pipe",
+      env: {
+        ...process.env,
+        KELD_APP_LINK: `1#${"ab".repeat(32)}`,
+      },
+    });
+    const { stdout, stderr, code } = await waitChildOrKill(child, 4_000);
+    expect(stderr).toBe("");
+    expect(code).toBe(0);
+    expect(stdout).toContain("KEL142_READY_VIA_QUIT");
+    expect(stdout).toContain("KEL142_CONNECT_CALLS=1");
+  });
+});
+
 describe("app.whenReady on link death", () => {
   test(
-    "rejects whenReady and retries when onLinkDead runs before connect() returns",
+    "rejects whenReady, and keeps rejecting without a reconnect, when onLinkDead runs before connect() returns",
     async () => {
       child = Bun.spawn({
         cmd: ["bun", "./app_sync_link_dead.ts"],
@@ -86,14 +125,14 @@ describe("app.whenReady on link death", () => {
       expect(stderr).toBe("");
       expect(code).toBe(0);
       expect(stdout).toContain("KEL72_SYNC_DEAD");
-      expect(stdout).toContain("KEL72_SYNC_DEAD_RETRY_READY");
-      expect(stdout).toContain("KEL72_CONNECT_CALLS=2");
+      expect(stdout).toContain("KEL72_SYNC_DEAD_STICKY");
+      expect(stdout).toContain("KEL72_CONNECT_CALLS=1");
     },
     10_000,
   );
 
   test(
-    "rejects pending whenReady and retries connect after HELLO-then-death",
+    "rejects pending whenReady after HELLO-then-death, and keeps rejecting without a reconnect",
     async () => {
       child = Bun.spawn({
         cmd: ["bun", "./app_link_death.ts"],
@@ -109,8 +148,8 @@ describe("app.whenReady on link death", () => {
       expect(stderr).toBe("");
       expect(code).toBe(0);
       expect(stdout).toContain("KEL72_WHEN_READY_DEAD");
-      expect(stdout).toContain("KEL72_RETRY_READY");
-      expect(stdout).toContain("KEL72_CONNECT_CALLS=2");
+      expect(stdout).toContain("KEL72_DEATH_STICKY");
+      expect(stdout).toContain("KEL72_CONNECT_CALLS=1");
     },
     10_000,
   );

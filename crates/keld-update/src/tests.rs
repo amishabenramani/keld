@@ -8,6 +8,10 @@ use keld_guard::ProfileDigest;
 
 use super::*;
 
+mod expected_identity;
+#[cfg(windows)]
+pub(crate) mod signed_image;
+
 const APP_ID: &str = "dev.keld.fixture";
 const TARGET: &str = "windows-x64";
 const ZERO_DIGEST: &str = "0000000000000000000000000000000000000000000000000000000000000000";
@@ -20,6 +24,7 @@ pub(crate) fn signing_key() -> SigningKey {
 pub(crate) fn expected_identity() -> DirectInstallationIdentity {
     let public_key = signing_key().verifying_key().to_bytes();
     DirectInstallationIdentity {
+        install_mode: DirectInstallMode::MachineSeamlessDirect,
         app_id: APP_ID.to_owned(),
         channel: Channel::Stable,
         target: TARGET.to_owned(),
@@ -90,8 +95,13 @@ pub(crate) fn release_json(
 }
 
 pub(crate) fn manifest_json(releases: &str) -> Vec<u8> {
+    manifest_json_for(APP_ID, releases)
+}
+
+/// [`manifest_json`] for the app `app_id`.
+pub(crate) fn manifest_json_for(app_id: &str, releases: &str) -> Vec<u8> {
     format!(
-        r#"{{"schema":1,"channel":"stable","target":"{TARGET}","app":{{"id":"{APP_ID}"}},"releases":[{releases}]}}"#
+        r#"{{"schema":1,"channel":"stable","target":"{TARGET}","app":{{"id":"{app_id}"}},"releases":[{releases}]}}"#
     )
     .into_bytes()
 }
@@ -183,6 +193,18 @@ pub(crate) fn append_required_policy(archive: &mut Vec<u8>) {
     );
 }
 
+/// The updater helper every canonical Windows package carries (KEL-53 T4d). A literal
+/// wire oracle like [`append_required_policy`]; the caller appends it at its byte-sorted
+/// position, after every member whose name sorts below `keld-updater-helper.exe`.
+pub(crate) fn append_required_helper(archive: &mut Vec<u8>) {
+    append_ustar_entry(
+        archive,
+        "keld-updater-helper.exe",
+        b'0',
+        b"keld-updater-helper fixture",
+    );
+}
+
 fn refresh_ustar_checksum(header: &mut [u8; 512]) {
     header[148..156].fill(b' ');
     let sum: u64 = header.iter().map(|byte| u64::from(*byte)).sum();
@@ -247,7 +269,10 @@ fn provenance_refuses_missing_unprotected_and_managed_before_admission() {
 #[test]
 fn provenance_requires_exact_identity_distinct_principals_and_floor() {
     let verifier = verifier();
-    let substitutions: [IdentitySubstitution; 9] = [
+    let substitutions: [IdentitySubstitution; 10] = [
+        (ProvenanceField::InstallMode, |identity| {
+            identity.install_mode = DirectInstallMode::PerUserDirect;
+        }),
         (ProvenanceField::AppId, |identity| {
             identity.app_id.push_str(".other");
         }),
@@ -844,14 +869,185 @@ fn archive_invalid_error_has_stable_code_and_repair_guidance() {
 }
 
 #[test]
-fn canonical_archive_preflight_accepts_policy_only_and_nested_file_trees() {
-    let mut empty = Vec::new();
-    append_required_policy(&mut empty);
-    finish_ustar(&mut empty);
-    let validated = parse_test_archive(&empty).expect("policy-only package");
-    assert_eq!(validated.entries().len(), 2);
-    assert_eq!(validated.content_size(), 2560);
-    assert_eq!(validated.content_blake3(), blake3::hash(&empty).as_bytes());
+fn the_located_image_choice_is_closed_and_names_each_file_exactly() {
+    assert_eq!(WindowsLocatedImage::Host.file_name(), "keld-host.exe");
+    assert_eq!(
+        WindowsLocatedImage::UpdaterHelper.file_name(),
+        "keld-updater-helper.exe"
+    );
+}
+
+#[test]
+fn executable_binding_names_the_correction_for_its_image() {
+    for (image, correction) in [
+        (
+            WindowsLocatedImage::Host,
+            "Launch keld-host.exe from its installation's selected version tree; repair or reinstall through the trusted installer if the layout is damaged.",
+        ),
+        (
+            WindowsLocatedImage::UpdaterHelper,
+            "Start keld-updater-helper.exe only from its installation's protected version tree, as keld-host.exe or an administrator starts it; repair or reinstall through the trusted installer if the layout is damaged.",
+        ),
+    ] {
+        let error = UpdateError::ExecutableBinding {
+            image,
+            step: "locator",
+            detail: "synthetic layout".to_owned(),
+        };
+        assert_code(&error, "KELD-UPDATE-018");
+        assert_eq!(
+            error.to_string(),
+            format!(
+                "KELD-UPDATE-018: installed executable locator refused (synthetic layout). {correction}"
+            )
+        );
+    }
+}
+
+#[test]
+fn version_publication_errors_distinguish_pre_and_post_rename_effects() {
+    let stage_retained = UpdateError::VersionPublication {
+        version: "2.0.0".to_owned(),
+        stage_name: "incomplete-test".to_owned(),
+        outcome: crate::VersionPublicationOutcome::StageRetained,
+        detail: "completion record refused".to_owned(),
+    };
+    assert_code(&stage_retained, "KELD-UPDATE-015");
+    assert!(stage_retained.to_string().contains("was not published"));
+    assert!(
+        stage_retained
+            .to_string()
+            .contains("stage `incomplete-test` remains diagnostic")
+    );
+
+    let destination_unconfirmed = UpdateError::VersionPublication {
+        version: "2.0.0".to_owned(),
+        stage_name: "incomplete-test".to_owned(),
+        outcome: crate::VersionPublicationOutcome::DestinationUnconfirmed,
+        detail: "final readback failed".to_owned(),
+    };
+    assert_code(&destination_unconfirmed, "KELD-UPDATE-015");
+    assert!(destination_unconfirmed.to_string().contains("may exist"));
+    assert!(
+        destination_unconfirmed
+            .to_string()
+            .contains("never select by directory presence")
+    );
+}
+
+#[test]
+fn activation_errors_name_what_remains_and_the_only_safe_next_action() {
+    let expectations = [
+        (
+            crate::ActivationEffect::ProtectedStateUnchanged,
+            "No activation journal exists",
+        ),
+        (
+            crate::ActivationEffect::JournalBoundRecoveryRequired,
+            "journal-bound recovery under the writer lease",
+        ),
+        (
+            crate::ActivationEffect::ResolvedWithLeftovers,
+            "only never-selectable leftovers remain",
+        ),
+        (
+            crate::ActivationEffect::UnjournaledVersionRetained,
+            "later writers halt until the explicit unjournaled-version repair",
+        ),
+        (
+            crate::ActivationEffect::WriterActive,
+            "normally the updater's exclusive writer lease, holds the installation's activation lock",
+        ),
+    ];
+    for (effect, guidance) in expectations {
+        let error = UpdateError::Activation {
+            step: "record publication",
+            effect,
+            detail: "rename failed".to_owned(),
+        };
+        assert_code(&error, "KELD-UPDATE-016");
+        let text = error.to_string();
+        assert!(
+            text.starts_with(
+                "KELD-UPDATE-016: activation record publication refused (rename failed)."
+            ),
+            "{text}"
+        );
+        assert!(text.contains(guidance), "{effect:?}: {text}");
+    }
+}
+
+/// KEL-53 criterion 20 and "Candidate connect-back" (T4d slice S6b): `WriterActive` also
+/// covers the accepted candidate's boot read, which read records but wrote nothing.
+#[test]
+fn writer_active_names_the_candidate_boot_read_as_its_second_producer() {
+    let text = UpdateError::Activation {
+        step: "candidate attempt phase",
+        effect: crate::ActivationEffect::WriterActive,
+        detail: "the pending journal is HealthAccepted".to_owned(),
+    }
+    .to_string();
+    assert!(
+        text.ends_with(
+            "A conflicting handle, normally the updater's exclusive writer lease, holds the \
+             installation's activation lock, or an accepted candidate's boot read found that \
+             the pending attempt is not the one whose owner accepted it. Nothing was written, \
+             and outside that boot read nothing was read either; start nothing from this \
+             state, and select again only after that handle is released."
+        ),
+        "{text}"
+    );
+}
+
+/// KEL-53 criterion 17 (T4d slice S2): each closed Machine-UAC recovery guidance renders
+/// exactly one pinned fix-guidance text, byte for byte, after the shared activation prefix.
+#[test]
+fn machine_recovery_guidance_renders_its_exact_pinned_text() {
+    use crate::MachineRecoveryGuidance::{RecoverNow, RecoveryDisabled, RestartFirst};
+    let pinned = [
+        (
+            RecoveryDisabled,
+            "This MachineUacDirect installation needs recovery that only the recovery-only role of the elevated keld-updater-helper.exe may perform, and this release does not provide that role: no supported resolution exists other than administrator action. Start nothing from this state; any activation journal, the pointers and the versions are preserved, and no ordinary process repairs them.",
+        ),
+        (
+            RecoverNow,
+            "This MachineUacDirect installation needs recovery that only the recovery-only role of the elevated keld-updater-helper.exe may perform: run that role now and approve its UAC prompt; no restart is needed. Start nothing from this state; any activation journal, the pointers and the versions are preserved, and no ordinary process repairs them.",
+        ),
+        (
+            RestartFirst,
+            "This MachineUacDirect installation needs recovery that only the recovery-only role of the elevated keld-updater-helper.exe may perform: restart Windows first, then run that role and approve its UAC prompt. Start nothing from this state; the activation journal, the pointers and the versions are preserved, and no ordinary process repairs them.",
+        ),
+    ];
+    for (guidance, text) in pinned {
+        let error = UpdateError::Activation {
+            step: "active package selection",
+            effect: crate::ActivationEffect::MachineRecoveryRequired(guidance),
+            detail: "a pending PublishPending activation journal".to_owned(),
+        };
+        assert_code(&error, "KELD-UPDATE-016");
+        assert_eq!(
+            error.to_string(),
+            format!(
+                "KELD-UPDATE-016: activation active package selection refused (a pending PublishPending activation journal). {text}"
+            ),
+            "{guidance:?}"
+        );
+    }
+}
+
+#[test]
+fn canonical_archive_preflight_accepts_the_required_minimum_and_nested_file_trees() {
+    let mut minimum = Vec::new();
+    append_required_policy(&mut minimum);
+    append_required_helper(&mut minimum);
+    finish_ustar(&mut minimum);
+    let validated = parse_test_archive(&minimum).expect("policy and helper only");
+    assert_eq!(validated.entries().len(), 3);
+    assert_eq!(validated.content_size(), 3584);
+    assert_eq!(
+        validated.content_blake3(),
+        blake3::hash(&minimum).as_bytes()
+    );
 
     let mut archive = Vec::new();
     append_required_policy(&mut archive);
@@ -859,6 +1055,7 @@ fn canonical_archive_preflight_accepts_policy_only_and_nested_file_trees() {
     append_ustar_entry(&mut archive, "assets/a.txt", b'0', b"x");
     append_ustar_entry(&mut archive, "assets/b.bin", b'0', &vec![0x5a; 513]);
     append_ustar_entry(&mut archive, "empty", b'5', &[]);
+    append_required_helper(&mut archive);
     finish_ustar(&mut archive);
     let validated = parse_test_archive(&archive).expect("canonical nested package tree");
     assert_eq!(
@@ -873,7 +1070,8 @@ fn canonical_archive_preflight_accepts_policy_only_and_nested_file_trees() {
             "assets",
             "assets/a.txt",
             "assets/b.bin",
-            "empty"
+            "empty",
+            "keld-updater-helper.exe"
         ]
     );
     assert_eq!(validated.entries()[2].kind(), ArchiveEntryKind::Directory);
@@ -945,15 +1143,107 @@ fn canonical_archive_preflight_requires_exact_policy_bytes_and_file_kind() {
     ));
 }
 
+/// One helper-member case: its label, the members it appends after the policy, and the
+/// exact refusal detail.
+type HelperCase = (&'static str, fn(&mut Vec<u8>), &'static str);
+
+#[test]
+fn canonical_archive_preflight_requires_the_updater_helper_after_the_digest() {
+    // Each archive is signed as it stands, so only the helper rule can refuse it.
+    let cases: [HelperCase; 4] = [
+        (
+            "absent",
+            |_| {},
+            "required keld-updater-helper.exe is missing",
+        ),
+        (
+            "case variant only",
+            |archive| append_ustar_entry(archive, "KELD-UPDATER-HELPER.EXE", b'0', b"x"),
+            "required keld-updater-helper.exe is missing",
+        ),
+        (
+            "nested only",
+            |archive| {
+                append_ustar_entry(archive, "nested", b'5', &[]);
+                append_ustar_entry(archive, "nested/keld-updater-helper.exe", b'0', b"x");
+            },
+            "required keld-updater-helper.exe is missing",
+        ),
+        (
+            "directory",
+            |archive| append_ustar_entry(archive, "keld-updater-helper.exe", b'5', &[]),
+            "keld-updater-helper.exe is not a regular file",
+        ),
+    ];
+    for (why, append, detail) in cases {
+        let mut archive = Vec::new();
+        append_required_policy(&mut archive);
+        append(&mut archive);
+        finish_ustar(&mut archive);
+        let error = parse_test_archive(&archive).expect_err(why);
+        assert_code(&error, "KELD-UPDATE-011");
+        assert!(
+            matches!(error, UpdateError::ArchiveInvalid { detail: found } if found == detail),
+            "{why}: {error}"
+        );
+    }
+}
+
+#[test]
+fn a_changed_archive_without_the_helper_is_a_digest_failure() {
+    let mut signed = Vec::new();
+    append_required_policy(&mut signed);
+    append_required_helper(&mut signed);
+    finish_ustar(&mut signed);
+    let receipt = archive_receipt(&signed);
+    // The same bytes with the helper renamed to a same-length name: canonical, the signed
+    // size, no helper, and not the signed digest.
+    let mut changed = Vec::new();
+    append_required_policy(&mut changed);
+    append_ustar_entry(
+        &mut changed,
+        "keld-updater-helper.exf",
+        b'0',
+        b"keld-updater-helper fixture",
+    );
+    finish_ustar(&mut changed);
+    assert_eq!(changed.len(), signed.len());
+    let error = crate::archive::parse_canonical_ustar(
+        &receipt,
+        &mut Cursor::new(&changed),
+        lexical_windows_package_names,
+    )
+    .expect_err("changed content is refused");
+    assert_code(&error, "KELD-UPDATE-009");
+    assert!(
+        matches!(
+            error,
+            UpdateError::ArtifactDigestMismatch {
+                domain: ArtifactDomain::Content,
+                ..
+            }
+        ),
+        "{error:?}"
+    );
+}
+
 #[cfg(windows)]
 #[test]
 fn produced_package_metadata_drives_signed_full_verification_and_policy_admission() {
     let mut source = Cursor::new(b"application fixture");
-    let mut entries = [keld_pack::PackageEntry::File {
-        name: "app.bin",
-        size: 19,
-        input: &mut source,
-    }];
+    let mut helper = Cursor::new(b"keld-updater-helper fixture");
+    let mut entries = [
+        keld_pack::PackageEntry::File {
+            name: "app.bin",
+            size: 19,
+            input: &mut source,
+        },
+        keld_pack::PackageEntry::File {
+            name: "keld-updater-helper.exe",
+            size: 27,
+            input: &mut helper,
+        },
+    ];
     let mut compressed = Vec::new();
     let produced =
         keld_pack::produce_windows_v0(&mut entries, &mut compressed).expect("native producer");
@@ -976,7 +1266,12 @@ fn produced_package_metadata_drives_signed_full_verification_and_policy_admissio
             .iter()
             .map(ArchiveEntry::name)
             .collect::<Vec<_>>(),
-        [".keld", ".keld/update-policy.v1", "app.bin"]
+        [
+            ".keld",
+            ".keld/update-policy.v1",
+            "app.bin",
+            "keld-updater-helper.exe"
+        ]
     );
     let policy = &admitted.entries()[1];
     let offset = usize::try_from(policy.data_offset()).expect("small fixture");
@@ -1086,20 +1381,40 @@ fn windows_archive_preflight_rejects_case_aliases_and_non_nfc_names() {
     append_required_policy(&mut aliases);
     append_ustar_entry(&mut aliases, "README", b'0', b"a");
     append_ustar_entry(&mut aliases, "Readme", b'0', b"b");
+    append_required_helper(&mut aliases);
     finish_ustar(&mut aliases);
     let receipt = archive_receipt(&aliases);
     let error = receipt
         .validate_windows_archive(&mut Cursor::new(&aliases))
         .unwrap_err();
     assert_code(&error, "KELD-UPDATE-011");
+    assert!(
+        matches!(
+            error,
+            UpdateError::ArchiveInvalid {
+                detail: "Windows package namespace is invalid"
+            }
+        ),
+        "{error}"
+    );
 
     let mut decomposed = Vec::new();
     append_required_policy(&mut decomposed);
     append_ustar_entry(&mut decomposed, "cafe\u{0301}.txt", b'0', b"a");
+    append_required_helper(&mut decomposed);
     finish_ustar(&mut decomposed);
     let receipt = archive_receipt(&decomposed);
     let error = receipt
         .validate_windows_archive(&mut Cursor::new(&decomposed))
         .unwrap_err();
     assert_code(&error, "KELD-UPDATE-011");
+    assert!(
+        matches!(
+            error,
+            UpdateError::ArchiveInvalid {
+                detail: "Windows package namespace is invalid"
+            }
+        ),
+        "{error}"
+    );
 }

@@ -21,12 +21,82 @@ pub mod profile;
 mod startup;
 #[cfg(test)]
 mod view_drop_order;
+/// How long a backend waits for the initial renderer navigation before startup fails
+/// with KELD-WV-005.
+///
+/// This is a hang guard, not a performance budget: a renderer that never finishes its
+/// first navigation becomes a typed startup failure instead of a window that never
+/// becomes ready. It must exceed real cold and relaunch starts. Measured 2026-10-05 on
+/// Windows 10.0.26300 with `WebView2` runtime 154.0.4258.53: the first navigation took
+/// a median of 1.3 s and at most 1.9 s idle, and at most 3.8 s under the full workspace
+/// test suite plus extra load (source: the measurement table in
+/// <https://github.com/gyldlab/keld/pull/370>). Hosted `windows-latest` runners exceeded
+/// the previous 5 s bound in runs 37237832288, 37256252923 and 37265644118, mostly when
+/// relaunching right after a previous instance. 15 s keeps at least 3x margin over every
+/// observed healthy start while every test harness that waits for `Ready` allows longer,
+/// so a slow but healthy start is never cut short by either side.
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+pub(crate) const INITIAL_NAVIGATION_DEADLINE: std::time::Duration =
+    std::time::Duration::from_secs(15);
+
+/// A user closing the last view leaves no renderer whose startup can time out.
+/// Terminal app intent also wins over the initial navigation hang guard.
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+pub(crate) fn navigation_deadline_expired(
+    ready: bool,
+    has_views: bool,
+    terminal: bool,
+    now: std::time::Instant,
+    deadline: std::time::Instant,
+) -> bool {
+    !ready && has_views && !terminal && now >= deadline
+}
+
+#[cfg(all(
+    test,
+    any(target_os = "linux", target_os = "macos", target_os = "windows")
+))]
+mod navigation_deadline_tests {
+    use std::time::{Duration, Instant};
+
+    use super::navigation_deadline_expired;
+
+    #[test]
+    fn initial_navigation_deadline_requires_a_pending_live_nonterminal_view() {
+        let deadline = Instant::now();
+        let before = deadline
+            .checked_sub(Duration::from_nanos(1))
+            .expect("prior instant");
+        let after = deadline + Duration::from_nanos(1);
+        // Only a live, pending, nonterminal renderer owns a startup timeout.
+        // The inclusive boundary is the independent deadline oracle.
+        for (now, expired) in [(before, false), (deadline, true), (after, true)] {
+            assert_eq!(
+                navigation_deadline_expired(false, true, false, now, deadline),
+                expired
+            );
+            for (ready, has_views, terminal) in [
+                (false, false, false), // Last view closed before navigation.
+                (true, true, false),   // Initial navigation already completed.
+                (false, true, true),   // Queued Quit/Fatal must win.
+                (true, false, true),
+            ] {
+                assert!(!navigation_deadline_expired(
+                    ready, has_views, terminal, now, deadline
+                ));
+            }
+        }
+    }
+}
+
 #[cfg(target_os = "linux")]
 pub mod webkitgtk;
 #[cfg(target_os = "windows")]
 pub mod webview2;
 #[cfg(target_os = "macos")]
 pub mod wkwebview;
+#[doc(hidden)]
+pub mod wv_link;
 
 pub use engine::{
     AppWindowCommand, AppWindowEvent, DevtoolsAction, LogicalSize, NavTarget, Rect, WebEngine,
@@ -38,6 +108,8 @@ pub use media::{
     MediaPermission, WEB_CAMERA, WEB_MEDIA_ORIGIN, WEB_MICROPHONE, media_permission_allowed,
 };
 pub use profile::{ProfileError, ProfileErrorKind, ProfileIdentity, WebProfileSelection};
+#[cfg(all(feature = "profile-test-hooks", target_os = "windows"))]
+pub use webview2::TEST_WINDOWS_BARRIER_GRACE_EXPIRY_ENV;
 
 /// Identifies a webview instance owned by the host.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]

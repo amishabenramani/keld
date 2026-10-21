@@ -12,7 +12,6 @@
 #![allow(clippy::expect_used, clippy::panic)] // extra test crate: expect/panic are the assertion oracles against corpus rows
 
 use std::io::Cursor;
-use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
 use keld_ipc::link::{read_frame, read_validated_frame};
@@ -22,74 +21,18 @@ use keld_ipc::{
     IpcError, LifecycleEvent, LifecycleRequest, LifecycleResponse, SessionToken,
 };
 
-const CORPUS: &str = include_str!("fixtures/receiver-semantics-v0.tsv");
-const CORPUS_PATH: &str = "tests/fixtures/receiver-semantics-v0.tsv";
-/// One owner, one digest: the Bun suite asserts this same constant, so a
-/// corpus edit is an explicit, reviewed change to both consumers.
-const CORPUS_SHA256: &str = "375f50c4bea1b690dbf7f385aee0464eae0946218058445306240b997d7e9746";
+#[path = "support/receiver_corpus.rs"]
+mod corpus;
+use corpus::{CORPUS, CORPUS_PATH, CORPUS_SHA256, fixture_token_bytes, rows, unhex};
 
-/// Fixture token declared in the corpus version row (`0x01..0x20`). Not a
-/// secret: the corpus must never contain one (spec §4).
 fn fixture_token() -> SessionToken {
-    let mut bytes = [0u8; 32];
-    for (i, b) in bytes.iter_mut().enumerate() {
-        *b = u8::try_from(i + 1).expect("fixture token byte");
-    }
-    SessionToken::from_bytes(bytes)
+    SessionToken::from_bytes(fixture_token_bytes())
 }
 
-struct Row<'a> {
-    id: &'a str,
-    policy: &'a str,
-    header_or_trace: &'a str,
-    payload_hex: &'a str,
-    expected_code: &'a str,
-    link_action: &'a str,
-    handler_effects: u32,
-}
-
-fn rows() -> &'static Vec<Row<'static>> {
-    static ROWS: OnceLock<Vec<Row<'static>>> = OnceLock::new();
-    ROWS.get_or_init(|| {
-        let mut lines = CORPUS.lines();
-        let version = lines.next().expect("corpus has a version row");
-        assert!(
-            version.starts_with("receiver-semantics-v0\tv1\t"),
-            "corpus format is closed and versioned in the first row: {version}"
-        );
-        assert!(
-            version.contains("app_link_io_deadline_ms=5000"),
-            "trace rows depend on the declared stall limit"
-        );
-        lines
-            .map(|line| {
-                let mut cols = line.split('\t');
-                let mut next = || cols.next().expect("seven tab-separated columns");
-                let row = Row {
-                    id: next(),
-                    policy: next(),
-                    header_or_trace: next(),
-                    payload_hex: next(),
-                    expected_code: next(),
-                    link_action: next(),
-                    handler_effects: next().parse().expect("handler_effects is a count"),
-                };
-                assert!(cols.next().is_none(), "exactly seven columns: {line}");
-                row
-            })
-            .collect()
-    })
-}
-
-fn unhex(hex: &str) -> Vec<u8> {
-    if hex == "-" {
-        return Vec::new();
-    }
-    assert!(hex.len().is_multiple_of(2), "even hex length: {hex}");
-    (0..hex.len())
-        .step_by(2)
-        .map(|i| u8::from_str_radix(&hex[i..i + 2], 16).expect("lowercase hex"))
-        .collect()
+/// The table entry a corpus row's decimal wire id names.
+fn table_entry(id: &str) -> &'static keld_ipc::channel_table::ChannelEntry {
+    let id = ChannelId::for_test(id.parse().expect("channel id"));
+    keld_ipc::channel_table::entry(id).expect("corpus rows name an allocated channel id")
 }
 
 fn policy_by_name(name: &str) -> ReceivePolicy {
@@ -106,10 +49,27 @@ fn policy_by_name(name: &str) -> ReceivePolicy {
         "lifecycle-receiver" => ReceivePolicy::lifecycle_receiver(),
         "lifecycle-event-receiver" => ReceivePolicy::lifecycle_event_receiver(),
         "lifecycle-reply-waiter" => ReceivePolicy::lifecycle_reply_waiter(corr()),
-        "privileged-fs-receiver" => ReceivePolicy::privileged_call_receiver(ChannelId(
-            arg.expect("policy arg").parse().expect("channel id"),
-        )),
+        // The row names a wire id; only an allocated guarded entry builds the
+        // policy (GH-508 criterion 10), so an unallocated id fails the row.
+        "privileged-fs-receiver" => {
+            ReceivePolicy::privileged_call_receiver(table_entry(arg.expect("policy arg")))
+                .expect("guarded CALL channel")
+        }
         "primary-app-receiver" => ReceivePolicy::primary_app_receiver(),
+        // Rows name wire ids; only an allocated table entry builds these
+        // policies (GH-508 criterion 10), so an unallocated id fails the row.
+        "reply-waiter" => {
+            let (channel, corr) = arg
+                .and_then(|arg| arg.split_once(':'))
+                .expect("reply-waiter:<channel>:<corr>");
+            ReceivePolicy::reply_waiter(
+                table_entry(channel),
+                CorrelationId(corr.parse().expect("corr id")),
+            )
+            .expect("corpus reply-waiter rows name a reply-carrying channel")
+        }
+        "event-receiver" => ReceivePolicy::event_receiver(table_entry(arg.expect("policy arg")))
+            .expect("corpus event-receiver rows name an EVENT channel"),
         other => panic!("unknown corpus policy: {other}"),
     }
 }
@@ -154,15 +114,20 @@ fn stage_two(policy_name: &str, header: FrameHeader, payload: &[u8]) -> Result<(
         ("lifecycle-reply-waiter", keld_ipc::FrameKind::Reply) => {
             keld_ipc::codec::decode::<LifecycleResponse>(payload).map(|_| ())
         }
-        ("lifecycle-reply-waiter", keld_ipc::FrameKind::Err) => {
+        ("lifecycle-reply-waiter" | "reply-waiter", keld_ipc::FrameKind::Err) => {
             keld_ipc::codec::decode::<CallError>(payload).map(|_| ())
+        }
+        ("event-receiver", keld_ipc::FrameKind::Event) => {
+            // GH-527 §4.9: the only EVENT channel today is lifecycle.
+            keld_ipc::codec::decode::<LifecycleEvent>(payload).map(|_| ())
         }
         // PING carries no payload; the future privileged channel declares its
         // codec under KEL-102/T3; the primary session's per-channel codecs are
-        // proven by their own policies' rows.
-        (_, keld_ipc::FrameKind::Ping) | ("privileged-fs-receiver" | "primary-app-receiver", _) => {
-            Ok(())
-        }
+        // proven by their own policies' rows; a generic reply waiter's REPLY
+        // codec belongs to the channel that issued the CALL (GH-527 §4.7).
+        (_, keld_ipc::FrameKind::Ping)
+        | ("privileged-fs-receiver" | "primary-app-receiver", _)
+        | ("reply-waiter", keld_ipc::FrameKind::Reply) => Ok(()),
         (base, kind) => panic!("corpus stage-two has no rule for {base}/{kind:?}"),
     }
 }
@@ -226,7 +191,7 @@ fn every_frame_row_reproduces_its_expected_code() {
         // The link_action column is derived from the policy phase and the
         // outcome, never free text: admit iff ok; pre-auth rejections may
         // reaccept; authenticated rejections close.
-        let expected_action = match (&outcome, policy.phase) {
+        let expected_action = match (&outcome, policy.phase()) {
             (Ok(()), _) => "admit",
             (Err(_), keld_ipc::receive::SessionPhase::PreAuth) => "close-reaccept",
             (Err(_), keld_ipc::receive::SessionPhase::Authenticated) => "close",

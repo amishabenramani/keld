@@ -13,7 +13,7 @@ use crate::error::{ProvenanceField, ProvenanceUnavailable, UpdateError, hex_dige
 pub struct SigningKeyId([u8; 32]);
 
 impl SigningKeyId {
-    #[cfg(any(windows, test))]
+    #[cfg(any(windows, test, feature = "fuzzing"))]
     pub(crate) const fn from_digest(digest: [u8; 32]) -> Self {
         Self(digest)
     }
@@ -46,6 +46,55 @@ pub struct ArtifactIdentity {
     pub content_blake3: [u8; 32],
 }
 
+/// Explicit Windows direct-install mode recorded by the trusted installer.
+///
+/// This selects which OS writer profile may obtain an activation lease. It does not
+/// change package verification, the activation journal, candidate health or recovery.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum DirectInstallMode {
+    /// Default installation beneath the installing user's `LocalAppData` tree.
+    PerUserDirect,
+    /// Program Files installation whose updates request explicit UAC.
+    MachineUacDirect,
+    /// Opt-in Program Files mode with a still-separately-gated privileged writer.
+    MachineSeamlessDirect,
+}
+
+impl DirectInstallMode {
+    /// Stable local-record spelling; it is not a manifest field.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::PerUserDirect => "per-user-direct",
+            Self::MachineUacDirect => "machine-uac-direct",
+            Self::MachineSeamlessDirect => "machine-seamless-direct",
+        }
+    }
+
+    #[cfg(any(windows, test, feature = "fuzzing"))]
+    pub(crate) const fn protection_profile(self) -> keld_guard::WindowsInstallProtectionProfile {
+        match self {
+            Self::PerUserDirect => keld_guard::WindowsInstallProtectionProfile::PerUserOwnerPrivate,
+            Self::MachineUacDirect => keld_guard::WindowsInstallProtectionProfile::MachineUac,
+            Self::MachineSeamlessDirect => {
+                keld_guard::WindowsInstallProtectionProfile::MachineSystem
+            }
+        }
+    }
+
+    #[cfg(any(windows, test, feature = "fuzzing"))]
+    pub(crate) fn parse(value: &str) -> Result<Self, UpdateError> {
+        match value {
+            "per-user-direct" => Ok(Self::PerUserDirect),
+            "machine-uac-direct" => Ok(Self::MachineUacDirect),
+            "machine-seamless-direct" => Ok(Self::MachineSeamlessDirect),
+            _ => Err(UpdateError::LocalRecordInvalid {
+                detail: "unsupported direct installation mode".to_owned(),
+            }),
+        }
+    }
+}
+
 /// Security-principal model recorded by the installer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PrincipalModel {
@@ -70,6 +119,8 @@ impl PrincipalModel {
 /// Exact direct-install facts expected by the running host.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DirectInstallationIdentity {
+    /// Explicit installer-selected Windows installation mode.
+    pub install_mode: DirectInstallMode,
     /// Canonical application id compiled into the host.
     pub app_id: String,
     /// Channel requested by this host.
@@ -154,16 +205,11 @@ impl UpdateVerifier {
         public_key: [u8; 32],
     ) -> Result<Self, UpdateError> {
         validate_expected(&expected)?;
-        let verifying_key = VerifyingKey::from_bytes(&public_key).map_err(|error| {
+        let verifying_key = release_verifying_key(&public_key).map_err(|detail| {
             UpdateError::ManifestAuthentication {
-                detail: format!("compiled-in Ed25519 public key is invalid: {error}"),
+                detail: format!("compiled-in {detail}"),
             }
         })?;
-        if verifying_key.is_weak() {
-            return Err(UpdateError::ManifestAuthentication {
-                detail: "compiled-in Ed25519 public key is weak".to_owned(),
-            });
-        }
         let actual_key_id = SigningKeyId::from_public_key(&public_key);
         if expected.signing_key_id != actual_key_id {
             return Err(mismatch(
@@ -337,10 +383,146 @@ pub(crate) fn validate_expected(expected: &DirectInstallationIdentity) -> Result
     Ok(())
 }
 
+/// The single admission rule for a release Ed25519 public key: it must decode and must
+/// not be weak. The error is a detail that each caller wraps in its own typed refusal.
+fn release_verifying_key(public_key: &[u8; 32]) -> Result<VerifyingKey, String> {
+    let key = VerifyingKey::from_bytes(public_key)
+        .map_err(|error| format!("Ed25519 public key is invalid: {error}"))?;
+    if key.is_weak() {
+        return Err("Ed25519 public key is weak".to_owned());
+    }
+    Ok(key)
+}
+
+/// Build-time expected app identity that a signed host carries (KEL-254 A3 §4).
+///
+/// It is decoded only from keld-pack's canonical payload; runtime code never
+/// hand-writes it. It anchors executable-located selection together with the located
+/// roots' file identities and the recorded mode's protection profile. Windows only:
+/// A3 changes Windows boot alone.
+#[cfg(any(windows, test))]
+#[derive(Debug)]
+pub struct ExpectedAppIdentity {
+    pub(crate) app_id: String,
+    pub(crate) channel: Channel,
+    pub(crate) target: String,
+    pub(crate) signing_key_id: SigningKeyId,
+}
+
+#[cfg(any(windows, test))]
+impl ExpectedAppIdentity {
+    /// Decodes keld-pack payload bytes (not a whole executable image).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`UpdateError::ExpectedIdentityInvalid`] when keld-pack refuses the
+    /// payload bytes, the channel is not a supported channel, or the update-signing
+    /// public key is not a valid, non-weak Ed25519 key.
+    pub fn decode(payload: &[u8]) -> Result<Self, UpdateError> {
+        let payload = keld_pack::ExpectedAppIdentityPayload::decode(payload)
+            .map_err(|error| payload_refusal(&error))?;
+        Self::from_payload(&payload)
+    }
+
+    /// Reads the single embedded expectation from `image`, the open handle whose image
+    /// KEL-135 verified, through keld-pack's container reader, then applies exactly the
+    /// channel and key rules of [`Self::decode`].
+    ///
+    /// The reader uses only positioned reads on `image` and its handle-derived length: it
+    /// opens no path and neither depends on nor restores the handle's cursor. It
+    /// authenticates nothing; the result is authentic only because the caller verified
+    /// this same handle, which shares no write or delete access.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`UpdateError::ExpectedIdentityContainer`], carrying keld-pack's code and
+    /// detail, when the image is not an admissible host or has no, more than one or a
+    /// non-canonical `.keldeai` container, or a positioned read fails; and
+    /// [`UpdateError::ExpectedIdentityInvalid`] when the embedded payload bytes, channel
+    /// or update-signing public key are refused as [`Self::decode`] refuses them.
+    #[cfg(windows)]
+    pub fn from_signed_image(image: &std::fs::File) -> Result<Self, UpdateError> {
+        let payload =
+            keld_pack::read_host_identity(image).map_err(|error| container_refusal(&error))?;
+        Self::from_payload(&payload)
+    }
+
+    /// The one channel and key admission shared by [`Self::decode`] and the signed-image
+    /// reader, so neither carrier has a second check.
+    fn from_payload(payload: &keld_pack::ExpectedAppIdentityPayload) -> Result<Self, UpdateError> {
+        let channel = Channel::parse(payload.channel())
+            .ok_or_else(|| invalid_expected("unsupported channel".to_owned()))?;
+        release_verifying_key(payload.update_public_key()).map_err(invalid_expected)?;
+        Ok(Self {
+            app_id: payload.app_id().to_owned(),
+            channel,
+            target: payload.target().to_owned(),
+            signing_key_id: SigningKeyId::from_public_key(payload.update_public_key()),
+        })
+    }
+
+    /// Requires a protected record to carry exactly this app id, channel, target and
+    /// signing key. Roots and mode are anchored by the located roots' file identity and
+    /// the recorded mode's protection profile; baseline and profile digest are accepted
+    /// from the protected record only after those anchors match (KEL-254 A3 §4).
+    pub(crate) fn require_matches(
+        &self,
+        record: &DirectInstallationIdentity,
+    ) -> Result<(), UpdateError> {
+        compare(ProvenanceField::AppId, &self.app_id, &record.app_id)?;
+        compare(
+            ProvenanceField::Channel,
+            self.channel.as_str(),
+            record.channel.as_str(),
+        )?;
+        compare(ProvenanceField::Target, &self.target, &record.target)?;
+        compare(
+            ProvenanceField::SigningKey,
+            &hex_digest(self.signing_key_id.as_bytes()),
+            &hex_digest(record.signing_key_id.as_bytes()),
+        )
+    }
+}
+
+#[cfg(any(windows, test))]
+fn invalid_expected(detail: String) -> UpdateError {
+    UpdateError::ExpectedIdentityInvalid { detail }
+}
+
+/// A keld-pack payload refusal is an invalid expectation (`KELD-UPDATE-017`).
+#[cfg(any(windows, test))]
+fn payload_refusal(error: &keld_pack::PackError) -> UpdateError {
+    let detail = match error {
+        keld_pack::PackError::ExpectedIdentityInvalid { detail } => *detail,
+        _ => "payload",
+    };
+    invalid_expected(format!("payload {detail}"))
+}
+
+/// Maps a container-reader refusal: a payload refusal stays `KELD-UPDATE-017` as
+/// [`ExpectedAppIdentity::decode`] reports it; every other keld-pack refusal is
+/// `KELD-UPDATE-019` and keeps the keld-pack code and message. Windows only, like its
+/// one caller, [`ExpectedAppIdentity::from_signed_image`].
+#[cfg(windows)]
+pub(crate) fn container_refusal(error: &keld_pack::PackError) -> UpdateError {
+    if matches!(error, keld_pack::PackError::ExpectedIdentityInvalid { .. }) {
+        return payload_refusal(error);
+    }
+    UpdateError::ExpectedIdentityContainer {
+        pack_code: error.code(),
+        detail: error.to_string(),
+    }
+}
+
 pub(crate) fn match_identity(
     expected: &DirectInstallationIdentity,
     observed: &DirectInstallationIdentity,
 ) -> Result<(), UpdateError> {
+    compare(
+        ProvenanceField::InstallMode,
+        expected.install_mode.as_str(),
+        observed.install_mode.as_str(),
+    )?;
     compare(ProvenanceField::AppId, &expected.app_id, &observed.app_id)?;
     compare(
         ProvenanceField::Channel,

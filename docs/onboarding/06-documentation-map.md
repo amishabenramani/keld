@@ -17,8 +17,7 @@
 | **Engineering narrative** | What we chose, why, what we rejected, and what is not next. **Not** RFC 2119 — [`AGENTS.md`](../../AGENTS.md) still binds. Onboarding pointer for “why.” | [`docs/engineering/decisions.md`](../engineering/decisions.md) |
 | **Exploratory / historical** | Informs decisions, does not bind them. Dated. Cite it as evidence, never as a requirement. | [`docs/research/`](../research/), other [`docs/engineering/`](../engineering/) audits, and historical Linear comments |
 
-Two rules that follow directly from that table, both from
-[`docs/agents/learnings.md`](../agents/learnings.md) and [`AGENTS.md`](../../AGENTS.md):
+Two rules that follow directly from that table:
 
 - **Never cite `docs/research/inputs/external/` in your work.** Those are raw external
   research exports. Canonical `docs/research/library/` notes are exploratory evidence, not
@@ -68,7 +67,7 @@ on day one; read the others when you touch their area.
 ## `docs/specs/` — scoped feature designs
 
 Feature specs use [`docs/agents/spec-template.md`](../agents/spec-template.md), name the
-owning Linear issue, expose a visible status, and turn acceptance criteria into tests.
+owning tracker issue (Linear, or GitHub under #517), expose a visible status, and turn acceptance criteria into tests.
 `Status: draft` is design work only. `approved` authorizes the ordered implementation;
 `implementing` means approved slices are in progress; `done` means the spec's entire
 contract has landed and passed its gates. Read the current status and task checklist—do
@@ -148,8 +147,8 @@ captured input, and nine `twiter*.md` files are
 digests of practitioner discourse (the Rust tooling wave, Bun's Rust rewrite, the desktop
 framework conversation, agentic-engineering practitioners, AX leaders).
 
-**These are inputs, not sources.** The rule is explicit in
-[`docs/agents/learnings.md`](../agents/learnings.md): never cite raw external inputs directly —
+**These are inputs, not sources.** The rule is the first one under
+[The tiers, up front](#the-tiers-up-front): never cite raw external inputs directly —
 cite the polished numbered doc that consumed it.
 
 `45-P1.md` through `45-P20.md` are another source packet, now grouped under
@@ -162,7 +161,7 @@ source ledger before promoting any unresolved claim.
 
 | Doc | What's in it |
 |---|---|
-| [`workflow.md`](../agents/workflow.md) | The development loop: pick up a Linear issue → spec gate → isolated worktree → implementation/tests → verification → adversarial review → PR. Operational branch/OS rules live in `.agents/coordination.md`; current-head and PR rules live in `.agents/review.md`. |
+| [`workflow.md`](../agents/workflow.md) | The development loop: pick up the tracker issue (Linear, or GitHub under #517) → spec gate → isolated worktree → implementation/tests → verification → adversarial review → PR. Operational branch/OS rules live in `.agents/coordination.md`; current-head and PR rules live in `.agents/review.md`. |
 | [`spec-template.md`](../agents/spec-template.md) | The ten-section template every change bigger than a bug fix needs, copied to `docs/specs/<kebab-name>.md`: goal and non-goals, spec refs, binary acceptance criteria (each becomes a test), design, boundaries (including "must not touch"), ordered tasks, test plan, review gates triggered, perf impact, open questions. Implementation may begin only after human approval; an approved spec may then move to `Status: implementing`. |
 | [`learnings.md`](../agents/learnings.md) | The searchable evidence log. Query relevant areas only; it is not loaded wholesale into every agent session. |
 

@@ -41,7 +41,6 @@ use tao::event_loop::{ControlFlow, EventLoop, EventLoopBuilder, EventLoopProxy};
 use tao::platform::run_return::EventLoopExtRunReturn;
 use tao::window::{Window, WindowBuilder};
 
-const INITIAL_NAVIGATION_DEADLINE: Duration = Duration::from_secs(5);
 const GPU_SAFE_MODE_ENV: &str = "WEBKIT_DISABLE_DMABUF_RENDERER";
 const SELF_EXE: &str = "/proc/self/exe";
 
@@ -427,7 +426,7 @@ impl WebKitGtkEngine {
         let navigation_timed_out = Arc::new(AtomicBool::new(false));
         let navigation_timed_out_in_loop = Arc::clone(&navigation_timed_out);
         let navigation_ready = Arc::clone(&self.navigation_ready);
-        let navigation_deadline = Instant::now() + INITIAL_NAVIGATION_DEADLINE;
+        let navigation_deadline = Instant::now() + crate::INITIAL_NAVIGATION_DEADLINE;
         let terminal_intent_in_loop = Arc::clone(&terminal_intent);
         let mut views = std::mem::take(&mut self.views);
         let code = event_loop.run_return(move |event, _, control_flow| {
@@ -441,7 +440,7 @@ impl WebKitGtkEngine {
                 // A pre-navigation user close is a lifecycle event, not a
                 // renderer timeout. Keep the loop alive for Bun's Quit.
                 *control_flow = ControlFlow::Wait;
-            } else if navigation_deadline_expired(
+            } else if crate::navigation_deadline_expired(
                 false,
                 !views.is_empty(),
                 terminal,
@@ -644,16 +643,6 @@ fn spawn_app_wake_bridge(
         .map_err(|error| WvError::EventLoop(format!("failed to start app wake bridge: {error}")))
 }
 
-fn navigation_deadline_expired(
-    ready: bool,
-    has_views: bool,
-    terminal: bool,
-    now: Instant,
-    deadline: Instant,
-) -> bool {
-    !ready && has_views && !terminal && now >= deadline
-}
-
 /// Opens a window from `spec` and runs until the user closes it.
 ///
 /// Thin wrapper for the Phase 1 hello slice: probes the GPU stack, builds a
@@ -678,11 +667,11 @@ mod tests {
 
     use super::{
         GPU_SAFE_MODE_ENV, GpuSafeMode, WebKitGtkEngine, build_execve_vectors,
-        detect_gpu_safe_mode_with, is_wayland_session, navigation_deadline_expired,
-        nvidia_driver_loaded, prepare_gpu_safe_mode_process_with,
-        require_prepared_gpu_safe_mode_with,
+        detect_gpu_safe_mode_with, is_wayland_session, nvidia_driver_loaded,
+        prepare_gpu_safe_mode_process_with, require_prepared_gpu_safe_mode_with,
     };
     use crate::error::WvError;
+    use crate::navigation_deadline_expired;
 
     #[test]
     fn gpu_safe_mode_normal_is_not_degraded_and_has_no_reason() {

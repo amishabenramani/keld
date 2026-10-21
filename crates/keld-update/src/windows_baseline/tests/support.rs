@@ -4,7 +4,7 @@
 #![deny(unsafe_op_in_unsafe_fn)]
 
 use std::fs::{self, File, OpenOptions};
-use std::io::{Cursor, Read as _, Seek as _, SeekFrom};
+use std::io::{self, Cursor, Read as _, Seek as _, SeekFrom, Write as _};
 use std::os::windows::fs::OpenOptionsExt as _;
 use std::os::windows::io::{AsRawHandle as _, FromRawHandle as _, OwnedHandle};
 use std::path::{Path, PathBuf};
@@ -22,17 +22,27 @@ use windows_sys::Win32::System::Threading::{
     GetCurrentProcess, OpenProcessToken, WaitForSingleObject,
 };
 
-use crate::tests::{digest_hex, expected_identity, manifest_json, release_json, sign, signing_key};
+use crate::tests::{
+    digest_hex, expected_identity, manifest_json_for, release_json, sign, signing_key,
+};
 use crate::windows_baseline::WindowsBaselineTrust;
 use crate::{BaselineVerifier, VerifiedBaseline};
 
 pub(super) const ROOT_ENV: &str = "KELD_KEL266_NATIVE_ROOT";
+pub(super) const MACHINE_UAC_ROOT_ENV: &str = "KELD_KEL270_MACHINE_UAC_ROOT";
 pub(super) const CASE_ENV: &str = "KELD_KEL266_NATIVE_CASE";
 pub(super) const CUT_ENV: &str = "KELD_KEL266_NATIVE_CUT";
+pub(super) const NON_NTFS_ROOT_ENV: &str = "KELD_KEL254_NON_NTFS_ROOT";
 pub(super) const GOLDEN: &[u8] =
     include_bytes!("../../../../keld-pack/tests/fixtures/windows-v0-content.tar");
+/// Owner facts that a fixture attempt owner journals. keld-update records them and
+/// cannot observe them, so fixed values prove the transaction, not the OS facts.
+pub(super) const ATTEMPT_OWNER: crate::AttemptOwner =
+    crate::AttemptOwner::new(4242, 0x01dd_5568_c883_7100);
+pub(super) const INITIATING_LOGON: crate::InitiatingLogon =
+    crate::InitiatingLogon::new(0x0000_0001_0002_a5f3, 0x01dd_5568_af7a_c000);
 
-pub(super) fn assert_ordinary_token() {
+pub(super) fn assert_user_principal_token() {
     let sid = windows_permissions::utilities::current_process_sid().expect("actual TokenUser");
     let text = windows_permissions::wrappers::ConvertSidToStringSid(&sid).expect("TokenUser text");
     let text = text.to_string_lossy();
@@ -40,6 +50,11 @@ pub(super) fn assert_ordinary_token() {
         text.starts_with("S-1-5-21-") || text.starts_with("S-1-12-1-"),
         "ordinary-user proof cannot use a service or SYSTEM identity: {text}"
     );
+    println!("KELD_KEL266_USER_PRINCIPAL sid={text}");
+}
+
+pub(super) fn assert_ordinary_token() {
+    assert_user_principal_token();
     let mut raw = std::ptr::null_mut();
     // SAFETY: the pseudo process handle is used synchronously; the output is a
     // writable HANDLE slot. On success ownership immediately enters RAII.
@@ -72,7 +87,7 @@ pub(super) fn assert_ordinary_token() {
         elevation.TokenIsElevated, 0,
         "ordinary-user denial proof must be unelevated"
     );
-    println!("KELD_KEL266_ORDINARY_TOKEN sid={text} elevated=0");
+    println!("KELD_KEL266_ORDINARY_TOKEN elevated=0");
 }
 
 pub(super) fn directory(path: &Path) -> File {
@@ -91,6 +106,79 @@ pub(super) fn dacl_handle(path: &Path) -> File {
         .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
         .open(path)
         .expect("open SYSTEM fixture descriptor handle")
+}
+
+/// Length of the fixture attempt owner's image: the longest input of the official
+/// BLAKE3 test vectors, more than six 16 KiB positioned reads of the production digest
+/// plus a partial one, so a digest of part of the image differs from the whole image's.
+pub(super) const COORDINATOR_IMAGE_LEN: usize = 102_400;
+
+/// BLAKE3 of [`coordinator_image_bytes`], from the official BLAKE3 test vectors
+/// (`test_vectors/test_vectors.json`, `input_len` 102400, the first 32 output bytes):
+/// an oracle for the journaled `helper_image_blake3` that no code in this workspace
+/// computed.
+pub(super) const COORDINATOR_IMAGE_BLAKE3: [u8; 32] = [
+    0xbc, 0x3e, 0x3d, 0x41, 0xa1, 0x14, 0x6b, 0x06, 0x9a, 0xbf, 0xfa, 0xd3, 0xc0, 0xd4, 0x48, 0x60,
+    0xcf, 0x66, 0x43, 0x90, 0xaf, 0xce, 0x4d, 0x96, 0x61, 0xf7, 0x90, 0x2e, 0x79, 0x43, 0xe0, 0x85,
+];
+
+/// The official BLAKE3 test-vector input of [`COORDINATOR_IMAGE_LEN`] bytes: byte `i`
+/// is `i % 251`, which has no repeating 16 KiB block.
+pub(super) fn coordinator_image_bytes() -> Vec<u8> {
+    (0..COORDINATOR_IMAGE_LEN)
+        .map(|index| u8::try_from(index % 251).expect("below 251"))
+        .collect()
+}
+
+/// The fixture attempt owner's image beside the installation under `root`, opened as
+/// `keld_guard::WindowsAuthenticodeImage::open` opens a verified image: for reading,
+/// sharing only reads. It is written once, by whichever process first needs it, and its
+/// bytes are [`coordinator_image_bytes`]; its digest is [`COORDINATOR_IMAGE_BLAKE3`].
+pub(super) fn coordinator_image(root: &Path) -> File {
+    fixture_image(root, "coordinator-image.bin", &coordinator_image_bytes())
+}
+
+/// An image of the fixture owner's length whose last byte differs, so a digest that
+/// stopped short of the final byte would wrongly equal the fixture owner's.
+pub(super) fn other_coordinator_image(root: &Path) -> File {
+    let mut bytes = coordinator_image_bytes();
+    *bytes.last_mut().expect("non-empty image") ^= 1;
+    fixture_image(root, "other-coordinator-image.bin", &bytes)
+}
+
+/// A copy of the fixture owner's image opened without read access: a handle whose
+/// digest cannot be derived. Its own file, so no read handle of the fixture owner's
+/// image, which shares only reads, conflicts with this write-access open.
+pub(super) fn unreadable_coordinator_image(root: &Path) -> File {
+    let leaf = "unreadable-coordinator-image.bin";
+    drop(fixture_image(root, leaf, &coordinator_image_bytes()));
+    OpenOptions::new()
+        .append(true)
+        .open(root.join(leaf))
+        .expect("open the image copy without read access")
+}
+
+fn fixture_image(root: &Path, leaf: &str, bytes: &[u8]) -> File {
+    let path = root.join(leaf);
+    match OpenOptions::new().write(true).create_new(true).open(&path) {
+        Ok(mut file) => {
+            file.write_all(bytes).expect("write the fixture image");
+            file.sync_all().expect("flush the fixture image");
+        }
+        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
+        Err(error) => panic!("create the fixture image {}: {error}", path.display()),
+    }
+    let image = OpenOptions::new()
+        .read(true)
+        .share_mode(FILE_SHARE_READ)
+        .open(&path)
+        .expect("open the fixture image sharing only reads");
+    assert_eq!(
+        fs::read(&path).expect("read the fixture image back"),
+        bytes,
+        "the fixture image holds exactly its bytes"
+    );
+    image
 }
 
 pub(super) fn suite_root() -> PathBuf {
@@ -136,43 +224,145 @@ pub(super) fn create_suite() -> PathBuf {
 }
 
 pub(super) fn trust_for(install: &Path) -> WindowsBaselineTrust {
+    trust_for_with(install, GOLDEN)
+}
+
+/// [`trust_for`] for a baseline whose canonical package content is `content`.
+pub(super) fn trust_for_with(install: &Path, content: &[u8]) -> WindowsBaselineTrust {
     let mut identity = expected_identity();
     identity.install_root = install.to_path_buf();
     identity.update_root = install.join("updates");
-    identity.baseline.content_blake3 = *blake3::hash(GOLDEN).as_bytes();
-    // Trusted test configuration observes its explicitly selected volume, never the
-    // untrusted on-disk provenance whose equality is being tested.
-    let volume = crate::windows_fs::qualified_volume_root(&directory(Path::new(r"C:\")))
+    identity.baseline.content_blake3 = *blake3::hash(content).as_bytes();
+    // Trusted test configuration observes the fixture's selected volume, never the
+    // untrusted on-disk provenance whose equality is being tested. Some fixtures have
+    // not created the install leaf yet, so bind to its nearest existing ancestor.
+    let volume_anchor = install
+        .ancestors()
+        .find(|candidate| candidate.is_dir())
+        .expect("fixture has an existing install ancestor");
+    let volume = crate::windows_fs::qualified_volume_root(&directory(volume_anchor))
         .expect("native fixed NTFS fixture volume");
     WindowsBaselineTrust {
         installation: identity,
+        owner: crate::InstallOwner::Direct,
         publisher_scope: [0x26; 32],
         volume_guid: volume,
     }
 }
 
 pub(super) fn provision(root: &Path, label: &str) -> WindowsBaselineTrust {
+    provision_with(root, label, GOLDEN)
+}
+
+/// [`provision`] for a baseline whose canonical package content is `content`.
+pub(super) fn provision_with(root: &Path, label: &str, content: &[u8]) -> WindowsBaselineTrust {
     let parent = directory(root);
+    let profile = keld_guard::WindowsInstallProtectionProfile::MachineSystem;
     let install =
-        crate::windows_fs::create_directory_relative(&parent, label).expect("private install");
+        crate::windows_fs::create_directory_relative_with_profile(&parent, label, profile)
+            .expect("machine-profile install");
     let update =
-        crate::windows_fs::create_directory_relative(&install, "updates").expect("private update");
-    let _versions = crate::windows_fs::create_directory_relative(&update, "versions")
-        .expect("private versions");
-    trust_for(&root.join(label))
+        crate::windows_fs::create_directory_relative_with_profile(&install, "updates", profile)
+            .expect("machine-profile update");
+    let _versions =
+        crate::windows_fs::create_directory_relative_with_profile(&update, "versions", profile)
+            .expect("machine-profile versions");
+    trust_for_with(&root.join(label), content)
+}
+
+pub(super) fn provision_machine_uac(root: &Path, label: &str) -> WindowsBaselineTrust {
+    keld_guard::require_windows_system_token().expect("SYSTEM creates isolated UAC fixture");
+    let parent = directory(root);
+    let profile = keld_guard::WindowsInstallProtectionProfile::MachineUac;
+    let install =
+        crate::windows_fs::create_directory_relative_with_profile(&parent, label, profile)
+            .expect("create exact Administrators-owned fixture install root");
+    let update =
+        crate::windows_fs::create_directory_relative_with_profile(&install, "updates", profile)
+            .expect("create exact Administrators-owned update root");
+    crate::windows_fs::create_directory_relative_with_profile(&update, "versions", profile)
+        .expect("create exact Administrators-owned versions root");
+    let mut trust = trust_for(&root.join(label));
+    trust.installation.install_mode = crate::DirectInstallMode::MachineUacDirect;
+    trust
+}
+
+pub(super) fn provision_machine_uac_as_administrator(
+    root: &Path,
+    label: &str,
+) -> WindowsBaselineTrust {
+    provision_machine_uac_as_administrator_with(root, label, GOLDEN)
+}
+
+/// [`provision_machine_uac_as_administrator`] for a baseline whose canonical package
+/// content is `content`.
+pub(super) fn provision_machine_uac_as_administrator_with(
+    root: &Path,
+    label: &str,
+    content: &[u8],
+) -> WindowsBaselineTrust {
+    keld_guard::require_windows_non_system_token()
+        .expect("explicit-UAC installer must not be SYSTEM");
+    keld_guard::require_windows_machine_uac_owner_token()
+        .expect("explicit-UAC installer requires an elevated owner-capable Administrators token");
+    let parent = directory(root);
+    let profile = keld_guard::WindowsInstallProtectionProfile::MachineUac;
+    let install =
+        crate::windows_fs::create_directory_relative_with_profile(&parent, label, profile)
+            .expect("create exact Administrators-owned fixture install root");
+    let update =
+        crate::windows_fs::create_directory_relative_with_profile(&install, "updates", profile)
+            .expect("create exact Administrators-owned update root");
+    crate::windows_fs::create_directory_relative_with_profile(&update, "versions", profile)
+        .expect("create exact Administrators-owned versions root");
+    let mut trust = trust_for_with(&root.join(label), content);
+    trust.installation.install_mode = crate::DirectInstallMode::MachineUacDirect;
+    trust
+}
+
+pub(super) fn provision_per_user(root: &Path, label: &str) -> WindowsBaselineTrust {
+    provision_per_user_with(root, label, GOLDEN)
+}
+
+/// [`provision_per_user`] for a baseline whose canonical package content is `content`.
+pub(super) fn provision_per_user_with(
+    root: &Path,
+    label: &str,
+    content: &[u8],
+) -> WindowsBaselineTrust {
+    let parent = directory(root);
+    let profile = keld_guard::WindowsInstallProtectionProfile::PerUserOwnerPrivate;
+    let install =
+        crate::windows_fs::create_directory_relative_with_profile(&parent, label, profile)
+            .expect("create exact owner-private per-user install root");
+    let update =
+        crate::windows_fs::create_directory_relative_with_profile(&install, "updates", profile)
+            .expect("create exact owner-private per-user update root");
+    crate::windows_fs::create_directory_relative_with_profile(&update, "versions", profile)
+        .expect("create exact owner-private per-user versions root");
+    let mut trust = trust_for_with(&root.join(label), content);
+    trust.installation.install_mode = crate::DirectInstallMode::PerUserDirect;
+    trust
 }
 
 pub(super) fn baseline(trust: &WindowsBaselineTrust) -> VerifiedBaseline {
-    let compressed = zstd::stream::encode_all(Cursor::new(GOLDEN), 0).expect("fixture compression");
+    baseline_with(trust, GOLDEN)
+}
+
+/// [`baseline`] for canonical package content `content`, published for the trusted
+/// installation's app.
+pub(super) fn baseline_with(trust: &WindowsBaselineTrust, content: &[u8]) -> VerifiedBaseline {
+    let compressed =
+        zstd::stream::encode_all(Cursor::new(content), 0).expect("fixture compression");
     let release = release_json(
         "1.0.0",
         &compressed.len().to_string(),
         &digest_hex(&compressed),
-        &GOLDEN.len().to_string(),
-        &digest_hex(GOLDEN),
+        &content.len().to_string(),
+        &digest_hex(content),
         "",
     );
-    let manifest = manifest_json(&release);
+    let manifest = manifest_json_for(&trust.installation.app_id, &release);
     BaselineVerifier::new(
         trust.installation.clone(),
         signing_key().verifying_key().to_bytes(),
@@ -182,6 +372,39 @@ pub(super) fn baseline(trust: &WindowsBaselineTrust) -> VerifiedBaseline {
     .expect("actual detached signature")
     .verify_full(&mut Cursor::new(compressed), &mut Vec::new())
     .expect("authenticated full bytes")
+}
+
+/// Canonical Windows v0 package content whose tree holds a `keld-host.exe` image, made by
+/// keld-pack's producer (KEL-254 T2b executable-located selection).
+pub(super) fn host_package_content() -> Vec<u8> {
+    host_package_content_with(b"keld-host fixture image")
+}
+
+/// [`host_package_content`] whose `keld-host.exe` holds exactly `image`.
+pub(super) fn host_package_content_with(image: &[u8]) -> Vec<u8> {
+    package_content_with(image, b"keld-updater-helper fixture image")
+}
+
+/// Canonical package content whose tree holds exactly `host` as `keld-host.exe` and
+/// `helper` as `keld-updater-helper.exe`, made by keld-pack's producer.
+pub(super) fn package_content_with(host: &[u8], helper: &[u8]) -> Vec<u8> {
+    let mut host_input = host;
+    let mut helper_input = helper;
+    let mut entries = [
+        keld_pack::PackageEntry::File {
+            name: "keld-host.exe",
+            size: u64::try_from(host.len()).expect("fixture image length"),
+            input: &mut host_input,
+        },
+        keld_pack::PackageEntry::File {
+            name: "keld-updater-helper.exe",
+            size: u64::try_from(helper.len()).expect("fixture helper length"),
+            input: &mut helper_input,
+        },
+    ];
+    let mut compressed = Vec::new();
+    keld_pack::produce_windows_v0(&mut entries, &mut compressed).expect("native producer");
+    zstd::stream::decode_all(compressed.as_slice()).expect("canonical package content")
 }
 
 pub(super) fn child(selector: &str, root: &Path, case: &str, cut: &str, code: i32) -> String {

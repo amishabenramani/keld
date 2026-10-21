@@ -2,12 +2,27 @@
 
 mod alias;
 mod capture;
+mod claimant;
+mod coordinator_image_operator;
+mod helper;
+mod installed_host_operator;
+mod locate;
+mod locate_operator;
 mod machine_staging;
+mod machine_uac;
+mod per_user;
 mod qualification;
 mod reader;
+mod recovery_required;
+mod recovery_required_operator;
+mod repair_source;
 mod role;
+mod selection;
+mod signed_host;
 mod substitutions;
 mod support;
+mod transaction;
+mod writer;
 
 use support::{baseline, trust_for};
 

@@ -53,14 +53,26 @@ security updates. Verso/Servo remain later conformance candidates only when embe
 stabilizes—the trait is the insurance policy, not evidence that those backends ship.
 
 Windows release startup selects its persistent [WebView2 user-data folder](https://learn.microsoft.com/en-us/microsoft-edge/webview2/concepts/user-data-folder)
-before creating a listener, Bun child, or window. `keld-core` accepts one signature with
+before creating a listener, Bun child, or window. `keld-core` calls the single
+`keld-guard` KEL-135 Authenticode verifier (KEL-270 D4), which accepts one signature with
 no secondary signatures under [WinVerifyTrust Authenticode policy](https://learn.microsoft.com/en-us/windows/win32/api/wintrust/nf-wintrust-winverifytrust).
 It derives publisher scope from the verified leaf certificate's SPKI and reads the
-canonical app id only from that signer's authenticated `SPC_SP_OPUS_INFO` program name
-with the exact `keld.app-id/v1:` prefix. A missing or invalid trust chain, signer,
+app id only from that signer's authenticated `SPC_SP_OPUS_INFO` program name with the
+exact `keld.app-id/v1:` prefix; `keld-core` then requires it to be canonical before
+deriving the profile identity. A missing or invalid trust chain, signer,
 attribute, or canonical id fails closed as `KELD-WV-009`. Only the authenticated
 `stdin-v1` dev lease selects a fresh ephemeral profile; release failures never fall
 back to a shared or temporary WebView2 store.
+
+Graceful exit, purge and crash recovery wait for
+[`BrowserProcessExited`](https://learn.microsoft.com/en-us/microsoft-edge/webview2/reference/win32/icorewebview2environment5#add_browserprocessexited)
+while the expected browser process handle, opened before `Close`, is unsignaled, bounded
+there only by a measured shutdown hang guard (240 s) that fails closed while the browser
+stays alive; a measured 85 s post-exit grace bounds the event once the process is gone,
+because WebView2 raises it after the collection has released the user-data folder. A launch
+deadline bounds environment and controller creation only. A predecessor dev-ephemeral
+leaf whose exclusive-UDF probe is busy or cannot prove release is retained for a later
+pass and never fails the current host's own release.
 
 Keld uses [`CreateDirectoryW` security attributes](https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-createdirectoryw)
 to create profile directories atomically with a protected inheritable DACL for the
@@ -68,6 +80,18 @@ current user, SYSTEM, and Administrators. Subsequent validation follows the Wind
 [file-security access-right contract](https://learn.microsoft.com/en-us/windows/win32/fileio/file-security-and-access-rights):
 it rejects foreign ordinary-user read, write, execute, delete, or ACL/owner authority
 while retaining the AppContainer and capability ACEs WebView2 requires.
+
+During a `PerUserDirect` update the old host hands this persistent profile to the
+candidate: it closes its window, tells the application that its last window closed,
+waits a bounded time for the application's own `Quit` and only then ends it, so that
+the `BrowserProcessExited` barrier, the durable `idle` record and the lease release
+all precede the candidate's launch, while the KEL-53 writer lease, held until the
+candidate's or the restored session's profile is acquired, refuses every other launch
+before any profile is touched; the candidate acquires the same identity's profile as
+any clean successor, and a rolled-back attempt restores the old host's session in
+process through the crash-recovery probe, acquiring the profile before the journal is
+rolled back. KEL-53 §4 "Profile handover" owns the order and rejects a candidate-only
+or shared store; the handover is specified (slice S6c), not yet implemented.
 
 Microsoft's upstream [WebView2 client support](https://learn.microsoft.com/microsoft-edge/webview2/#supported-windows-versions)
 includes Windows 10 SAC 1709 and later plus Windows 11. Keld has real-qualified this
@@ -228,9 +252,14 @@ report any cancellation, deadline, or I/O failure after create/truncate as
 `KELD-NATIVE-007` with acknowledged content-byte counts. The five-second clock is a
 cooperative progress budget, not a promise to preempt a wedged kernel call. `FsBroker`
 alone owns the roots; calls and `serve_fs_session` borrow it, and dropping a wrapper is
-not broker destruction while another owner remains. The channel is library-tested but
-remains unreachable from the shipping no-flag host until KEL-102/T3 supplies admission,
-in-flight cancellation/drain, and ordered broker destruction.
+not broker destruction while another owner remains. The retained filesystem broker and
+guarded production host route are implemented (KEL-102/T3), exposing a public Bun
+`fs.read`/`write` slice on the canonical app link with macOS explicit project-policy
+capture and absent-policy all-denied fallback. This manifest guard applies strictly
+to brokered app-link calls; direct Bun `node:fs` calls do not pass through this broker
+and are not denied by it, as OS sandbox containment remains a separate, not-yet-fully-qualified
+guarantee. Renderer-action forwarding, non-macOS project-policy producers, and full
+hostile/deadline/quiescence qualification remain open.
 
 v0 is still a skeleton: its `MODULES` registry does not yet include the destination
 `process`, `pty`, or `auth` rows below, and none of them has implementation. KEL-76 must
@@ -259,6 +288,15 @@ through that spec's ordered tasks.
 | `autostart` | login items / registry / .desktop | `app.setLoginItemSettings` |
 | `dock/taskbar` | badge, progress, bounce, jump lists, thumbbar | `app.dock`, `setProgressBar` |
 | `capture` (Tier 3) | window/screen capture via ScreenCaptureKit / Graphics.Capture / PipeWire | `desktopCapturer` |
+
+**Window ownership.** No keld-native broker owns the `window` row. keld-native depends
+only on ipc and guard, and native windows and webviews are UI-thread handles that
+keld-wv owns. The keld-core window registry owns window identity (the host-minted
+`WindowId` and `WindowGeneration`), the window-state events and the two-phase close
+state machine. It drives keld-wv's native handles through the UI-loop command and event
+queue. The app-link `window` channel carries these to the app process, and webview
+principals cannot reach it until KEL-102's per-window grants exist. The contract is
+`docs/specs/gh531-window-registry-close-state-machine.md` (GH-531, approved).
 
 Implementation notes: objc2/objc2-app-kit on macOS (no deprecated cocoa crate);
 windows-rs on Windows; gtk4 + ashpd (XDG portals — file dialogs, notifications,

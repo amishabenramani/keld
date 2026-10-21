@@ -1,25 +1,19 @@
 //! Publication is a one-shot installer transaction, never ordinary host mutation.
 
 use std::fs::File;
-use std::io::{self, Write};
+use std::io;
 use std::path::Path;
 
-use cap_fs_ext::{FollowSymlinks, OpenOptionsFollowExt as _};
-use cap_std::fs::{Dir, OpenOptions, OpenOptionsExt as _};
-use windows_sys::Win32::Storage::FileSystem::{
-    FILE_GENERIC_READ, FILE_GENERIC_WRITE, FILE_SHARE_READ, WRITE_DAC,
-};
-
 use super::{
-    LoadedWindowsBaseline, Roots, WindowsBaselineReceipt, WindowsBaselineTrust, error,
-    exact_entries, open_roots, read_record, seal_child,
+    LoadedWindowsBaseline, RecordTarget, Roots, WindowsBaselineReceipt, WindowsBaselineTrust,
+    error, exact_entries, open_roots, prepare_record, publish_prepared_record,
 };
-use crate::records::{self, PointerKind};
-use crate::windows_extraction::{StageProtection, open_source, populate_stage};
-use crate::windows_fs::{create_directory_relative, publish_new};
+use crate::records;
+use crate::windows_extraction::StageProtection;
+use crate::windows_fs::create_file_relative_exclusive_with_profile;
 use crate::{InstallOwner, InstallProvenance, UpdateError, VerifiedBaseline};
 
-/// Initializes one externally provisioned SYSTEM-private machine scaffold.
+/// Initializes one externally provisioned SYSTEM-protected machine scaffold.
 ///
 /// Trusted configuration must come from the deployment authority. Successful return
 /// requires production read-only reload and exact baseline seed validation.
@@ -33,12 +27,94 @@ pub fn initialize_windows_baseline(
     archive: &Path,
     trust: &WindowsBaselineTrust,
 ) -> Result<WindowsBaselineReceipt, UpdateError> {
-    initialize_with_observer(verified, archive, trust, |_| Ok(()))
+    initialize_with_authority(
+        verified,
+        archive,
+        trust,
+        BaselineAuthority::MachineSystem,
+        |_| Ok(()),
+    )
+}
+
+/// Initializes a `PerUserDirect` baseline using the installing user's authority.
+///
+/// The caller supplies trusted installer configuration and the exact verified baseline.
+/// This function does not infer install mode or choose an install path; it requires
+/// preprovisioned owner-private roots that pass the guard-owned profile validator. The
+/// same initial seed order is used as for the machine baseline, with provenance published
+/// last as the commit record.
+///
+/// # Errors
+/// Refuses any non-PerUserDirect identity, managed owner, SYSTEM token or token-query
+/// failure, mismatched baseline, unsupported scaffold, existing/partial state or
+/// publication/readback failure. A refusal never repairs or automatically reseeds
+/// existing state.
+pub fn initialize_windows_per_user_baseline(
+    verified: &VerifiedBaseline,
+    archive: &Path,
+    trust: &WindowsBaselineTrust,
+) -> Result<WindowsBaselineReceipt, UpdateError> {
+    initialize_with_authority(verified, archive, trust, BaselineAuthority::PerUser, |_| {
+        Ok(())
+    })
+}
+
+/// Initializes a `MachineUacDirect` baseline under a live, explicitly elevated
+/// Administrators token.
+///
+/// The installer supplies trusted identity/configuration and the exact verified
+/// baseline. This function does not create or launch a helper, does not mutate an
+/// existing installation, and does not activate updates. It seeds the same common
+/// baseline transaction used by the other direct modes, with the Program Files
+/// Administrators/SYSTEM protection profile.
+///
+/// # Errors
+/// Refuses managed or mismatched installations, thread impersonation, non-elevated or
+/// filtered administrator tokens, malformed token data, unsupported scaffolds,
+/// existing/partial state and every publication/readback failure.
+pub fn initialize_windows_machine_uac_baseline(
+    verified: &VerifiedBaseline,
+    archive: &Path,
+    trust: &WindowsBaselineTrust,
+) -> Result<WindowsBaselineReceipt, UpdateError> {
+    initialize_with_authority(
+        verified,
+        archive,
+        trust,
+        BaselineAuthority::MachineUac,
+        |_| Ok(()),
+    )
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum BaselineAuthority {
+    MachineSystem,
+    PerUser,
+    MachineUac,
+}
+
+impl BaselineAuthority {
+    const fn mode(self) -> crate::DirectInstallMode {
+        match self {
+            Self::MachineSystem => crate::DirectInstallMode::MachineSeamlessDirect,
+            Self::PerUser => crate::DirectInstallMode::PerUserDirect,
+            Self::MachineUac => crate::DirectInstallMode::MachineUacDirect,
+        }
+    }
+
+    const fn stage_protection(self) -> StageProtection {
+        match self {
+            Self::MachineSystem => StageProtection::Machine,
+            Self::PerUser => StageProtection::OwnerPrivate,
+            Self::MachineUac => StageProtection::MachineUac,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum BaselineBoundary {
     LockCreated,
+    ActivationLockCreated,
     StageCreated,
     StagePopulated,
     CompletePublished,
@@ -46,18 +122,136 @@ pub(super) enum BaselineBoundary {
     FloorPublished,
     CurrentPublished,
     LastKnownGoodPublished,
-    RootsSealed,
+    RootsVerified,
     ProvenancePublished,
 }
 
+#[cfg(test)]
 pub(super) fn initialize_with_observer(
     verified: &VerifiedBaseline,
     archive: &Path,
     trust: &WindowsBaselineTrust,
     mut observe: impl FnMut(BaselineBoundary) -> io::Result<()>,
 ) -> Result<WindowsBaselineReceipt, UpdateError> {
-    keld_guard::require_windows_system_token()
-        .map_err(|cause| error("installer authority", cause))?;
+    initialize_with_authority(
+        verified,
+        archive,
+        trust,
+        BaselineAuthority::MachineSystem,
+        &mut observe,
+    )
+}
+
+#[cfg(test)]
+pub(super) fn initialize_per_user_with_observer(
+    verified: &VerifiedBaseline,
+    archive: &Path,
+    trust: &WindowsBaselineTrust,
+    mut observe: impl FnMut(BaselineBoundary) -> io::Result<()>,
+) -> Result<WindowsBaselineReceipt, UpdateError> {
+    initialize_with_authority(
+        verified,
+        archive,
+        trust,
+        BaselineAuthority::PerUser,
+        &mut observe,
+    )
+}
+
+#[cfg(test)]
+pub(super) fn initialize_machine_uac_with_observer(
+    verified: &VerifiedBaseline,
+    archive: &Path,
+    trust: &WindowsBaselineTrust,
+    mut observe: impl FnMut(BaselineBoundary) -> io::Result<()>,
+) -> Result<WindowsBaselineReceipt, UpdateError> {
+    initialize_with_authority(
+        verified,
+        archive,
+        trust,
+        BaselineAuthority::MachineUac,
+        &mut observe,
+    )
+}
+
+#[cfg(test)]
+pub(super) fn initialize_per_user_with_token_check(
+    verified: &VerifiedBaseline,
+    archive: &Path,
+    trust: &WindowsBaselineTrust,
+    token_check: impl FnOnce() -> io::Result<()>,
+) -> Result<WindowsBaselineReceipt, UpdateError> {
+    initialize_with_authority_and_token_check(
+        verified,
+        archive,
+        trust,
+        BaselineAuthority::PerUser,
+        |_| Ok(()),
+        |_| token_check(),
+    )
+}
+
+#[cfg(test)]
+pub(super) fn initialize_machine_uac_with_token_check(
+    verified: &VerifiedBaseline,
+    archive: &Path,
+    trust: &WindowsBaselineTrust,
+    token_check: impl FnOnce() -> io::Result<()>,
+) -> Result<WindowsBaselineReceipt, UpdateError> {
+    initialize_with_authority_and_token_check(
+        verified,
+        archive,
+        trust,
+        BaselineAuthority::MachineUac,
+        |_| Ok(()),
+        |_| token_check(),
+    )
+}
+
+fn initialize_with_authority(
+    verified: &VerifiedBaseline,
+    archive: &Path,
+    trust: &WindowsBaselineTrust,
+    authority: BaselineAuthority,
+    observe: impl FnMut(BaselineBoundary) -> io::Result<()>,
+) -> Result<WindowsBaselineReceipt, UpdateError> {
+    initialize_with_authority_and_token_check(
+        verified,
+        archive,
+        trust,
+        authority,
+        observe,
+        |authority| match authority {
+            BaselineAuthority::MachineSystem => keld_guard::require_windows_system_token(),
+            BaselineAuthority::PerUser => keld_guard::require_windows_non_system_token(),
+            BaselineAuthority::MachineUac => {
+                keld_guard::require_windows_non_system_token()?;
+                keld_guard::require_windows_machine_uac_owner_token()
+            }
+        },
+    )
+}
+
+fn initialize_with_authority_and_token_check(
+    verified: &VerifiedBaseline,
+    archive: &Path,
+    trust: &WindowsBaselineTrust,
+    authority: BaselineAuthority,
+    mut observe: impl FnMut(BaselineBoundary) -> io::Result<()>,
+    token_check: impl FnOnce(BaselineAuthority) -> io::Result<()>,
+) -> Result<WindowsBaselineReceipt, UpdateError> {
+    trust.require_direct_owner()?;
+    if trust.installation.install_mode != authority.mode() {
+        return Err(error(
+            "installer mode",
+            format!(
+                "initializer requires explicit {} mode, found {}",
+                authority.mode().as_str(),
+                trust.installation.install_mode.as_str()
+            ),
+        ));
+    }
+    token_check(authority).map_err(|cause| error("installer authority", cause))?;
     crate::provenance::match_identity(&trust.installation, verified.installation())?;
     let roots =
         open_roots(trust, true).map_err(|cause| error("private scaffold admission", cause))?;
@@ -69,73 +263,14 @@ pub(super) fn initialize_with_observer(
         .ok_or_else(|| error("topology", "update name absent"))?;
     let mut lock = acquire_bootstrap_lock(&roots, update_name)?;
     observe(BaselineBoundary::LockCreated).map_err(|cause| error("lock boundary", cause))?;
+    seed_activation_lock(&roots)?;
+    observe(BaselineBoundary::ActivationLockCreated)
+        .map_err(|cause| error("activation lock boundary", cause))?;
 
-    let mut source =
-        open_source(archive).map_err(|cause| error("baseline source admission", cause))?;
-    let validated = verified.validate_windows_archive(&mut source)?;
-    let name = random_name("incomplete")?;
-    let parent = roots
-        .versions
-        .try_clone()
-        .map_err(|cause| error("versions handle", cause))?
-        .into_std_file();
-    let stage = create_directory_relative(&parent, &name)
-        .map_err(|cause| error("stage creation", cause))?;
-    observe(BaselineBoundary::StageCreated).map_err(|cause| error("stage boundary", cause))?;
-    let (directories, files) = populate_stage(
-        stage,
-        &name,
-        &validated,
-        &mut source,
-        StageProtection::Machine,
-        &mut |_, _| Ok(()),
-    )?;
-    observe(BaselineBoundary::StagePopulated).map_err(|cause| error("content boundary", cause))?;
-    let stage = &directories[0];
-    let tree = &directories[1];
-    // Files already have final protected ACLs, applied before their original
-    // writable handles were flushed. Seal only the remaining directories here.
-    for entry in validated.entries().iter().rev() {
-        if entry.kind() == crate::ArchiveEntryKind::Directory {
-            seal_child(tree, entry.name(), true)
-                .map_err(|cause| error("stage directory seal", cause))?;
-        }
-    }
-    seal_child(stage, "tree", true).map_err(|cause| error("tree seal", cause))?;
-    let complete = records::encode_complete(verified.identity(), verified.content_size())?;
-    publish_record(stage, ".complete", &complete)?;
-    observe(BaselineBoundary::CompletePublished)
-        .map_err(|cause| error("complete boundary", cause))?;
-    seal_child(&roots.versions, &name, true).map_err(|cause| error("stage seal", cause))?;
-    drop(files);
-    drop(directories);
-    publish_new(&parent, &name, &verified.identity().version)
-        .map_err(|cause| error("version publication", cause))?;
-    observe(BaselineBoundary::VersionPublished)
-        .map_err(|cause| error("version boundary", cause))?;
+    publish_baseline_version(verified, archive, &roots, authority, &mut observe)?;
     let version = super::load::validate_initial_version(&roots)?;
-
-    publish_record(
-        &roots.update,
-        "version-floor",
-        &records::encode_floor(&verified.identity().version)?,
-    )?;
-    observe(BaselineBoundary::FloorPublished).map_err(|cause| error("floor boundary", cause))?;
-    publish_record(
-        &roots.update,
-        "current",
-        &records::encode_pointer(PointerKind::Current, verified.identity())?,
-    )?;
-    observe(BaselineBoundary::CurrentPublished)
-        .map_err(|cause| error("current boundary", cause))?;
-    publish_record(
-        &roots.update,
-        "last-known-good",
-        &records::encode_pointer(PointerKind::LastKnownGood, verified.identity())?,
-    )?;
-    observe(BaselineBoundary::LastKnownGoodPublished)
-        .map_err(|cause| error("LKG boundary", cause))?;
-    seal_roots_and_commit(&roots, update_name, &mut lock, &mut observe)?;
+    seed_baseline_pointers(verified, &roots, &mut observe)?;
+    commit_baseline(&roots, &mut lock, &mut observe)?;
     drop(lock);
     drop(version);
     drop(roots);
@@ -147,35 +282,49 @@ pub(super) fn initialize_with_observer(
     })
 }
 
+mod publication;
+use publication::{publish_baseline_version, seed_baseline_pointers};
+
 fn acquire_bootstrap_lock(roots: &Roots, update_name: &str) -> Result<File, UpdateError> {
+    let profile = roots.profile();
     let install = roots
         .install()
         .map_err(|cause| error("install root", cause))?;
     exact_entries(install, &[update_name]).map_err(|cause| error("fresh install", cause))?;
     exact_entries(&roots.update, &["versions"]).map_err(|cause| error("fresh update", cause))?;
     exact_entries(&roots.versions, &[]).map_err(|cause| error("fresh versions", cause))?;
-    let mut options = OpenOptions::new();
-    options
-        .write(true)
-        .create_new(true)
-        .access_mode(FILE_GENERIC_READ | FILE_GENERIC_WRITE | WRITE_DAC)
-        .share_mode(0)
-        .follow(FollowSymlinks::No);
-    let lock = roots
+    let update = roots
         .update
-        .open_with("bootstrap.lock", &options)
-        .map_err(|cause| error("exclusive bootstrap lock", cause))?
-        .into_std();
-    keld_guard::validate_windows_owner_private_file(&lock)
-        .map_err(|cause| error("bootstrap lock protection", cause))?;
+        .try_clone()
+        .map_err(|cause| error("exclusive bootstrap parent", cause))?
+        .into_std_file();
+    let lock = create_file_relative_exclusive_with_profile(&update, "bootstrap.lock", profile)
+        .map_err(|cause| error("exclusive bootstrap lock", cause))?;
+    keld_guard::validate_windows_install_file(&lock, profile)
+        .map_err(|cause| error("bootstrap lock profile", cause))?;
     lock.sync_all()
         .map_err(|cause| error("bootstrap lock flush", cause))?;
     Ok(lock)
 }
 
-fn seal_roots_and_commit(
+fn seed_activation_lock(roots: &Roots) -> Result<(), UpdateError> {
+    let profile = roots.profile();
+    let update = roots
+        .update
+        .try_clone()
+        .map_err(|cause| error("activation lease parent", cause))?
+        .into_std_file();
+    let file = create_file_relative_exclusive_with_profile(&update, "activation.lock", profile)
+        .map_err(|cause| error("activation lease creation", cause))?;
+    file.sync_all()
+        .map_err(|cause| error("activation lease flush", cause))?;
+    keld_guard::validate_windows_install_file(&file, profile)
+        .map_err(|cause| error("activation lease readback profile", cause))?;
+    Ok(())
+}
+
+fn commit_baseline(
     roots: &Roots,
-    update_name: &str,
     lock: &mut File,
     observe: &mut impl FnMut(BaselineBoundary) -> io::Result<()>,
 ) -> Result<(), UpdateError> {
@@ -191,101 +340,26 @@ fn seal_roots_and_commit(
         &trust.publisher_scope,
         &trust.volume_guid,
     )?;
-    // Prepare this private file before sealing the roots. The only later namespace
-    // mutation is its absent-target publication, which is the final commit record.
-    let provenance_temp = prepare_record(install, &provenance)?;
-    keld_guard::seal_windows_machine_file(lock).map_err(|cause| error("lock seal", cause))?;
+    // Prepare the exact-profile provenance record before its absent-target publication,
+    // which remains the final baseline commit record.
+    let provenance_temp = prepare_record(
+        install,
+        &provenance,
+        trust.installation.install_mode.protection_profile(),
+    )?;
     lock.sync_all()
-        .map_err(|cause| error("sealed lock flush", cause))?;
-    seal_child(&roots.update, "versions", true).map_err(|cause| error("versions seal", cause))?;
-    seal_child(install, update_name, true).map_err(|cause| error("update seal", cause))?;
-    let parent_index = roots
-        .ancestors
-        .len()
-        .checked_sub(2)
-        .ok_or_else(|| error("install parent", "missing ancestor"))?;
-    let install_name = trust
-        .installation
-        .install_root
-        .file_name()
-        .and_then(|value| value.to_str())
-        .ok_or_else(|| error("install parent", "missing component"))?;
-    seal_child(&roots.ancestors[parent_index], install_name, true)
-        .map_err(|cause| error("install seal", cause))?;
-    observe(BaselineBoundary::RootsSealed).map_err(|cause| error("root boundary", cause))?;
-    publish_prepared(install, &provenance_temp, "install-provenance", &provenance)?;
+        .map_err(|cause| error("bootstrap lock flush", cause))?;
+    keld_guard::validate_windows_install_file(lock, roots.profile())
+        .map_err(|cause| error("bootstrap lock profile", cause))?;
+    observe(BaselineBoundary::RootsVerified).map_err(|cause| error("root boundary", cause))?;
+    publish_prepared_record(
+        install,
+        &provenance_temp,
+        RecordTarget::Absent("install-provenance"),
+        &provenance,
+        trust.installation.install_mode.protection_profile(),
+    )?;
     observe(BaselineBoundary::ProvenancePublished)
         .map_err(|cause| error("provenance boundary", cause))?;
-    Ok(())
-}
-
-fn random_name(prefix: &str) -> Result<String, UpdateError> {
-    let mut random = [0_u8; 32];
-    getrandom::fill(&mut random).map_err(|cause| error("temporary identity", cause))?;
-    Ok(format!("{prefix}-{}", crate::error::hex_digest(&random)))
-}
-
-fn prepare_record(parent: &Dir, bytes: &[u8]) -> Result<String, UpdateError> {
-    let name = random_name("pending")?;
-    let mut options = OpenOptions::new();
-    options
-        .write(true)
-        .create_new(true)
-        .access_mode(FILE_GENERIC_READ | FILE_GENERIC_WRITE | WRITE_DAC)
-        .share_mode(FILE_SHARE_READ)
-        .follow(FollowSymlinks::No);
-    let mut output = parent
-        .open_with(&name, &options)
-        .map_err(|cause| error("record creation", cause))?;
-    super::ensure_regular(
-        &output
-            .metadata()
-            .map_err(|cause| error("record metadata", cause))?,
-    )
-    .map_err(|cause| error("record kind", cause))?;
-    keld_guard::validate_windows_owner_private_file(
-        &output
-            .try_clone()
-            .map_err(|cause| error("record handle", cause))?
-            .into_std(),
-    )
-    .map_err(|cause| error("private record protection", cause))?;
-    output
-        .write_all(bytes)
-        .map_err(|cause| error("record write", cause))?;
-    let mut output = output.into_std();
-    keld_guard::seal_windows_machine_file(&mut output)
-        .map_err(|cause| error("record seal", cause))?;
-    output
-        .sync_all()
-        .map_err(|cause| error("record flush", cause))?;
-    drop(output);
-    let (_, observed) = read_record(parent, &name)?;
-    if observed != bytes {
-        return Err(error("record readback", "flushed bytes differ"));
-    }
-    Ok(name)
-}
-
-fn publish_record(parent: &Dir, leaf: &str, bytes: &[u8]) -> Result<(), UpdateError> {
-    let temporary = prepare_record(parent, bytes)?;
-    publish_prepared(parent, &temporary, leaf, bytes)
-}
-
-fn publish_prepared(
-    parent: &Dir,
-    temporary: &str,
-    leaf: &str,
-    bytes: &[u8],
-) -> Result<(), UpdateError> {
-    let retained = parent
-        .try_clone()
-        .map_err(|cause| error("record parent", cause))?
-        .into_std_file();
-    publish_new(&retained, temporary, leaf).map_err(|cause| error("record publication", cause))?;
-    let (_, observed) = read_record(parent, leaf)?;
-    if observed != bytes {
-        return Err(error("published record readback", "published bytes differ"));
-    }
     Ok(())
 }

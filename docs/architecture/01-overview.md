@@ -8,13 +8,15 @@
 
 The generated [Current/Target/Evidence ledger](../engineering/product-status.md) owns
 repository maturity and evidence. This section describes process and trust relationships
-only; Linear continues to own execution state.
+only; the tracker issue (Linear, or GitHub under #517) continues to own execution state.
 
 Three principal classes, with host-minted instances inside each class:
 1. **keld-host** (Rust): the authority root for every framework-controlled privileged
    resource—windows, webviews, native APIs, keys and update policy. It is the only
-   long-lived general privileged process. A reviewed native plugin or minimal signed
-   update relaunch helper receives only its declared narrow authority. The host is
+   long-lived general privileged process. A reviewed native plugin, a minimal signed
+   update relaunch helper, or the per-attempt elevated Machine-UAC updater helper
+   (`keld-updater-helper.exe`, target) receives only its declared narrow authority and
+   never runs the application or Bun with its own token. The host is
    prebuilt per platform; app developers never compile it.
 2. **App-process family** (destination: supervised Bun children): the developer's primary "main
    process" plus named compatibility roles when an app needs independent extension,
@@ -59,8 +61,13 @@ Why this shape (each competitor fails differently — see `docs/research/library
 4. **Hot paths are state machines** (Bun-rewrite lesson): the host core runs on platform
    event loops with readiness-driven callbacks; no Tokio in the message path. Async Rust
    is allowed in cold tooling (CLI, packager, updater fetches).
-5. **No Rust toolchain for app developers.** Prebuilt signed host + npm distribution
-   (esbuild lesson). Rust is the *plugin* path, not the entry fee.
+5. **No Rust toolchain for app developers.** Prebuilt host + npm distribution
+   (esbuild lesson); the host in a shipped app is signed. Rust is the *plugin* path, not
+   the entry fee. Target behaviour on Windows (KEL-19 T3, blocked on an authenticated
+   Keld release channel): the packaging-input host is distributed unsigned, and
+   `keld build` verifies its digest from that channel and embeds the app identity before
+   the app publisher applies the only signature
+   (`docs/specs/kel254-expected-identity-container.md`).
 6. **Per-platform engine policy, not ideology.** System webviews where they're good
    (Windows/macOS), pinned engine where they're not (Linux opt-in). Polyfill pack +
    baseline matrix + doctor close the rest. The precise default claim is **no bundled
@@ -96,7 +103,7 @@ view and links each claim to tracked evidence.
 
 | Crate | Role | Depends on |
 |---|---|---|
-| `keld-core` | Host runtime, lifecycle, window registry, session orchestration, plugin host and privileged routing | wv, ipc, guard, runtime, native |
+| `keld-core` | Host runtime, lifecycle, window registry, session orchestration, plugin host and privileged routing | wv, ipc, guard, runtime, native; update (Windows installed boot only) |
 | `keld-wv` | Webview abstraction and per-platform engine policy, including optional pinned-engine tiers | guard |
 | `keld-ipc` | kipc framing, authentication, channel registry, backpressure, schema runtime and measured optional bulk lanes | guard |
 | `keld-native` | Guarded native services: filesystem, menus, tray, dialogs, clipboard, notifications, shortcuts, screen, power, shell and secure storage | ipc, guard |
@@ -107,6 +114,7 @@ view and links each claim to tracked evidence.
 | `keld-compat` | Electron conformance evidence and host-side compatibility emulation | core |
 | `keld-cli` | Developer entrypoint for create/dev/doctor/MCP/migrate/build/gen/ext orchestration | core, ipc, guard, runtime |
 | `keld-host` | Shipping host executable that assembles the core and platform backends | core |
+| `keld-updater-helper` | Elevated Machine-UAC updater helper binary (KEL-53 T4d); nothing depends on it | update, ipc, runtime, guard (Windows only) |
 
 npm packages (TypeScript, in `packages/`):
 
