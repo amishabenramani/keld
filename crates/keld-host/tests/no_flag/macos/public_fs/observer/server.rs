@@ -2,6 +2,7 @@
 use super::http::{PendingHttpRequest, RequestPoll};
 use super::recovery::{RecoveryCommand, RecoveryObserver};
 use super::respond;
+use crate::public_fs::private_diagnostics::{Phase, observed_marker};
 use crate::support::EVENT_DEADLINE;
 use serde_json::Value;
 use std::net::{SocketAddr, TcpListener, TcpStream};
@@ -31,7 +32,7 @@ impl Observation {
                 .reports
                 .recv_timeout(deadline.saturating_duration_since(std::time::Instant::now()))
                 .expect("actual page FS outcomes");
-            eprintln!("KELD_KEL140_OBSERVATION {report}");
+            eprintln!("{}", observed_marker(&report, Phase::Observation));
             let click_start = report["phase"] == "page-click-start";
             journal.push(report);
             if click_start && !started {

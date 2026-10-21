@@ -48,7 +48,8 @@ use outcomes::{
     assert_natural_outcomes, assert_page_outcomes,
 };
 use private_diagnostics::{
-    Phase as PrivatePhase, assert_report_phase, host_exit_summary, observed_marker, output_summary,
+    Phase as PrivatePhase, assert_private_eq, assert_private_ne, assert_report_phase,
+    host_exit_summary, observed_marker, output_summary,
 };
 use process_image::process_image_path;
 use project::{
@@ -111,10 +112,10 @@ fn renderer_public_fs_recovers_same_document_after_real_bun_loss() {
             .to_owned()
     };
     for key in ["documentNonce", "javascriptToken"] {
-        assert_ne!(
-            document(&recovered, key),
-            document(&relaunched, key),
-            "healthy new launch must create a new volatile {key}"
+        assert_private_ne(
+            &document(&recovered, key),
+            &document(&relaunched, key),
+            &format!("healthy new launch must create a new volatile {key}"),
         );
     }
 }
@@ -421,7 +422,11 @@ fn observe_recovery_before_loss(
         );
         assert_eq!(admitted["barrier"], "application-handler-only");
         assert_eq!(pid(&admitted, "pid"), first_bun);
-        assert_eq!(admitted["nonce"], started["requests"][2]["nonce"]);
+        assert_private_eq(
+            &admitted["nonce"],
+            &started["requests"][2]["nonce"],
+            "pending handler request nonce",
+        );
         assert_completed_recovery_files(prepared, RecoveryPhase::Pending);
         evidence.reports.extend([started, admitted]);
         Some(fixture.replace_recovery_anchor(prepared))
@@ -709,7 +714,7 @@ try {
 "#;
     let (old_endpoint, old_token) = old_link.rsplit_once('#').expect("G1 bootstrap");
     let (endpoint, token) = successor_link.rsplit_once('#').expect("G2 bootstrap");
-    assert_ne!(old_endpoint, endpoint, "fresh endpoint");
+    assert_private_ne(old_endpoint, endpoint, "fresh endpoint");
     assert!(old_token != token, "fresh possession token");
     assert!(
         UnixStream::connect(old_endpoint).is_err(),
@@ -775,9 +780,10 @@ fn assert_collected_recovery_terminals(
 
 fn assert_pending_recovery_rejection(report: &Value, initial_document: &Value) {
     for key in ["documentNonce", "javascriptToken", "initial"] {
-        assert_eq!(
-            report[key], initial_document[key],
-            "same pending renderer {key}"
+        assert_private_eq(
+            &report[key],
+            &initial_document[key],
+            &format!("same pending renderer {key}"),
         );
     }
     let request = &report["requests"][2];
@@ -794,12 +800,13 @@ fn assert_pending_recovery_rejection(report: &Value, initial_document: &Value) {
         .iter()
         .filter(|terminal| terminal["nonce"] == request["nonce"])
         .collect();
-    assert_eq!(
-        old,
-        [
+    assert_private_eq(
+        &old,
+        &[
             &json!({"nonce":request["nonce"],"ok":false,"code":"KELD-WV-011",
-        "detail":"application link ended before the renderer reply"})
-        ]
+        "detail":"application link ended before the renderer reply"}),
+        ],
+        "old pending request bridge terminal",
     );
     assert_eq!(
         terminals.len(),
@@ -819,7 +826,11 @@ fn assert_recovery_phase(
     prepared: &PreparedLaunch,
 ) {
     for key in ["documentNonce", "javascriptToken", "initial"] {
-        assert_eq!(initial_document[key], report[key], "same renderer {key}");
+        assert_private_eq(
+            &initial_document[key],
+            &report[key],
+            &format!("same renderer {key}"),
+        );
     }
     for key in ["documentNonce", "javascriptToken"] {
         let value = report[key].as_str().expect("renderer-created identity");
@@ -1203,12 +1214,13 @@ fn assert_recovery_trace(stderr: &str, evidence: &LaunchEvidence) {
     );
     for (index, handler) in handlers.iter().enumerate() {
         let first_generation = if pending { index < 3 } else { index < 2 };
-        assert_eq!(
+        assert_private_eq(
             handler,
             &json!({"call":result["requests"][index]["count"],
             "pid":if first_generation { first.bun } else { successor.bun },
             "action":result["requests"][index]["action"],
-            "nonce":result["requests"][index]["nonce"]})
+            "nonce":result["requests"][index]["nonce"]}),
+            "recovery handler trace record",
         );
     }
     for (index, outcome) in outcomes.iter().enumerate() {
@@ -1217,11 +1229,12 @@ fn assert_recovery_trace(stderr: &str, evidence: &LaunchEvidence) {
         } else {
             index
         };
-        assert_eq!(
+        assert_private_eq(
             outcome,
             &json!({"call":result["requests"][request]["count"],
             "nonce":result["requests"][request]["nonce"],
-            "outcome":result["outcomes"][request]["outcome"]})
+            "outcome":result["outcomes"][request]["outcome"]}),
+            "recovery outcome trace record",
         );
     }
 }
