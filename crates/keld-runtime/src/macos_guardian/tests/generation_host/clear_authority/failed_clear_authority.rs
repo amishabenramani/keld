@@ -6,13 +6,15 @@ use std::os::unix::net::UnixStream;
 use std::os::unix::process::{CommandExt as _, ExitStatusExt as _};
 use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex, mpsc};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use nix::errno::Errno;
 use nix::sys::signal::{Signal, kill};
 use nix::unistd::{Pid, getpgid};
 
+use super::super::super::super::GUARDIAN_SHUTDOWN_DEADLINE;
 use super::super::super::super::guarded_primary::NativeSignalAuthority;
+use super::super::super::test_support::join_before;
 use super::{
     CONTROL_CLEAR, CONTROL_PREPARE, CONTROL_PREPARED, CONTROL_REGISTERED, CONTROL_REVOKE,
     CONTROL_REVOKED, CONTROL_SPAWNED, GenerationControlRecord, GuardedPrimaryUpdate,
@@ -75,16 +77,24 @@ fn failed_host_clear_persists_spent_authority_and_later_failsafe_never_resignals
             .with_cause(RevocationCause::AdmissionFailed),
         CONTROL_REVOKED,
     );
+    // The host's CLEAR budget is one shutdown deadline from its read of
+    // CLEAR; twice that from the write is only a kill switch. A host that
+    // wrongly CLEARs keeps waiting for the next KGC1 record, which must fail
+    // this test rather than hang it.
+    let clear_kill_switch = Instant::now() + 2 * GUARDIAN_SHUTDOWN_DEADLINE;
     write_generation_control(
         &mut guardian,
         &GenerationControlRecord::new(CONTROL_CLEAR, 1).with_pid(group_pid),
     )
     .expect("send authenticated CLEAR");
     await_held_zombie_group(group);
-    let host_error = host_worker
-        .join()
-        .expect("host worker terminates after its CLEAR budget")
-        .expect_err("held zombie group cannot be CLEARED");
+    let host_error = join_before(
+        host_worker,
+        clear_kill_switch,
+        "host worker still running after its CLEAR budget: a held zombie group was CLEARED",
+    )
+    .expect("host worker terminates after its CLEAR budget")
+    .expect_err("held zombie group cannot be CLEARED");
     assert_native_clear_absence_timeout(host_error);
 
     // The real CLEAR path wrote the spent authority back into the slot.
