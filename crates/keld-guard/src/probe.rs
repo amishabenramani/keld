@@ -147,6 +147,14 @@ fn probe_direct_filesystem() -> ProbeRecord {
 }
 
 fn probe_direct_filesystem_in(directory: &Path) -> ProbeRecord {
+    probe_direct_filesystem_with(directory, |path| fs::remove_file(path))
+}
+
+/// `remove` cleans up the probe file this call created; tests inject its failure.
+fn probe_direct_filesystem_with(
+    directory: &Path,
+    remove: impl FnOnce(&Path) -> io::Result<()>,
+) -> ProbeRecord {
     let path = directory.join(format!(
         "keld-kel78-t1-{}-{}",
         std::process::id(),
@@ -161,32 +169,67 @@ fn probe_direct_filesystem_in(directory: &Path) -> ProbeRecord {
         use std::os::unix::fs::OpenOptionsExt as _;
         options.mode(0o600);
     }
-    let result = options.open(&path).and_then(|mut file| {
-        let write_result = file.write_all(b"kel78-t1");
-        drop(file);
-        // Only a successful exclusive create owns this pathname. A failed
-        // open must never unlink a file or symlink left by another process.
-        let _ = fs::remove_file(&path);
-        write_result
-    });
-    match result {
-        Ok(()) => os_row(
+    let mut file = match options.open(&path) {
+        Ok(file) => file,
+        // A failed open owns nothing, so it never unlinks the pathname.
+        Err(err) => return filesystem_create_refused(&path, &err),
+    };
+    // The exclusive create succeeded, so the host path is not contained whatever
+    // the write or cleanup report; neither can turn this row into an OS deny.
+    let write_result = file.write_all(b"kel78-t1");
+    drop(file);
+    let cleanup = remove(&path);
+    let write_note = match write_result {
+        Ok(()) => String::new(),
+        Err(err) => format!("; write to the created probe file failed: {err}"),
+    };
+    let cleanup_note = match cleanup {
+        Ok(()) => String::new(),
+        Err(err) => format!("; cleanup of the created probe file failed: {err}"),
+    };
+    os_row(
+        "direct_filesystem",
+        ProbeVerdict::Fail,
+        ProbeOracle::NotOsDeny,
+        format!("host temp create succeeded; not an OS deny{write_note}{cleanup_note}"),
+    )
+}
+
+/// Classify a refused exclusive create. `PermissionDenied` alone is not an OS
+/// deny: on Windows `CreateFileW(CREATE_NEW)` also reports `ERROR_ACCESS_DENIED`
+/// for an occupant it cannot replace, such as a delete-pending file. The deny
+/// counts only when the probe name is proven unoccupied afterwards; an occupant,
+/// or a name whose occupancy cannot be read, is not an OS-deny pass. An occupant
+/// that disappears between the create and this read is not distinguished.
+fn filesystem_create_refused(path: &Path, err: &io::Error) -> ProbeRecord {
+    if !is_sandbox_deny(err) {
+        return os_row(
             "direct_filesystem",
             ProbeVerdict::Fail,
             ProbeOracle::NotOsDeny,
-            "host temp create succeeded; not an OS deny".into(),
-        ),
-        Err(err) if is_sandbox_deny(&err) => os_row(
+            format!("create failed without sandbox deny: {err}"),
+        );
+    }
+    match fs::symlink_metadata(path) {
+        Err(absent) if absent.kind() == ErrorKind::NotFound => os_row(
             "direct_filesystem",
             ProbeVerdict::Pass,
             ProbeOracle::OsDeny,
             format!("OS deny: {err}"),
         ),
-        Err(err) => os_row(
+        Ok(_) => os_row(
             "direct_filesystem",
             ProbeVerdict::Fail,
             ProbeOracle::NotOsDeny,
-            format!("create failed without sandbox deny: {err}"),
+            format!("create denied by an entry already at the probe name; not an OS deny: {err}"),
+        ),
+        Err(unknown) => os_row(
+            "direct_filesystem",
+            ProbeVerdict::Fail,
+            ProbeOracle::NotOsDeny,
+            format!(
+                "create denied but the probe name's occupancy is unreadable ({unknown}); not an OS deny: {err}"
+            ),
         ),
     }
 }
@@ -481,6 +524,31 @@ mod tests {
         assert_eq!(row.verdict, ProbeVerdict::Pass, "{row:?}");
         assert_eq!(row.oracle, ProbeOracle::OsDeny, "{row:?}");
         assert!(row.detail.starts_with("OS deny:"), "{row:?}");
+    }
+
+    #[test]
+    fn filesystem_probe_reports_a_failed_cleanup_of_its_own_file() {
+        let fixture = ProbeFixture::new("cleanup");
+        let predicted = fixture.predicted_path();
+
+        let row = probe_direct_filesystem_with(fixture.directory(), |_| {
+            Err(io::Error::new(
+                ErrorKind::PermissionDenied,
+                "injected cleanup refusal",
+            ))
+        });
+
+        assert_eq!(row.verdict, ProbeVerdict::Fail, "{row:?}");
+        assert_eq!(row.oracle, ProbeOracle::NotOsDeny, "{row:?}");
+        assert!(
+            row.detail
+                .contains("cleanup of the created probe file failed: injected cleanup refusal"),
+            "{row:?}"
+        );
+        assert!(
+            fs::symlink_metadata(&predicted).is_ok(),
+            "the injected cleanup left the created file for the fixture to remove"
+        );
     }
 
     #[test]
