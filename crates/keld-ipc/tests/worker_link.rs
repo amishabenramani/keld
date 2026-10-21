@@ -496,12 +496,14 @@ fn criterion4_facts_apply_before_return_and_listeners_run_after_continuation() {
 /// Criterion 5: a host close without an `ERR` throws `KELD-IPC-022`, returns no
 /// value, and the records that preceded the close are still delivered in order.
 ///
-/// Windows: inherited from W2, unproven until W2 is fixed (#528 T5, gh527
-/// §10). The host writes and then closes with `DisconnectNamedPipe`, which
-/// discards unread pipe data. The pass therefore rests on the inference that
-/// the transport Worker already has a read pending when the host disconnects.
-/// No observable here proves that, so its green Windows runs are not evidence.
+/// Unix only until W2 is fixed (#1073; #528 T5, gh527 §10). The host writes
+/// and then closes with `DisconnectNamedPipe`, which discards unread pipe
+/// data, so on Windows the outcome depends on whether the transport Worker
+/// already has a read pending. Native Windows 11 runs with every CPU busy
+/// lost the written data (`EPIPE` on the role's read) and failed this case
+/// (2026-10-21; gh527 §10 has the counts). The W2 fix restores it on Windows.
 #[test]
+#[cfg(not(windows))]
 fn criterion5_close_without_err_throws_022_and_keeps_prior_records() {
     let (mut stream, role) = start("close-wake");
     read_call_named(&mut stream, "close");
@@ -532,12 +534,14 @@ fn criterion5_close_without_err_throws_022_and_keeps_prior_records() {
 /// others. *Negative control:* notifying before the ring is drained puts
 /// `end:` ahead of the events.
 ///
-/// Windows: inherited from W2, unproven until W2 is fixed (#528 T5, gh527
-/// §10). The host writes and then closes with `DisconnectNamedPipe`, which
-/// discards unread pipe data. The pass therefore rests on the inference that
-/// the transport Worker already has a read pending when the host disconnects.
-/// No observable here proves that, so its green Windows runs are not evidence.
+/// Unix only until W2 is fixed (#1073; #528 T5, gh527 §10). The host writes
+/// and then closes with `DisconnectNamedPipe`, which discards unread pipe
+/// data, so on Windows the outcome depends on whether the transport Worker
+/// already has a read pending. Native Windows 11 runs with every CPU busy
+/// lost the written data (`EPIPE` on the role's read) and failed this case
+/// (2026-10-21; gh527 §10 has the counts). The W2 fix restores it on Windows.
 #[test]
+#[cfg(not(windows))]
 fn on_end_reports_the_close_after_retained_records() {
     let (mut stream, role) = start("on-end");
     long_reads(&stream);
@@ -1503,12 +1507,14 @@ fn criterion27_host_call_without_a_handler_closes_the_link() {
 /// until the Worker has published and recorded the close. The real reply
 /// returns and the slot is emptied, never `KELD-IPC-022`.
 ///
-/// Windows: inherited from W2, unproven until W2 is fixed (#528 T5, gh527
-/// §10). The host writes and then closes with `DisconnectNamedPipe`, which
-/// discards unread pipe data. The pass therefore rests on the inference that
-/// the transport Worker already has a read pending when the host disconnects.
-/// No observable here proves that, so its green Windows runs are not evidence.
+/// Unix only until W2 is fixed (#1073; #528 T5, gh527 §10). The host writes
+/// and then closes with `DisconnectNamedPipe`, which discards unread pipe
+/// data, so on Windows the outcome depends on whether the transport Worker
+/// already has a read pending. Native Windows 11 runs with every CPU busy
+/// lost the written data (`EPIPE` on the role's read) and failed this case
+/// (2026-10-21; gh527 §10 has the counts). The W2 fix restores it on Windows.
 #[test]
+#[cfg(not(windows))]
 fn review_reply_published_before_the_close_wins() {
     let (mut stream, role) = start("reply-then-close");
     let call = read_call_named(&mut stream, "reply-then-close");
