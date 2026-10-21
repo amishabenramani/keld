@@ -18,6 +18,7 @@ use super::super::process_group::{
 
 mod cleanup_authority;
 mod native_descendant;
+mod shared_absence;
 use self::native_descendant::spawn_held_native_descendant;
 
 // Test-owned direct Child identity ensures a failing negative oracle never
