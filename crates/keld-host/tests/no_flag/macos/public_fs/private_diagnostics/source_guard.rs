@@ -3,9 +3,11 @@
 //! It rejects the known ways a diagnostic or assertion failure can render an
 //! untrusted page/app record, captured child `Output`/stream, or a private
 //! token, nonce or endpoint: inline captures, positional, indexed and named
-//! format arguments, positional Debug, any `dbg!`, and `assert_eq!`/
-//! `assert_ne!` operands that name a private field or call a local closure or
-//! fn whose body indexes a private key (best effort, by name).
+//! format arguments, positional Debug, any `dbg!`, `assert_eq!`/`assert_ne!`
+//! (and `debug_` variants) operands that name a private field, and any
+//! equality operand or format/message argument that calls a local closure
+//! (`let`, `let mut`, typed `let x: T =`, `move`) or fn whose body indexes or
+//! `.get`s a private key literal (best effort, by name).
 //!
 //! It is a textual check, not a Rust parser or a comprehensive secret scan.
 //! Known shapes it cannot see, which review and the sentinel tests must cover:
@@ -59,8 +61,11 @@ const UNTRUSTED: [&str; 31] = [
 ];
 
 /// Macros whose arguments are rendered into a message or log line.
-const FORMAT_MACROS: [&str; 13] = [
+const FORMAT_MACROS: [&str; 16] = [
     "dbg!",
+    "debug_assert!",
+    "debug_assert_eq!",
+    "debug_assert_ne!",
     "eprintln!",
     "println!",
     "eprint!",
@@ -125,7 +130,10 @@ fn untrusted_interpolations_with(source: &str, accessors: &[&str]) -> Vec<String
             continue;
         }
         let parts = split_top_level(args);
-        if matches!(name, "assert_eq!" | "assert_ne!") {
+        if matches!(
+            name,
+            "assert_eq!" | "assert_ne!" | "debug_assert_eq!" | "debug_assert_ne!"
+        ) {
             for operand in parts.iter().take(2) {
                 if names_private_field(operand) || calls_any(operand, accessors) {
                     found.push(format!("{name} operand `{}`", operand.trim()));
@@ -137,7 +145,7 @@ fn untrusted_interpolations_with(source: &str, accessors: &[&str]) -> Vec<String
         };
         for part in &parts[format_at + 1..] {
             let expression = without_argument_name(part).trim();
-            if renders_untrusted(expression) {
+            if renders_untrusted(expression) || calls_any(expression, accessors) {
                 found.push(format!("{name} argument `{expression}`"));
             }
         }
@@ -173,8 +181,22 @@ fn names_private_field(operand: &str) -> bool {
     PRIVATE_FIELDS.iter().any(|field| lower.contains(field))
 }
 
-/// Private keys whose indexing marks a local closure/fn as a private accessor.
-const PRIVATE_KEYS: [&str; 3] = ["nonce\"]", "token\"]", "endpoint\"]"];
+/// Private key suffixes whose literal index (`["documentNonce"]`) or
+/// `.get("documentNonce")` marks a local closure/fn as a private accessor.
+const PRIVATE_KEYS: [&str; 3] = ["nonce", "token", "endpoint"];
+
+/// Whether lowercase `body` indexes or `.get`s a private key literal.
+fn reads_private_key(body: &str) -> bool {
+    PRIVATE_KEYS.iter().any(|key| {
+        body.contains(&format!("{key}\"]"))
+            || body.match_indices(".get(\"").any(|(at, open)| {
+                let literal = &body[at + open.len()..];
+                literal.find('"').is_some_and(|end| {
+                    literal[..end].ends_with(key) && literal[end..].starts_with("\")")
+                })
+            })
+    })
+}
 
 /// Names of `let name = |..| ..;` closures and `fn name(..) {..}` items whose
 /// body indexes a private key literal (for example `["documentNonce"]`).
@@ -195,7 +217,10 @@ fn private_accessors(source: &str) -> Vec<&str> {
             at += 1;
             continue;
         };
-        let name_start = at + keyword.len();
+        let mut name_start = at + keyword.len();
+        if keyword == b"let " && bytes[name_start..].starts_with(b"mut ") {
+            name_start += 4;
+        }
         let name_end = bytes[name_start..]
             .iter()
             .position(|byte| !is_ident(*byte))
@@ -207,7 +232,7 @@ fn private_accessors(source: &str) -> Vec<&str> {
                 let open = name_end + open;
                 &source[open..matching_close(bytes, open)]
             })
-        } else if let Some(closure) = rest.strip_prefix('=') {
+        } else if let Some(closure) = closure_initializer(rest) {
             let closure = closure.trim_start();
             let closure = closure.strip_prefix("move ").unwrap_or(closure);
             closure.starts_with('|').then(|| statement(closure))
@@ -216,13 +241,28 @@ fn private_accessors(source: &str) -> Vec<&str> {
         };
         if let Some(body) = body {
             let lower = body.to_ascii_lowercase();
-            if !name.is_empty() && PRIVATE_KEYS.iter().any(|key| lower.contains(key)) {
+            if !name.is_empty() && reads_private_key(&lower) {
                 found.push(name);
             }
         }
         at = name_end.max(at + 1);
     }
     found
+}
+
+/// The initializer after `= ` in `let name = ..` or a typed
+/// `let name: Type = ..` binding (the type has no `=` before the initializer).
+fn closure_initializer(rest: &str) -> Option<&str> {
+    let rest = match rest.strip_prefix(':') {
+        Some(typed) => {
+            let statement_end = typed.find(';').unwrap_or(typed.len());
+            let equals = typed[..statement_end].find('=')?;
+            &typed[equals..]
+        }
+        None => rest,
+    };
+    let initializer = rest.strip_prefix('=')?;
+    (!initializer.starts_with('=')).then_some(initializer)
 }
 
 /// Text up to the first top-level `;`.
@@ -542,6 +582,27 @@ fn untrusted_interpolation_guard_sees_every_known_binding_shape() {
         assert_eq!(document(&a), b);"#,
         r#"fn first_request(report: &Value) -> &Value { &report["requests"][0]["nonce"] }
         fn check(a: &Value, b: &Value) { assert_eq!(first_request(a), b); }"#,
+        // Accessor results rendered as format or message arguments (N1).
+        r#"let document = |e: &E| e.page["documentNonce"].clone();
+        panic!("document {}", document(&recovered));"#,
+        r#"let document = |e: &E| e.page["documentNonce"].clone();
+        assert_eq!(a, b, "renamed {}", document(&relaunched));"#,
+        // Typed closure binding (N2).
+        r#"let typed: fn(&LaunchEvidence) -> Value = |e| e.reports[0]["documentNonce"].clone();
+        assert_ne!(typed(&a), typed(&b));"#,
+        // `.get` accessor (N2).
+        r#"let document = |e: &E| e.page.get("documentNonce").cloned();
+        assert_ne!(document(&a), document(&b));"#,
+        r#"fn session(e: &E) -> Option<&Value> { e.boot.get("endpoint") }
+        fn check(a: &E, b: &E) { assert_eq!(session(a), session(b)); }"#,
+        // `let mut` closure binding.
+        r#"let mut document = |e: &E| e.page["javascriptToken"].clone();
+        assert_eq!(document(&a), x);"#,
+        // debug_assert variants (N2).
+        "debug_assert_ne!(document_nonce, other);",
+        r#"let document = |e: &E| e.page["documentNonce"].clone();
+        debug_assert_ne!(document(&recovered), document(&relaunched));"#,
+        r#"debug_assert!(ok, "{}", stderr);"#,
         // Route paths carry a pending-handler nonce.
         r#"panic!("unexpected route {path}");"#,
         r#"panic!("unexpected route {}", path);"#,
@@ -567,6 +628,10 @@ fn untrusted_interpolation_guard_sees_every_known_binding_shape() {
         r#"let document = |e: &E| e.page["phase"].clone();
         assert_eq!(document(&a), "page-ready");"#,
         r#"panic!("unexpected route; {}", route_summary(path));"#,
+        r#"let phase = |e: &E| e.page.get("phase").cloned();
+        assert_eq!(phase(&a), b, "phase {}", phase(&a).is_some());"#,
+        r#"fn fresh(bytes: &mut String) { bytes.push_str("x"); let _ = "fixture nonce"; }
+        fn check(a: &str) { assert_eq!(fresh_len(a), 32, "{}", fresh_len(a)); }"#,
     ] {
         assert!(
             untrusted_interpolations(fixed).is_empty(),
