@@ -304,7 +304,7 @@ job count and trigger details. Its stable responsibilities are:
 other two, because `keld-wv` and `keld-native` diverge per platform by design. Actions
 are SHA-pinned (`dtolnay/rust-toolchain`, `Swatinem/rust-cache`, `taiki-e/install-action`);
 the gitleaks and cargo-deny CLIs are release downloads pinned by SHA-256. The toolchain
-action requires `with: toolchain: 1.97.1`; it does not auto-read `rust-toolchain.toml`
+action requires `with: toolchain: 1.99.1`; it does not auto-read `rust-toolchain.toml`
 (that file is for local rustup). CI does not use an unpinned `cargo` on a random runner
 image.
 

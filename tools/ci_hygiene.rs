@@ -93,7 +93,7 @@ const WORKFLOW_TEXT_NEEDLES: &[&str] = &[
     "sha256sum -c",
     "--test tools/ci_hygiene.rs",
     "551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb",
-    "toolchain: 1.97.1",
+    "toolchain: 1.99.1",
     "--test tools/product_status.rs",
     "product-status check .",
     "--test tools/llms_docs.rs",
