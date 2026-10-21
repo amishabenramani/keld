@@ -1410,10 +1410,11 @@ mod tests {
                 substituted = true;
             }
             Err(error) => {
-                // Windows may refuse a rename while the original HANDLE is
-                // pinned. Only an actual sharing/permission refusal is an
-                // acceptable no-substitution outcome; a missing path or
-                // another fixture error must fail.
+                // The grant handle asks for no data or DELETE access, so
+                // Windows 11 does not check sharing against it and the rename
+                // succeeds. A build or filesystem that does refuse it may only
+                // do so with an actual sharing/permission refusal; a missing
+                // path or another fixture error must fail.
                 assert!(
                     matches!(error.raw_os_error(), Some(5 | 32)),
                     "unexpected original-rename failure instead of substitution or OS refusal: {error}"
