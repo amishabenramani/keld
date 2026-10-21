@@ -14,7 +14,7 @@ type FixtureJob = {
   if?: unknown;
   "timeout-minutes"?: unknown;
 };
-type Fixture = { jobs: Record<string, FixtureJob> };
+type Fixture = { jobs: Record<string, FixtureJob>; env?: Record<string, unknown> };
 const source = readFileSync(join(import.meta.dir, "../.github/workflows/ci.yml"), "utf8");
 const windowsMediaOracle = readFileSync(join(import.meta.dir, "../crates/keld-wv/tests/windows_media_guard.ps1"));
 const selectedRustToolchain = readFileSync(join(import.meta.dir, "../rust-toolchain.toml"), "utf8");
@@ -119,6 +119,24 @@ test("Rust setup must run immediately after checkout, before other steps", () =>
       expect(() => checkRustToolchainPins(Bun.YAML.stringify(workflow), selectedRustToolchain))
         .toThrow("must install Rust immediately after checkout");
     }
+  }
+});
+
+test("a Rustup environment override cannot shadow the pinned compiler", () => {
+  for (const scope of ["workflow", "job", "step"]) {
+    const workflow = fixture();
+    if (scope === "workflow") {
+      workflow.env = { RUSTUP_TOOLCHAIN: "stable" };
+    } else if (scope === "job") {
+      workflow.jobs.fmt!.env = { RUSTUP_TOOLCHAIN: "stable" };
+    } else {
+      const consumer = workflow.jobs.fmt!.steps.find(candidate =>
+        String(candidate.run ?? "").includes("cargo fmt"));
+      if (!consumer) throw new Error("missing actual Rust consumer");
+      consumer.env = { ...(consumer.env as Record<string, unknown> ?? {}), RUSTUP_TOOLCHAIN: "stable" };
+    }
+    expect(() => checkRustToolchainPins(Bun.YAML.stringify(workflow), selectedRustToolchain))
+      .toThrow("must not override RUSTUP_TOOLCHAIN");
   }
 });
 

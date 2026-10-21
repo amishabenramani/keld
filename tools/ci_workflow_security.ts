@@ -302,6 +302,14 @@ const rustToolchainInstallerJobs = new Set([
   "msrv", "deny", "hygiene", "mermaid", "codeql-rust",
 ]);
 
+function refuseRustupToolchainOverride(env: unknown, label: string): void {
+  if (env === undefined) return;
+  const values = mapping(env, label);
+  if (Object.keys(values).some(name => name.toUpperCase() === "RUSTUP_TOOLCHAIN")) {
+    fail(`${label} must not override RUSTUP_TOOLCHAIN; environment overrides outrank rust-toolchain.toml.`);
+  }
+}
+
 export function checkRustToolchainPins(source: string, toolchainToml: string): void {
   let parsedToolchain: unknown;
   try { parsedToolchain = Bun.TOML.parse(toolchainToml); }
@@ -315,14 +323,18 @@ export function checkRustToolchainPins(source: string, toolchainToml: string): v
   try { parsed = Bun.YAML.parse(source); }
   catch (error) { fail(`cannot parse workflow YAML: ${error instanceof Error ? error.message : String(error)}`); }
   finiteGraph(parsed);
-  const jobs = mapping(mapping(parsed, "workflow").jobs, "workflow.jobs");
+  const workflow = mapping(parsed, "workflow");
+  refuseRustupToolchainOverride(workflow.env, "workflow.env");
+  const jobs = mapping(workflow.jobs, "workflow.jobs");
   let pinnedAction: string | undefined;
   const installedJobs = new Set<string>();
   for (const [jobName, value] of Object.entries(jobs)) {
     const job = mapping(value, `jobs.${jobName}`);
+    refuseRustupToolchainOverride(job.env, `jobs.${jobName}.env`);
     if (!Array.isArray(job.steps)) fail(`jobs.${jobName} must contain concrete steps.`);
     for (const [index, value] of job.steps.entries()) {
       const step = mapping(value, `jobs.${jobName}.steps[${index}]`);
+      refuseRustupToolchainOverride(step.env, `jobs.${jobName}.steps[${index}].env`);
       if (!Object.hasOwn(step, "uses")) continue;
       const label = `jobs.${jobName}.steps[${index}]`;
       const action = actionRef(step.uses, label);
