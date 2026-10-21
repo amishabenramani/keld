@@ -187,7 +187,7 @@ fn valid_workflow() -> String {
             "  msrv:",
             "    runs-on: macos-latest",
             "    steps:",
-            "      - run: cargo +1.97 check -p fixture --all-targets",
+            "      - run: cargo +1.99.1 check -p fixture --all-targets",
             "  deny:",
             "    if: needs.changes.outputs.deny == 'true'",
             "    steps:",
@@ -202,7 +202,7 @@ fn valid_workflow() -> String {
             "          persist-credentials: false",
             "      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master 2026-08-05",
             "        with:",
-            "          toolchain: 1.97.1",
+            "          toolchain: 1.99.1",
             "      - run: echo 551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb | sha256sum -c -",
             &gitleaks_scan_step(),
             "  hygiene:",
@@ -2147,10 +2147,10 @@ fn missing_pr_gate_fails() {
 #[test]
 fn missing_toolchain_pin_fails() {
     let temp = complete_fixture();
-    let workflow = valid_workflow().replace("toolchain: 1.97.1", "");
+    let workflow = valid_workflow().replace("toolchain: 1.99.1", "");
     temp.write(WORKFLOW, &workflow);
     let error = check(temp.path()).expect_err("workflow without toolchain pin must fail");
-    assert!(error.contains("toolchain: 1.97.1"), "{error}");
+    assert!(error.contains("toolchain: 1.99.1"), "{error}");
 }
 
 #[test]
