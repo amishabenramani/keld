@@ -16,7 +16,7 @@ use super::super::super::{
     GUARDIAN_SHUTDOWN_DEADLINE, GuardedPrimary, RegisteredPrimaryGeneration, RuntimeError,
     lock_generation,
 };
-use super::super::test_support::{NativeChildOwner, test_group_identity};
+use super::super::test_support::{NativeChildOwner, await_held_zombie_group, test_group_identity};
 use super::primary_with_dead_guardian;
 
 mod delivered_signal;
@@ -81,18 +81,9 @@ fn zombie_only_group() -> (NativeChildOwner, RegisteredPrimaryGeneration, i32) {
     terminate_registered_group(leader.id()).expect("signal only the test-owned group");
     leader.wait().expect("reap the test-owned leader");
     assert_eq!(getpgid(Some(Pid::from_raw(raw))), Err(Errno::ESRCH));
-    // SIGKILL delivery to the held member is asynchronous; wait for the
-    // observed condition (its zombie state), not for elapsed time.
-    let deadline = Instant::now() + GUARDIAN_SHUTDOWN_DEADLINE;
-    while kill(Pid::from_raw(-raw), None) == Ok(()) {
-        assert!(Instant::now() < deadline, "killed member becomes a zombie");
-        std::thread::yield_now();
-    }
-    assert_eq!(
-        kill(Pid::from_raw(-raw), None),
-        Err(Errno::EPERM),
-        "Darwin must report the zombie-only group as ambiguous"
-    );
+    // SIGKILL delivery to the held member is asynchronous; await the observed
+    // zombie-only state through the one shared fixture owner.
+    await_held_zombie_group(Pid::from_raw(raw));
     (member, registered, raw)
 }
 
