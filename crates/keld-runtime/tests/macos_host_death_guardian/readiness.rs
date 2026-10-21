@@ -99,8 +99,7 @@ pub(super) fn await_ready(
         Some(leader_pid),
         "guardian and group leader must identify the same process group"
     );
-    let descendant_pid = descendant_pid.expect("descendant ready");
-    arm_member_cleanup(cleanup, descendant_pid, leader_pid);
+    let descendant_pid = arm_member_cleanup(cleanup, descendant_pid, leader_pid);
     let guardian_pid = guardian_pid.expect("guardian ready");
     let app_link = app_link.expect("app link ready");
     let registered_link = registered_link.expect("registered link ready");
@@ -125,12 +124,10 @@ pub(super) fn await_ready(
 
 // Arm member-based emergency group cleanup while the descendant is live and
 // still the leader's direct child in the original group.
-fn arm_member_cleanup(cleanup: &mut CycleCleanup, descendant_pid: u32, leader_pid: u32) {
-    cleanup.descendant_birth = Some(retain_group_member_birth(
-        descendant_pid,
-        leader_pid,
-        leader_pid,
-    ));
+fn arm_member_cleanup(cleanup: &mut CycleCleanup, descendant: Option<u32>, leader: u32) -> u32 {
+    let descendant = descendant.expect("descendant ready");
+    cleanup.descendant_birth = Some(retain_group_member_birth(descendant, leader, leader));
+    descendant
 }
 
 fn verify_ready_ownership(
