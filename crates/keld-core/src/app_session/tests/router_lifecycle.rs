@@ -158,9 +158,7 @@ fn accepted_quit_with_failed_owner_shutdown_still_ends_the_ui_loop_as_fatal() {
         else {
             panic!("accepted Quit must first prepare owner shutdown");
         };
-        prepare_reply
-            .send(Ok(()))
-            .expect("owner preparation reply");
+        prepare_reply.send(Ok(())).expect("owner preparation reply");
         let Ok(TestPrimaryOwnerCommand::Shutdown(shutdown_reply)) =
             guardian_rx.recv_timeout(Duration::from_secs(5))
         else {
