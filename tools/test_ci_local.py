@@ -879,7 +879,10 @@ class ProductionConsumerTests(unittest.TestCase):
 # itself; ubuntu-latest has 2.55.0.
 QUOTED_GIT_INIT = re.compile(r"""["']init["']""")
 SHELL_GIT_INIT = re.compile(r"^\s*git\b.*\sinit(\s|$)")
-MAINTENANCE_OFF = re.compile(r"maintenance\.auto\W+false\b")
+# Only an executable `config` call counts: a comment that names the setting, or
+# the key without `config`, configures nothing.
+MAINTENANCE_OFF = re.compile(r"\bconfig\W+maintenance\.auto\W+false\b")
+COMMENT_LINE = re.compile(r"^\s*(#|//)")
 MAINTENANCE_OFF_WINDOW = 4
 TEMP_REPOSITORY_SOURCES = ("*.py", "*.sh", "*.rs", "*.ts")
 
@@ -887,9 +890,9 @@ TEMP_REPOSITORY_SOURCES = ("*.py", "*.sh", "*.rs", "*.ts")
 def temp_repository_init_sites(root: Path) -> dict[str, bool]:
     """Map each `git init` site in tracked source to whether it disables maintenance.
 
-    Source is every tracked .py, .sh, .rs and .ts file. The setting must appear on the
-    init line or within the next MAINTENANCE_OFF_WINDOW lines, so it is the
-    repository's next configuration step.
+    Source is every tracked .py, .sh, .rs and .ts file. A non-comment `config
+    maintenance.auto false` call must appear on the init line or within the next
+    MAINTENANCE_OFF_WINDOW lines, so it is the repository's next configuration step.
     """
     tracked = subprocess.check_output(["git", "ls-files", "-z", "--", *TEMP_REPOSITORY_SOURCES], cwd=root)
     sites = {}
@@ -905,7 +908,8 @@ def temp_repository_init_sites(root: Path) -> dict[str, bool]:
         for index, line in enumerate(lines):
             if QUOTED_GIT_INIT.search(line) or SHELL_GIT_INIT.search(line):
                 window = lines[index:index + 1 + MAINTENANCE_OFF_WINDOW]
-                sites[f"{relative}:{index + 1}"] = any(MAINTENANCE_OFF.search(item) for item in window)
+                sites[f"{relative}:{index + 1}"] = any(
+                    MAINTENANCE_OFF.search(item) and not COMMENT_LINE.match(item) for item in window)
     return sites
 
 
@@ -953,6 +957,10 @@ class TempRepositoryMaintenanceTests(unittest.TestCase):
             "tools/enabled.ts": 'git("{verb}");\ngit("config", "maintenance.auto", "true");\n',
             "tools/late.py": 'git("{verb}")\n' + "pass\n" * 4 + 'git("config", "maintenance.auto", "false")\n',
             "tools/wrong_key.sh": 'git {verb} -q\ngit config gc.auto 0\n',
+            # A comment, or the key without a `config` call, configures nothing.
+            "tools/commented.sh": 'git {verb} -q\n# git config maintenance.auto false\n',
+            "tools/commented.rs": 'git_fixture(root, &["{verb}"]);\n    // config maintenance.auto false\n',
+            "tools/no_call.py": 'git("{verb}")  # maintenance.auto false\n',
             # Outside tools/: a Python audit test and a Rust crate test are in the census.
             "docs/audits/bare.py": 'subprocess.run(["git", "{verb}", "-q"], cwd=repo, check=True)\n',
             "crates/x/tests/bare.rs": 'Command::new("git")\n    .args(["{verb}", "-q"])\n',
@@ -962,6 +970,8 @@ class TempRepositoryMaintenanceTests(unittest.TestCase):
         self.assertEqual(sites, {"tools/bare.py:1": False, "tools/bare.sh:1": False,
                                  "tools/bare.rs:1": False, "tools/enabled.ts:1": False,
                                  "tools/late.py:1": False, "tools/wrong_key.sh:1": False,
+                                 "tools/commented.sh:1": False, "tools/commented.rs:1": False,
+                                 "tools/no_call.py:1": False,
                                  "docs/audits/bare.py:1": False, "crates/x/tests/bare.rs:2": False})
 
     def test_census_accepts_each_supported_form(self):
