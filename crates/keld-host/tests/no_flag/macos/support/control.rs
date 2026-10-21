@@ -188,6 +188,25 @@ fn accept_before_waits_for_a_peer_that_connects_after_real_would_block() {
 }
 
 #[test]
+fn accept_before_returns_a_blocking_unix_stream_from_a_nonblocking_listener() {
+    let root = tempfile::tempdir().expect("unix accept root");
+    let path = root.path().join("control.sock");
+    let listener = UnixListener::bind(&path).expect("own unix fixture listener");
+    listener
+        .set_nonblocking(true)
+        .expect("nonblocking fixture accept mode");
+    let _peer = UnixStream::connect(&path).expect("queued unix peer");
+    let accepted = accept_before(&listener, Instant::now() + super::EVENT_DEADLINE);
+    // Darwin accept inherits the listener's O_NONBLOCK; the owner must clear
+    // it, or the next control-line read fails with WouldBlock.
+    assert_eq!(
+        file_status_flags(&accepted) & O_NONBLOCK,
+        0,
+        "accepted Unix fixture stream stayed nonblocking"
+    );
+}
+
+#[test]
 fn accept_before_refuses_a_queued_peer_after_the_original_deadline() {
     let listener = TcpListener::bind(("127.0.0.1", 0)).expect("own native listener");
     let deadline = Instant::now();
@@ -334,8 +353,10 @@ impl<P: Read + AsRawFd> PipeCapture<P> {
             // enabling nonblocking reads for bounded fixture cleanup.
             const F_SETFL: std::ffi::c_int = 4;
             let flags = file_status_flags(pipe);
-            // SAFETY: same owned descriptor, integer F_SETFL argument from its
-            // flags plus Darwin O_NONBLOCK. No pointers or lifetime extension.
+            // SAFETY: `pipe` owns this live descriptor for the entire borrow.
+            // F_SETFL takes one integer: its current status flags (from the
+            // census above) plus Darwin O_NONBLOCK. No pointers, ownership
+            // transfer or lifetime extension.
             let result = unsafe { fcntl(pipe.as_raw_fd(), F_SETFL, flags | O_NONBLOCK) };
             assert_eq!(
                 result,
