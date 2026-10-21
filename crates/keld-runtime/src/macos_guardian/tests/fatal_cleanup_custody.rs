@@ -13,6 +13,8 @@ use super::super::{
 };
 use super::test_support::{NativeChildOwner, test_group_identity};
 
+mod retry_authority;
+
 fn original_group_with_unusable_enrollment() -> (NativeChildOwner, RegisteredPrimaryGeneration) {
     let owned = NativeChildOwner::new(
         Command::new("/bin/sleep")
