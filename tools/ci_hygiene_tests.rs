@@ -85,8 +85,28 @@ fn gitleaks_scan_step() -> String {
     lines.join("\n")
 }
 
+/// The live `deny` job, verbatim from `.github/workflows/ci.yml`. Its steps'
+/// contract is parsed by tools/ci_workflow_security.ts (#676), so the fixture
+/// copies no deny step text that could drift from the workflow (#677).
+fn live_deny_job() -> String {
+    let lines: Vec<&str> = include_str!("../.github/workflows/ci.yml")
+        .lines()
+        .collect();
+    let start = lines
+        .iter()
+        .position(|line| *line == "  deny:")
+        .expect("ci.yml declares a top-level `deny` job");
+    // The job ends at the next line indented less than its body (the next job key).
+    let end = lines[start + 1..]
+        .iter()
+        .position(|line| !line.trim().is_empty() && !line.starts_with("    "))
+        .map_or(lines.len(), |offset| start + 1 + offset);
+    lines[start..end].join("\n").trim_end().to_owned()
+}
+
 fn valid_workflow() -> String {
     let windows_media_step = windows_media_step();
+    let deny_job = live_deny_job();
     [
             "name: CI",
             "jobs:",
@@ -174,13 +194,7 @@ fn valid_workflow() -> String {
             "    runs-on: macos-latest",
             "    steps:",
             "      - run: cargo +1.97 check -p fixture --all-targets",
-            "  deny:",
-            "    if: needs.changes.outputs.deny == 'true'",
-            "    steps:",
-            // The deny steps' contract is parsed by tools/ci_workflow_security.ts (#676).
-            "      - name: cargo-deny check",
-            "        run: |",
-            "          \"$RUNNER_TEMP/cargo-deny/cargo-deny\" --log-level warn --manifest-path ./Cargo.toml --all-features check",
+            deny_job.as_str(),
             "  secrets:",
             "    steps:",
             "      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0",
@@ -2036,6 +2050,18 @@ fn comment_mentioning_github_ignore_is_not_an_ignore_rule() {
         "# formerly /.github/ — CI is tracked (KEL-39)\n/target\n",
     );
     check(temp.path()).expect("comment must not count as an ignore rule");
+}
+
+#[test]
+fn fixture_deny_job_is_the_live_ci_job() {
+    let job = live_deny_job();
+    assert!(job.starts_with("  deny:\n"), "{job}");
+    assert!(job.contains("\n      - name: cargo-deny check\n"), "{job}");
+    assert!(
+        !job.contains("\n  secrets:"),
+        "the job must stop at the next job: {job}"
+    );
+    assert!(valid_workflow().contains(&format!("{job}\n  secrets:\n")));
 }
 
 #[test]
