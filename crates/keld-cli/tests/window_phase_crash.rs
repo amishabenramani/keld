@@ -413,8 +413,16 @@ fn a_later_readiness_wait_does_not_forgive_a_post_ready_crash() {
         .wait_until_output_contains(&ready, Duration::from_secs(30))
         .expect("the ready marker is still in captured stdout");
 
-    session.shutdown().expect_err(
-        "a crash after the app was live must not be forgiven by a later readiness wait",
+    let msg = session
+        .shutdown()
+        .expect_err("a crash after the app was live must not be forgiven by a later readiness wait")
+        .to_string();
+    // The one recorded crash is the verdict; a crash-loop error here would
+    // mean the breaker, not the ledger baseline, failed the run.
+    assert!(msg.contains("KELD-RUNTIME-012"), "{msg}");
+    assert!(
+        !msg.contains("KELD-RUNTIME-002"),
+        "one post-ready death must not be reported as a crash loop: {msg}"
     );
 }
 
