@@ -1378,7 +1378,7 @@ and `windows-latest` legs are the real hosts.
 | 1–4, 8–10, 12–14, 18–20 (T1 harness) | pass | pass |
 | 5 (a close without `ERR` throws 022 and keeps prior records) | pass | pass, inherited from W2, unproven until W2 is fixed |
 | 6 (retire answers pending calls with `KELD-IPC-023`) | pass | does not hold (W2). The router case asserts today's behaviour: a non-reading peer reads only the close. The Bun end-to-end pass is inherited from W2, unproven until W2 is fixed |
-| 7 (post-Quit calls get `KELD-IPC-024`, none run) | pass | does not hold (W1, and W2 for the REPLY). The router case asserts today's behaviour: no `KELD-IPC-024`, and the unread Quit REPLY is discarded |
+| 7 (post-Quit calls get `KELD-IPC-024`, none run) | pass | does not hold (W1, and W2 for the REPLY). The router case asserts today's behaviour: no `KELD-IPC-024`, the unread Quit REPLY is discarded, and the router's join reports `KELD-CORE-037`. The 7(a) Bun case gets the real REPLY, but its trailing CALL also faults the tail (W1) |
 | 8, host half (Worker death fails the generation) | pass | pass |
 | 11 (second open and second connect refused) | pass (`KELD-IPC-005`; role sees `ENOENT`) | pass (`KELD-IPC-005`; host-side open gets `ERROR_PIPE_BUSY`) |
 
@@ -1398,8 +1398,14 @@ proves it.
   `KELD-IPC-024`. Since T3 made `quit()` asynchronous, app code can write calls behind
   the Quit, so this affects real Windows apps, not only tests. Evidence:
   `quit_drain_answers_received_calls_with_024_and_runs_none` asserts today's Windows
-  behaviour on `windows-latest`: the client reads no `KELD-IPC-024`, and the FS CALL
-  never runs.
+  behaviour on `windows-latest`: the client reads no `KELD-IPC-024`, the FS CALL
+  never runs, and the router's join reports that fault as `KELD-CORE-037`. The
+  criterion 7(a) end-to-end case
+  `bun_role_blocking_quit_returns_the_real_reply_then_the_link_closes` meets W1 the
+  same way: the role's echo CALL after its Quit fails the Windows tail, so its join
+  also reports `KELD-CORE-037`, while the role still sees the real Quit REPLY and then
+  `KELD-IPC-022`. Both cases share one helper that asserts this on Windows (first
+  observed natively on a Windows 11 host, 2026-10-21).
   - *Proposed root-cause fix:* run `answer_calls_after_quit` and
     `drain_calls_after_quit` on Windows, and delete the Windows peer-close wait.
     `read_quit_drain_frame` is generic over `Read`, and the Windows stream already
