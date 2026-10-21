@@ -283,7 +283,9 @@ payload:= postcard-encoded schema type (structured) | raw bytes (flags.RAW)
   bounded cases still differ, and both fail the run. The echo worker records its
   admission only after `accept_authenticated` returns, so a client that dies
   between its HELLO reply and that record, while the worker is descheduled past
-  the first restart backoff, gets one successor; that successor's failed connect
+  the restart backoff (`backoff_delay` of the window's crash count: 20 ms for a
+  first crash, longer after earlier pre-authentication crashes), gets one
+  successor; that successor's failed connect
   becomes `ledger.last`, and the gate, closed by then, stops supervision at its
   crash. Closing this exactly needs kipc to publish admission before
   `write_hello`. The crash-loop breaker runs before the gate, so two crashes

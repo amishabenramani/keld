@@ -424,7 +424,10 @@ exactly one authenticated session (`crates/keld-core/src/echo_link.rs`), and a
 successor's `connect` fails outright. Such successors used to be provisioned anyway,
 so two of them tripped the breaker whenever teardown came late, and the nested code
 was `002` or `012` by timing alone (GH-674). The session therefore provisions no
-successor after its one admission. The supervisor's one successor gate
+successor after its one admission, except in the two bounded cases that
+`docs/architecture/02-ipc.md` §2 records: the admission record trails the HELLO reply,
+and the crash-loop breaker runs before the gate. Both still fail the run. The
+supervisor's one successor gate
 (`Supervisor::start_with_stdout_markers_and_successor_gate`, at its existing
 post-revocation boundary) stops supervision at the recorded crash, and the ledger
 decides the verdict. That stop is reported as `SupervisorEvent::Stopped` and
