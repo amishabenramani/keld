@@ -10,36 +10,34 @@ use std::path::Path;
 use std::process::{Command, Stdio};
 use std::sync::mpsc;
 use std::thread;
+use std::time::Duration;
 
 const TITLE: &str = "KEL142 Renderer Bridge Acceptance";
 const RESPONSE_PATH: &str = "/KEL142_RENDERED_renderer-click_42";
-/// Requested by the page right after its click listener is installed.
+/// Requested by the page right after its click listener is installed (GH-652).
 const ARMED_PATH: &str = "/KEL142_ARMED";
+/// Backoff of the beacon's nonblocking accept poll; the test's receive
+/// deadlines, not this interval, bound each request.
+const BEACON_ACCEPT_POLL: Duration = Duration::from_millis(10);
 const BEACON_GIF: &[u8] = b"GIF89a\x01\x00\x01\x00\x80\x00\x00\x00\x00\x00\xff\xff\xff!\xf9\x04\x01\x00\x00\x00\x00,\x00\x00\x00\x00\x01\x00\x01\x00\x00\x02\x02D\x01\x00;";
-/// Posts one real HID click at the host window's centre, but only once that
-/// window is what the click hits. The desktop is shared with every other
-/// process in the login session, including a second worktree's `no_flag_macos`
-/// run, which the in-run nextest test group cannot serialise (GH-652). Such a
-/// process can open and activate a window over the same default frame. A
-/// click posted then lands in that window, and on an inactive host window
-/// `AppKit` spends the mouse-down on activation (wry's `acceptsFirstMouse:` is
-/// NO), so no DOM event is fired either way.
-///
-/// The click therefore waits for two observable states, both bounded by the
-/// deadline argument. First, the host is the active application. That state
-/// comes from `NSWorkspace` activation notifications, delivered on the main
-/// queue: every queued notification is drained before each check, and the
-/// wait blocks on the run loop until the next one arrives. Second, a fresh
-/// front-to-back census shows the host window as the topmost normal-layer
-/// window at the click point. A deadline failure names the active
-/// application and the window at the click point.
-const CLICK_SCRIPT: &str = r#"
+// Reuse GH-652's notification drain and fresh front-to-back window census.
+// The geometric candidate is a posting prerequisite, not delivery proof.
+// Keep the existing 10-second helper budget; actual page/handler oracles and
+// all existing failure-pipe ownership remain with the callers.
+pub(crate) const CLICK_SCRIPT: &str = r#"
 import AppKit
 import CoreGraphics
 import Foundation
 let pid = pid_t(CommandLine.arguments[1])!
 let title = CommandLine.arguments[2]
-let deadline = Date().addingTimeInterval(TimeInterval(CommandLine.arguments[3])!)
+// Query the actual poster. An emitted CLICKED line alone proves no delivery.
+if !CGPreflightPostEventAccess() {
+  let message = "CLICK_POSTER_UNAVAILABLE poster=\(ProcessInfo.processInfo.processIdentifier) target=\(pid) post_event_access=false\n"
+  FileHandle.standardError.write(Data(message.utf8))
+  exit(5)
+}
+let deadline = Date().addingTimeInterval(10)
+let clickPulseMicroseconds: useconds_t = 30_000
 final class Active { var pid: pid_t = -1; var name = "none" }
 let active = Active()
 let workspace = NSWorkspace.shared
@@ -58,7 +56,10 @@ active.name = workspace.frontmostApplication?.localizedName ?? "none"
 // Zero-timeout passes until one delivers nothing, so `active` is current.
 func drainActivations() {
   var result: CFRunLoopRunResult
-  repeat { result = CFRunLoopRunInMode(.defaultMode, 0, true) } while result == .handledSource || result == .stopped
+  repeat {
+    if Date() >= deadline { return }
+    result = CFRunLoopRunInMode(.defaultMode, 0, true)
+  } while result == .handledSource || result == .stopped
 }
 func census() -> [[String: Any]] {
   CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID)
@@ -94,6 +95,7 @@ while hostWindow(census()) == nil {
 }
 while true {
   drainActivations()
+  if Date() >= deadline { failAtDeadline() }
   if active.pid != pid {
     if Date() >= deadline { failAtDeadline() }
     // Blocks until the next activation notification or the deadline.
@@ -104,9 +106,12 @@ while true {
   if let row = hostWindow(rows) {
     let point = CGPoint(x: frame(row).midX, y: frame(row).midY)
     if let hit = hitAt(point, rows), int(hit, kCGWindowNumber) == int(row, kCGWindowNumber) {
+      // The deadline bounds selection/admission. Once down is admitted, always
+      // release it; an OS scheduling delay must not leave pressed input behind.
+      if deadline.timeIntervalSinceNow <= TimeInterval(clickPulseMicroseconds) / 1_000_000 { failAtDeadline() }
       CGEvent(mouseEventSource: nil, mouseType: .mouseMoved, mouseCursorPosition: point, mouseButton: .left)!.post(tap: .cghidEventTap)
       CGEvent(mouseEventSource: nil, mouseType: .leftMouseDown, mouseCursorPosition: point, mouseButton: .left)!.post(tap: .cghidEventTap)
-      usleep(30_000)
+      usleep(clickPulseMicroseconds)
       CGEvent(mouseEventSource: nil, mouseType: .leftMouseUp, mouseCursorPosition: point, mouseButton: .left)!.post(tap: .cghidEventTap)
       print("CLICKED window=\(int(row, kCGWindowNumber)) x=\(point.x) y=\(point.y) active=\(active.pid)")
       exit(0)
@@ -213,18 +218,14 @@ armed.src = "http://127.0.0.1:{port}{ARMED_PATH}";
 }
 
 fn bundle_api_entry(project: &Path, repo: &Path) {
-    let source = project.join("src/kel142-entry.ts");
-    let output = project.join("src/main.ts");
     let api = serde_json::to_string(
         &repo
             .join("packages/@keld/api/src/index.ts")
             .to_string_lossy(),
     )
     .expect("API import path JSON");
-    fs::write(
-        &source,
-        format!(
-            r#"import {{ app, channels, echoChannel }} from {api};
+    let entry = format!(
+        r#"import {{ app, channels, echoChannel }} from {api};
 let handlerCalls = 0;
 channels.handle(echoChannel, async (request) => {{
   handlerCalls += 1;
@@ -235,13 +236,25 @@ await app.whenReady();
 console.error("KELD_KEL142_BUN_READY");
 await new Promise(() => {{}});
 "#
-        ),
-    )
-    .expect("write KEL-142 API entry");
+    );
+    bundle_public_api_entry(project, repo, "kel142", &entry);
+}
+
+/// Uses the established public-index app composition and external transport.
+/// Callers provide complete source, including their public `@keld/api` import.
+pub(crate) fn bundle_public_api_entry(
+    project: &Path,
+    repo: &Path,
+    fixture_name: &str,
+    entry: &str,
+) {
+    let source = project.join(format!("src/{fixture_name}-entry.ts"));
+    let output = project.join("src/main.ts");
+    fs::write(&source, entry).expect("write public API fixture entry");
     // GH-527 §4.2: the transport is the transport Worker's entry, so it stays
     // its own staged file (`src/kipc-transport.ts`, which the dev stage copies
     // beside `src/main.ts`); the bundle imports it rather than inlining it.
-    let build = project.join("kel142-build.ts");
+    let build = project.join(format!("{fixture_name}-build.ts"));
     fs::write(&build, KIPC_SIDECAR_BUILD).expect("write KEL-142 bundle script");
     let result = Command::new("bun")
         .arg(&build)
@@ -288,22 +301,62 @@ if (!result.success) {
 await Bun.write(out, result.outputs[0]);
 "#;
 
-/// Serves exactly the page's two requests, in arrival order: the armed
-/// listener report, then the rendered Echo response.
-fn spawn_render_beacon() -> (u16, mpsc::Receiver<Vec<u8>>, thread::JoinHandle<()>) {
-    let listener = TcpListener::bind(("127.0.0.1", 0)).expect("bind KEL-142 render beacon");
-    let port = listener.local_addr().expect("render beacon address").port();
-    let (tx, rx) = mpsc::channel();
-    let handle = thread::spawn(move || {
-        for _ in 0..2 {
-            serve_beacon_request(&listener, &tx);
-        }
-    });
-    (port, rx, handle)
+/// The page's beacon server and the handles the test keeps for it.
+struct RenderBeacon {
+    port: u16,
+    requests: mpsc::Receiver<Vec<u8>>,
+    /// Dropping this ends the server thread at its next accept poll.
+    stop: mpsc::Sender<()>,
+    thread: thread::JoinHandle<()>,
 }
 
-fn serve_beacon_request(listener: &TcpListener, tx: &mpsc::Sender<Vec<u8>>) {
-    let (mut stream, _) = listener.accept().expect("accept KEL-142 render beacon");
+/// Serves exactly the page's two requests, in arrival order: the armed listener
+/// report, then the rendered Echo response. Accept is nonblocking, so the thread
+/// never parks past the test: it ends once `stop` is dropped, and the test's
+/// `recv_timeout(EVENT_DEADLINE)` bounds each request. A connection that closes
+/// before sending a byte (a WebKit speculative preconnect) is ignored.
+fn spawn_render_beacon() -> RenderBeacon {
+    let listener = TcpListener::bind(("127.0.0.1", 0)).expect("bind KEL-142 render beacon");
+    let port = listener.local_addr().expect("render beacon address").port();
+    listener
+        .set_nonblocking(true)
+        .expect("render beacon nonblocking accept");
+    let (tx, requests) = mpsc::channel();
+    let (stop, stopped) = mpsc::channel::<()>();
+    let thread = thread::spawn(move || {
+        let mut served = 0;
+        while served < 2 {
+            if let Err(mpsc::TryRecvError::Disconnected) = stopped.try_recv() {
+                return;
+            }
+            match listener.accept() {
+                Ok((stream, _)) => {
+                    if let Some(request) = serve_beacon_request(stream) {
+                        tx.send(request).expect("report render beacon");
+                        served += 1;
+                    }
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    thread::park_timeout(BEACON_ACCEPT_POLL);
+                }
+                Err(error) => panic!("accept KEL-142 render beacon: {error}"),
+            }
+        }
+    });
+    RenderBeacon {
+        port,
+        requests,
+        stop,
+        thread,
+    }
+}
+
+/// Reads one request's headers and answers with the beacon GIF. Returns `None`
+/// for a connection that closed before sending any byte.
+fn serve_beacon_request(mut stream: std::net::TcpStream) -> Option<Vec<u8>> {
+    stream
+        .set_nonblocking(false)
+        .expect("render beacon blocking stream");
     stream
         .set_read_timeout(Some(EVENT_DEADLINE))
         .expect("render beacon deadline");
@@ -311,6 +364,9 @@ fn serve_beacon_request(listener: &TcpListener, tx: &mpsc::Sender<Vec<u8>>) {
     let mut chunk = [0_u8; 512];
     while !request.windows(4).any(|window| window == b"\r\n\r\n") {
         let read = stream.read(&mut chunk).expect("read render beacon");
+        if read == 0 && request.is_empty() {
+            return None;
+        }
         assert_ne!(read, 0, "renderer beacon closed before headers");
         request.extend_from_slice(&chunk[..read]);
         assert!(
@@ -326,12 +382,12 @@ fn serve_beacon_request(listener: &TcpListener, tx: &mpsc::Sender<Vec<u8>>) {
         .write_all(header.as_bytes())
         .expect("beacon response header");
     stream.write_all(BEACON_GIF).expect("beacon response gif");
-    tx.send(request).expect("report render beacon");
+    Some(request)
 }
 
 /// Waits for the page's armed report; the window can be on screen before it.
-fn expect_armed(beacon_rx: &mpsc::Receiver<Vec<u8>>) {
-    let armed = beacon_rx
+fn expect_armed(requests: &mpsc::Receiver<Vec<u8>>) {
+    let armed = requests
         .recv_timeout(EVENT_DEADLINE)
         .expect("renderer never reported its click listener armed");
     let armed = String::from_utf8_lossy(&armed);
@@ -341,17 +397,6 @@ fn expect_armed(beacon_rx: &mpsc::Receiver<Vec<u8>>) {
     );
 }
 
-/// Runs [`CLICK_SCRIPT`] for the host window; its stdout is the input evidence.
-fn post_host_click(host_pid: u32) -> std::process::Output {
-    let click = Command::new("/usr/bin/xcrun")
-        .args(["swift", "-e", CLICK_SCRIPT, &host_pid.to_string(), TITLE])
-        .arg(EVENT_DEADLINE.as_secs().to_string())
-        .output()
-        .expect("post real CoreGraphics pointer input");
-    assert!(click.status.success(), "OS-visible click failed: {click:?}");
-    click
-}
-
 #[test]
 fn real_pointer_roundtrip_uses_isolated_bridge_and_keld_api_handler() {
     let fixture = ProductFixture::new("kel142-renderer-bridge");
@@ -359,7 +404,12 @@ fn real_pointer_roundtrip_uses_isolated_bridge_and_keld_api_handler() {
         .parent()
         .and_then(Path::parent)
         .expect("workspace root");
-    let (port, beacon_rx, beacon_thread) = spawn_render_beacon();
+    let RenderBeacon {
+        port,
+        requests: beacon_rx,
+        stop: beacon_stop,
+        thread: beacon_thread,
+    } = spawn_render_beacon();
 
     bundle_api_entry(&fixture.project, repo);
     fs::write(fixture.project.join("index.html"), renderer_html(port)).expect("renderer HTML");
@@ -391,33 +441,37 @@ fn real_pointer_roundtrip_uses_isolated_bridge_and_keld_api_handler() {
     let host = cleanup.cli.as_mut().expect("KEL-142 host cleanup owner");
     let _lease = host.stdin.take().expect("retain dev lease");
     let host_pid = host.id();
-    let windows = observer.expect_initial(host_pid, "kel142-renderer-bridge");
-    assert_eq!(windows.len(), 1, "one host-owned WKWebView window");
-    expect_armed(&beacon_rx);
-    let click = post_host_click(host_pid);
-
-    let request = beacon_rx
-        .recv_timeout(EVENT_DEADLINE)
-        .unwrap_or_else(|error| {
-            panic!(
-                "typed Echo response was not rendered into the beacon image: {error:?}; click={}",
-                String::from_utf8_lossy(&click.stdout).trim()
-            )
-        });
-    let request = String::from_utf8_lossy(&request);
-    assert!(
-        request.starts_with(&format!("GET {RESPONSE_PATH} ")),
-        "unexpected rendered-response beacon: {request}"
-    );
-    beacon_thread.join().expect("render beacon joins");
-
-    let mut child = cleanup.release();
-    if child.try_wait().expect("probe KEL-142 host exit").is_none() {
-        child
-            .kill()
-            .expect("stop KEL-142 acceptance host after evidence");
-    }
-    let output = crate::support::control::wait_child_output(child, EVENT_DEADLINE);
+    let mut click_output = None;
+    // Retain the child owner and pipes outside the failed-oracle unwind.
+    let observation = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let windows = observer.expect_initial(host_pid, "kel142-renderer-bridge");
+        assert_eq!(windows.len(), 1, "one host-owned WKWebView window");
+        // GH-652: click only once the page reports its listener installed.
+        expect_armed(&beacon_rx);
+        click_output = Some(
+            Command::new("/usr/bin/xcrun")
+                .args(["swift", "-e", CLICK_SCRIPT, &host_pid.to_string(), TITLE])
+                .output()
+                .expect("post real CoreGraphics pointer input"),
+        );
+        let click = click_output.as_ref().expect("click output retained");
+        assert!(click.status.success(), "OS-visible click failed: {click:?}");
+        let request = beacon_rx
+            .recv_timeout(EVENT_DEADLINE)
+            .expect("typed Echo response was not rendered into the beacon image");
+        let request = String::from_utf8_lossy(&request);
+        assert!(
+            request.starts_with(&format!("GET {RESPONSE_PATH} ")),
+            "unexpected rendered-response beacon: {request}"
+        );
+        beacon_thread.join().expect("render beacon joins");
+        windows
+    }));
+    // Ends the beacon thread if the observation failed before both requests.
+    drop(beacon_stop);
+    let (windows, output) =
+        finish_renderer_observation(cleanup, host_pid, click_output.as_ref(), observation);
+    let click = click_output.expect("successful observation retained click output");
     assert!(
         output.status.success() || output.status.signal() == Some(9),
         "unexpected KEL-142 acceptance cleanup status: {output:?}"
@@ -451,4 +505,135 @@ fn real_pointer_roundtrip_uses_isolated_bridge_and_keld_api_handler() {
         windows[0],
         click_evidence.trim()
     );
+}
+
+// Observation failure still fails the test after actual owned-child evidence is
+// captured. Use the existing bounded pipe/reap owner, not a detached reader.
+fn finish_renderer_observation(
+    mut cleanup: ShippingLaunchCleanup,
+    host_pid: u32,
+    click: Option<&std::process::Output>,
+    observation: std::thread::Result<Vec<u32>>,
+) -> (Vec<u32>, std::process::Output) {
+    if observation.is_err() {
+        if let Some(click) = click {
+            eprintln!(
+                "KELD_KEL142_CLICK_EVIDENCE status={:?} stdout={:?} stderr={:?}",
+                click.status,
+                String::from_utf8_lossy(&click.stdout),
+                String::from_utf8_lossy(&click.stderr),
+            );
+        } else {
+            eprintln!("KELD_KEL142_CLICK_EVIDENCE poster_not_started=true");
+        }
+    }
+    let child = cleanup.cli.as_mut().expect("KEL-142 host cleanup owner");
+    if child.try_wait().expect("probe KEL-142 host exit").is_none() {
+        child
+            .kill()
+            .expect("stop KEL-142 acceptance host after evidence");
+    }
+    let output = crate::support::control::wait_child_output(cleanup.release(), EVENT_DEADLINE);
+    match observation {
+        Ok(windows) => (windows, output),
+        Err(failure) => {
+            eprintln!(
+                "KELD_KEL142_FAILURE_EVIDENCE host={host_pid} status={:?} stdout={:?} stderr={:?}",
+                output.status,
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr),
+            );
+            std::panic::resume_unwind(failure);
+        }
+    }
+}
+
+#[test]
+fn failed_pointer_observation_preserves_child_and_click_evidence() {
+    for (fault, marker) in [
+        ("poster", "KEL652_POSTER_FAULT"),
+        ("beacon", "KEL652_BEACON_FAULT"),
+    ] {
+        let child = Command::new(std::env::current_exe().expect("host test executable"))
+            .args([
+                "--exact",
+                "renderer_bridge::pointer_failure_evidence_fixture_process",
+                "--ignored",
+                "--nocapture",
+            ])
+            .env("KEL652_EVIDENCE_FAULT", fault)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("run isolated failed-observation fixture");
+        let output = crate::support::control::wait_child_output(child, EVENT_DEADLINE);
+        assert!(
+            !output.status.success(),
+            "failed {fault} oracle became a pass"
+        );
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        for expected in [
+            marker,
+            "KELD_KEL142_CLICK_EVIDENCE status=",
+            "KEL652_CLICK_STDOUT",
+            "KEL652_CLICK_STDERR",
+            "KELD_KEL142_FAILURE_EVIDENCE host=",
+            "KEL652_CHILD_STDOUT",
+            "KEL652_CHILD_STDERR",
+        ] {
+            assert!(stderr.contains(expected), "missing {expected}: {output:?}");
+        }
+    }
+}
+
+#[test]
+#[ignore = "isolated failed-observation fixture invoked by its parent"]
+fn pointer_failure_evidence_fixture_process() {
+    let fault = std::env::var("KEL652_EVIDENCE_FAULT").expect("failure fixture mode");
+    let click_exit = match fault.as_str() {
+        "poster" => "5",
+        "beacon" => "0",
+        _ => panic!("unknown failure fixture mode: {fault}"),
+    };
+    let root = tempfile::tempdir().expect("failure-evidence fixture root");
+    let ready = root.path().join("ready");
+    let child = Command::new("/bin/sh")
+        .args([
+            "-c",
+            "printf KEL652_CHILD_STDOUT; printf KEL652_CHILD_STDERR >&2; printf ready > \"$1\"; read hold",
+            "kel652-evidence-child",
+        ])
+        .arg(&ready)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("launch pipe-evidence child");
+    let cleanup = ShippingLaunchCleanup::new(child);
+    let host_pid = cleanup.cli.as_ref().expect("child cleanup owner").id();
+    let deadline = std::time::Instant::now() + EVENT_DEADLINE;
+    while !ready.exists() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "pipe child never became ready"
+        );
+        thread::yield_now();
+    }
+    let click = Command::new("/bin/sh")
+        .args([
+            "-c",
+            "printf KEL652_CLICK_STDOUT; printf KEL652_CLICK_STDERR >&2; exit \"$1\"",
+            "kel652-evidence-click",
+        ])
+        .arg(click_exit)
+        .output()
+        .expect("run failed poster fixture");
+    let observation = std::panic::catch_unwind(|| {
+        assert!(click.status.success(), "KEL652_POSTER_FAULT");
+        let (_tx, rx) = mpsc::channel::<Vec<u8>>();
+        rx.recv_timeout(std::time::Duration::from_millis(1))
+            .expect("KEL652_BEACON_FAULT");
+        Vec::new()
+    });
+    let _ = finish_renderer_observation(cleanup, host_pid, Some(&click), observation);
 }
