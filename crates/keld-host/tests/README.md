@@ -18,17 +18,20 @@ support it imports. This map is a navigation aid, not a second registry of every
 | Linux recovery | `no_flag/linux/recovery.rs` |
 | Linux `keld dev` / host-death lifecycle | `no_flag/linux/dev_lifecycle.rs` |
 | Linux control and renderer fixtures | `no_flag/linux/support/{control,renderer}.rs` |
-| macOS boot/startup admission | `no_flag/macos/{boot_admission,startup_rollback}.rs`, `no_flag/macos/support/admission.rs` |
+| macOS boot/startup admission | `no_flag/macos/{boot_admission,startup_rollback}.rs`, `no_flag/macos/support/{admission,invalid_stage}.rs` |
 | macOS shipping/dev lifecycle and recovery | `no_flag/macos/{lifecycle,dev_lifecycle,recovery}.rs`, `no_flag/macos/support/{product,dev_cycle,recovery_cycle}.rs` |
 | macOS descriptor/window observations | `no_flag/macos/{descriptor_attribution,descriptor_liveness}.rs`, `no_flag/macos/support/{unix_descriptors,lease_descriptors,native_window}.rs` |
 | macOS profile identity/storage/purge/multi-user/reboot | `no_flag/macos/profiles/**`, `no_flag/macos/support/{profile_evidence,profile_origin,profile_renderer,cross_user,signed_app}.rs` |
 | macOS media acceptance | `no_flag/macos/media/**` |
 | macOS child-output/lifetime controls | `no_flag/macos/wait_capture.rs`, `no_flag/macos/support/product.rs` |
+| macOS control, process and renderer fixtures | `no_flag/macos/support/{control,process,renderer}.rs` |
+| macOS renderer bridge (real-pointer click) | `no_flag/macos/renderer_bridge.rs` |
+| macOS public filesystem API (KEL-140/KEL-143) | `no_flag/macos/public_fs.rs`, `no_flag/macos/public_fs/**` |
 | Windows shipping/dev lifecycle and recovery | `no_flag/windows/{lifecycle,dev_lifecycle,recovery}.rs`, `no_flag/windows/support/{product,product_cycle,process}.rs` |
 | Windows staging, process/HANDLE and window evidence | `no_flag/windows/staging.rs`, `no_flag/windows/support/{stage,handles,window}.rs` |
 | Windows console/control contracts | `no_flag/windows/{console,control_contract}.rs`, `no_flag/windows/support/control.rs` |
 | Windows renderer HTTP/publication/deadline/connection contracts | `no_flag/windows/renderer_{http_contract,publication,deadlines,connections}.rs`, `no_flag/windows/support/renderer.rs` |
-| Windows profile identity/storage/purge/multi-user | `no_flag/windows/profiles/**`, `no_flag/windows/support/profile_*.rs`, `no_flag/windows/support/{cross_user,signed_identity,signed_process,signed_purge}.rs` |
+| Windows profile identity/storage/purge/multi-user/installed | `no_flag/windows/profiles/**`, `no_flag/windows/support/profile_*.rs`, `no_flag/windows/support/{cross_user,installed,signed_identity,signed_process,signed_purge}.rs` |
 | Windows media acceptance | `no_flag/windows/media.rs` |
 | Shared fixture assets | `fixtures/**`; inspect callers before changing bytes, signing/account prerequisites, or scripts |
 
