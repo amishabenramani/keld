@@ -395,6 +395,18 @@ fn require_attested_group_absence_with_observers(
     }
 }
 
+// Native tests falsify each deadline guard of the one absence owner through
+// the same private observer seam; shipping callers never reach it.
+#[cfg(test)]
+pub(super) fn require_attested_group_absence_for_test(
+    group: GroupIdentity,
+    deadline: Instant,
+    now: impl FnMut() -> Instant,
+    probe: impl FnMut(i32) -> (Result<Pid, Errno>, Result<(), Errno>),
+) -> Result<(), RuntimeError> {
+    require_attested_group_absence_with_observers(group, deadline, now, probe)
+}
+
 pub(super) fn terminate_registered_group(group: u32) -> Result<(), RuntimeError> {
     let group = validate_group_pid(group)?;
     let result = killpg(Pid::from_raw(group), Signal::SIGKILL);
