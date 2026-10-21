@@ -289,6 +289,89 @@ export function checkPullRequestTargetWorkflow(source: string, label: string): v
   }
 }
 
+/**
+ * All CI toolchain installers must select the canonical compiler pin.
+ * The action commit and its `with: toolchain` input are separate identities:
+ * each update to the reviewed immutable action SHA is a separate security
+ * decision, and no job may fall back to runner-installed Rust.
+ */
+const approvedRustToolchainAction =
+  "dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8";
+const rustToolchainInstallerJobs = new Set([
+  "changes", "fmt", "check", "doctest", "linux-gui-smoke",
+  "msrv", "deny", "hygiene", "mermaid", "codeql-rust",
+]);
+
+function refuseRustupToolchainOverride(env: unknown, label: string): void {
+  if (env === undefined) return;
+  const values = mapping(env, label);
+  if (Object.keys(values).some(name => name.toUpperCase() === "RUSTUP_TOOLCHAIN")) {
+    fail(`${label} must not override RUSTUP_TOOLCHAIN; environment overrides outrank rust-toolchain.toml.`);
+  }
+}
+
+export function checkRustToolchainPins(source: string, toolchainToml: string): void {
+  let parsedToolchain: unknown;
+  try { parsedToolchain = Bun.TOML.parse(toolchainToml); }
+  catch (error) { fail(`cannot parse rust-toolchain.toml: ${error instanceof Error ? error.message : String(error)}`); }
+  const toolchain = mapping(mapping(parsedToolchain, "rust-toolchain.toml").toolchain, "rust-toolchain.toml [toolchain]");
+  const selected = toolchain.channel;
+  if (typeof selected !== "string" || !/^[0-9]+\.[0-9]+\.[0-9]+$/.test(selected)) {
+    fail("rust-toolchain.toml [toolchain].channel must select an exact stable X.Y.Z release.");
+  }
+  let parsed: unknown;
+  try { parsed = Bun.YAML.parse(source); }
+  catch (error) { fail(`cannot parse workflow YAML: ${error instanceof Error ? error.message : String(error)}`); }
+  finiteGraph(parsed);
+  const workflow = mapping(parsed, "workflow");
+  refuseRustupToolchainOverride(workflow.env, "workflow.env");
+  const jobs = mapping(workflow.jobs, "workflow.jobs");
+  let pinnedAction: string | undefined;
+  const installedJobs = new Set<string>();
+  for (const [jobName, value] of Object.entries(jobs)) {
+    const job = mapping(value, `jobs.${jobName}`);
+    refuseRustupToolchainOverride(job.env, `jobs.${jobName}.env`);
+    if (!Array.isArray(job.steps)) fail(`jobs.${jobName} must contain concrete steps.`);
+    for (const [index, value] of job.steps.entries()) {
+      const step = mapping(value, `jobs.${jobName}.steps[${index}]`);
+      refuseRustupToolchainOverride(step.env, `jobs.${jobName}.steps[${index}].env`);
+      if (!Object.hasOwn(step, "uses")) continue;
+      const label = `jobs.${jobName}.steps[${index}]`;
+      const action = actionRef(step.uses, label);
+      if (actionName(action) !== "dtolnay/rust-toolchain") continue;
+      if (!rustToolchainInstallerJobs.has(jobName) || installedJobs.has(jobName)) {
+        fail(`${label} is not the single approved Rust toolchain installer for its job.`);
+      }
+      // The selected compiler must be installed before any executable work.
+      // A skipped or fail-open setup step silently falls back to runner Rust.
+      const firstStep = mapping(job.steps[0], `jobs.${jobName}.steps[0]`);
+      if (index !== 1 || actionName(actionRef(firstStep.uses, `jobs.${jobName}.steps[0]`)) !== "actions/checkout") {
+        fail(`${label} must install Rust immediately after checkout, before any other step.`);
+      }
+      if (Object.hasOwn(step, "if") || Object.hasOwn(step, "continue-on-error")) {
+        fail(`${label} must run unconditionally and refuse installer failures.`);
+      }
+      if (pinnedAction && action !== pinnedAction) {
+        fail(`${label} must use the same reviewed immutable dtolnay/rust-toolchain action SHA as every other job.`);
+      }
+      pinnedAction = action;
+      installedJobs.add(jobName);
+      const inputs = mapping(step.with, `${label}.with`);
+      if (scalar(inputs.toolchain) !== selected) {
+        fail(`${label}.with.toolchain must select Rust ${selected} from rust-toolchain.toml; a stale compiler pin changes cache and MSRV behavior.`);
+      }
+    }
+  }
+  for (const jobName of rustToolchainInstallerJobs) {
+    if (!installedJobs.has(jobName)) {
+      fail(`jobs.${jobName} requires a pinned Rust toolchain installer; runner-default Rust is not admitted.`);
+    }
+  }
+  if (pinnedAction !== approvedRustToolchainAction) {
+    fail("all Rust toolchain installers must use the approved immutable action SHA.");
+  }
+}
+
 /** Validate security effects over parsed workflow objects, never YAML line shapes. */
 export function checkWorkflowSecurity(source: string): void {
   if (Buffer.byteLength(source) > 1024 * 1024) fail("workflow exceeds the 1 MiB parsing budget.");
@@ -362,7 +445,9 @@ if (import.meta.main) {
   try {
     const [, , command, root = ".", ...extra] = process.argv;
     if (command !== "check" || extra.length) fail("use ci_workflow_security.ts check [workspace].");
-    checkWorkflowSecurity(readFileSync(resolve(root, ".github/workflows/ci.yml"), "utf8"));
+    const workflowSource = readFileSync(resolve(root, ".github/workflows/ci.yml"), "utf8");
+    checkWorkflowSecurity(workflowSource);
+    checkRustToolchainPins(workflowSource, readFileSync(resolve(root, "rust-toolchain.toml"), "utf8"));
     const workflowsDir = resolve(root, ".github/workflows");
     for (const name of readdirSync(workflowsDir).filter(entry => /\.ya?ml$/.test(entry)).sort()) {
       checkPullRequestTargetWorkflow(readFileSync(resolve(workflowsDir, name), "utf8"), `.github/workflows/${name}`);
