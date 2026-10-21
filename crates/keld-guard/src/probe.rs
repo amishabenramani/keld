@@ -201,6 +201,12 @@ fn probe_direct_filesystem_with(
 /// counts only when the probe name is proven unoccupied afterwards; an occupant,
 /// or a name whose occupancy cannot be read, is not an OS-deny pass. An occupant
 /// that disappears between the create and this read is not distinguished.
+///
+/// This fails closed: a containment that denies the create and also denies the
+/// lookup (for example a token without traverse or list rights on the parent, if
+/// the lookup reports `ACCESS_DENIED` rather than `NotFound`) yields a `Fail` row
+/// marked "occupancy unreadable", never a `Pass`. Such a containment needs a probe
+/// directory whose names it can stat before this row can prove its deny.
 fn filesystem_create_refused(path: &Path, err: &io::Error) -> ProbeRecord {
     if !is_sandbox_deny(err) {
         return os_row(
@@ -516,6 +522,29 @@ mod tests {
         fs::create_dir(&denied).expect("create denied parent");
         fs::set_permissions(&denied, fs::Permissions::from_mode(0o500))
             .expect("make denied parent read-only");
+        let mode = fs::metadata(&denied)
+            .expect("read denied parent mode")
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o777, 0o500, "fixture must apply mode 0o500");
+        // Mode bits deny nothing to a process that overrides DAC checks (root, or
+        // CAP_DAC_OVERRIDE), so the fixture cannot build a real deny there. The
+        // mode is proven applied above, so a create that still succeeds can only
+        // mean that override: report the missing prerequisite instead of a false
+        // FAIL. Hosted runners are non-root and run this control.
+        let sentinel = denied.join("dac-override-sentinel");
+        if fs::File::create(&sentinel).is_ok() {
+            fs::remove_file(&sentinel).expect("remove DAC-override sentinel");
+            fs::set_permissions(&denied, fs::Permissions::from_mode(0o700))
+                .expect("restore denied parent for cleanup");
+            eprintln!(
+                "SKIP filesystem_probe_passes_a_real_permission_deny_on_an_unoccupied_name: \
+                 this process overrides directory permission checks (running as root or with \
+                 CAP_DAC_OVERRIDE), so mode 0o500 cannot produce the real deny this positive \
+                 control needs; run the test as an unprivileged user"
+            );
+            return;
+        }
 
         let row = probe_direct_filesystem_in(&denied);
         fs::set_permissions(&denied, fs::Permissions::from_mode(0o700))
