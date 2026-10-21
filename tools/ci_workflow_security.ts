@@ -289,6 +289,45 @@ export function checkPullRequestTargetWorkflow(source: string, label: string): v
   }
 }
 
+/**
+ * All CI toolchain installers must select the canonical compiler pin.
+ * The action commit and its `with: toolchain` input are separate identities:
+ * a uniformly updated immutable action SHA is allowed, but mixed SHAs or a
+ * single stale compiler pin are not. This uses the existing semantic YAML owner.
+ */
+export function checkRustToolchainPins(source: string, toolchainToml: string): void {
+  const selected = /^channel\s*=\s*"([0-9]+\.[0-9]+\.[0-9]+)"\s*$/m.exec(toolchainToml)?.[1];
+  if (!selected) fail("rust-toolchain.toml must select an exact stable X.Y.Z release.");
+  let parsed: unknown;
+  try { parsed = Bun.YAML.parse(source); }
+  catch (error) { fail(`cannot parse workflow YAML: ${error instanceof Error ? error.message : String(error)}`); }
+  finiteGraph(parsed);
+  const jobs = mapping(mapping(parsed, "workflow").jobs, "workflow.jobs");
+  let pinnedAction: string | undefined;
+  let installers = 0;
+  for (const [jobName, value] of Object.entries(jobs)) {
+    const job = mapping(value, `jobs.${jobName}`);
+    if (!Array.isArray(job.steps)) fail(`jobs.${jobName} must contain concrete steps.`);
+    for (const [index, value] of job.steps.entries()) {
+      const step = mapping(value, `jobs.${jobName}.steps[${index}]`);
+      if (!Object.hasOwn(step, "uses")) continue;
+      const label = `jobs.${jobName}.steps[${index}]`;
+      const action = actionRef(step.uses, label);
+      if (actionName(action) !== "dtolnay/rust-toolchain") continue;
+      installers++;
+      if (pinnedAction && action !== pinnedAction) {
+        fail(`${label} must use the same reviewed immutable dtolnay/rust-toolchain action SHA as every other job.`);
+      }
+      pinnedAction = action;
+      const inputs = mapping(step.with, `${label}.with`);
+      if (scalar(inputs.toolchain) !== selected) {
+        fail(`${label}.with.toolchain must select Rust ${selected} from rust-toolchain.toml; a stale compiler pin changes cache and MSRV behavior.`);
+      }
+    }
+  }
+  if (installers === 0) fail("workflow must install the pinned Rust toolchain through reviewed dtolnay/rust-toolchain steps.");
+}
+
 /** Validate security effects over parsed workflow objects, never YAML line shapes. */
 export function checkWorkflowSecurity(source: string): void {
   if (Buffer.byteLength(source) > 1024 * 1024) fail("workflow exceeds the 1 MiB parsing budget.");
@@ -362,7 +401,9 @@ if (import.meta.main) {
   try {
     const [, , command, root = ".", ...extra] = process.argv;
     if (command !== "check" || extra.length) fail("use ci_workflow_security.ts check [workspace].");
-    checkWorkflowSecurity(readFileSync(resolve(root, ".github/workflows/ci.yml"), "utf8"));
+    const workflowSource = readFileSync(resolve(root, ".github/workflows/ci.yml"), "utf8");
+    checkWorkflowSecurity(workflowSource);
+    checkRustToolchainPins(workflowSource, readFileSync(resolve(root, "rust-toolchain.toml"), "utf8"));
     const workflowsDir = resolve(root, ".github/workflows");
     for (const name of readdirSync(workflowsDir).filter(entry => /\.ya?ml$/.test(entry)).sort()) {
       checkPullRequestTargetWorkflow(readFileSync(resolve(workflowsDir, name), "utf8"), `.github/workflows/${name}`);

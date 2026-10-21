@@ -2,7 +2,7 @@ import { expect, test } from "bun:test";
 import { cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { delimiter, dirname, join } from "node:path";
-import { aptStepTimeoutMinutes, webkitgtkAptJobs, webkitgtkDebCachePath, checkPullRequestTargetWorkflow, checkWindowsMediaOracle, checkWorkflowSecurity, codeqlLanguages, codeqlRoute } from "./ci_workflow_security";
+import { aptStepTimeoutMinutes, webkitgtkAptJobs, webkitgtkDebCachePath, checkPullRequestTargetWorkflow, checkWindowsMediaOracle, checkWorkflowSecurity, checkRustToolchainPins, codeqlLanguages, codeqlRoute } from "./ci_workflow_security";
 
 type Step = Record<string, unknown>;
 type FixtureJob = {
@@ -17,6 +17,7 @@ type FixtureJob = {
 type Fixture = { jobs: Record<string, FixtureJob> };
 const source = readFileSync(join(import.meta.dir, "../.github/workflows/ci.yml"), "utf8");
 const windowsMediaOracle = readFileSync(join(import.meta.dir, "../crates/keld-wv/tests/windows_media_guard.ps1"));
+const selectedRustToolchain = readFileSync(join(import.meta.dir, "../rust-toolchain.toml"), "utf8");
 const checkout = "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1";
 
 function fixture(): Fixture {
@@ -34,6 +35,28 @@ function check(f: Fixture): void { checkWorkflowSecurity(Bun.YAML.stringify(f, n
 
 test("actual workflow passes parsed security admission", () => {
   expect(() => checkWorkflowSecurity(source)).not.toThrow();
+});
+
+test("every Rust installer agrees with the exact pin and immutable action commit", () => {
+  expect(() => checkRustToolchainPins(source, selectedRustToolchain)).not.toThrow();
+  const workflow = fixture();
+  const installers = Object.values(workflow.jobs).flatMap(job => job.steps)
+    .filter(s => String(s.uses ?? "").startsWith("dtolnay/rust-toolchain@"));
+  expect(installers.length).toBe(10);
+
+  // A single stale installer may not hide behind nine current copies.
+  (installers[3]!.with as Record<string, unknown>).toolchain = "1.97.1";
+  expect(() => checkRustToolchainPins(Bun.YAML.stringify(workflow), selectedRustToolchain))
+    .toThrow("must select Rust");
+  (installers[3]!.with as Record<string, unknown>).toolchain = "1.99.1";
+
+  // A changed action SHA is independent from the compiler version, but all
+  // jobs must use the same reviewed immutable action implementation.
+  installers[3]!.uses = "dtolnay/rust-toolchain@" + "0".repeat(40);
+  expect(() => checkRustToolchainPins(Bun.YAML.stringify(workflow), selectedRustToolchain))
+    .toThrow("same reviewed immutable");
+  expect(() => checkRustToolchainPins(source, selectedRustToolchain.replace("1.99.1", "1.97.1")))
+    .toThrow("must select Rust");
 });
 
 test("source-budget reporting stays advisory, visible and unprivileged", () => {
