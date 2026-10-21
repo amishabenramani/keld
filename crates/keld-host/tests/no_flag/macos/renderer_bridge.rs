@@ -314,7 +314,7 @@ struct RenderBeacon {
 /// report, then the rendered Echo response. Accept is nonblocking, so the thread
 /// never parks past the test: it ends once `stop` is dropped, and the test's
 /// `recv_timeout(EVENT_DEADLINE)` bounds each request. A connection that closes
-/// before sending a byte (a WebKit speculative preconnect) is ignored.
+/// before sending a byte (a `WebKit` speculative preconnect) is ignored.
 fn spawn_render_beacon() -> RenderBeacon {
     let listener = TcpListener::bind(("127.0.0.1", 0)).expect("bind KEL-142 render beacon");
     let port = listener.local_addr().expect("render beacon address").port();
