@@ -23,6 +23,11 @@ pub(crate) struct RendererBeacon {
     worker: Option<JoinHandle<()>>,
 }
 
+/// Own `listener` as one renderer beacon. The worker accepts nothing until
+/// [`expect_renderer_beacon`] activates its absolute deadline; until then the kernel
+/// backlog holds the renderer's connection. A caller must therefore await the beacon
+/// before it blocks on anything the beacon reply gates (for example READY), or that
+/// wait stalls until `PRODUCT_DEADLINE`.
 pub(crate) fn spawn_renderer_beacon(listener: TcpListener) -> RendererBeacon {
     let (deadline_tx, deadline_rx) = mpsc::channel();
     let (cancellation, cancellation_rx) = mpsc::channel();
@@ -112,39 +117,54 @@ fn serve_renderer_beacon_until(
         .set_nonblocking(true)
         .map_err(|error| format!("set renderer beacon listener nonblocking: {error}"))?;
 
-    let (mut stream, _) = loop {
+    loop {
+        let mut stream = accept_renderer_connection(listener, deadline, cancellation)?;
+        stream
+            .set_nonblocking(true)
+            .map_err(|error| format!("set renderer beacon stream nonblocking: {error}"))?;
+
+        // A speculative preconnect that closes before sending one byte carries no
+        // request. Accept the next connection under the same absolute deadline.
+        let Some(request) = read_renderer_request(&mut stream, deadline, cancellation)? else {
+            continue;
+        };
+        validate_renderer_request(&request)?;
+        return write_renderer_response(&mut stream, deadline, cancellation);
+    }
+}
+
+fn accept_renderer_connection(
+    listener: &TcpListener,
+    deadline: Instant,
+    cancellation: &mpsc::Receiver<()>,
+) -> Result<TcpStream, String> {
+    loop {
         check_renderer_cancellation(cancellation)?;
         renderer_beacon_remaining(deadline, Instant::now())?;
         match listener.accept() {
-            Ok(connection) => break connection,
+            Ok((stream, _)) => return Ok(stream),
             Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
                 wait_for_renderer_io(cancellation, deadline)?;
             }
             Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
             Err(error) => return Err(format!("accept renderer beacon: {error}")),
         }
-    };
-
-    stream
-        .set_nonblocking(true)
-        .map_err(|error| format!("set renderer beacon stream nonblocking: {error}"))?;
-
-    let request = read_renderer_request(&mut stream, deadline, cancellation)?;
-    validate_renderer_request(&request)?;
-    write_renderer_response(&mut stream, deadline, cancellation)
+    }
 }
 
+/// Read one complete request head, or `None` when the peer closed before sending a
+/// byte (an empty preconnect).
 fn read_renderer_request(
     stream: &mut TcpStream,
     deadline: Instant,
     cancellation: &mpsc::Receiver<()>,
-) -> Result<Vec<u8>, String> {
+) -> Result<Option<Vec<u8>>, String> {
     let mut request = Vec::with_capacity(512);
     let mut chunk = [0_u8; RENDERER_READ_CHUNK_BYTES];
 
     loop {
         if request.windows(4).any(|window| window == b"\r\n\r\n") {
-            return Ok(request);
+            return Ok(Some(request));
         }
         if request.len() >= RENDERER_REQUEST_LIMIT {
             return Err(format!(
@@ -156,6 +176,7 @@ fn read_renderer_request(
         renderer_beacon_remaining(deadline, Instant::now())?;
 
         match stream.read(&mut chunk) {
+            Ok(0) if request.is_empty() => return Ok(None),
             Ok(0) => {
                 return Err(
                     "renderer beacon request closed before complete HTTP headers".to_owned(),
