@@ -12,6 +12,7 @@ use crate::support::native_window::NativeWindowExpectation;
 use crate::support::native_window::NativeWindowScope;
 use crate::support::native_window::native_windows;
 use crate::support::native_window::query_native_windows;
+use crate::support::process::ProcessExitObserver;
 use crate::support::process::await_process_gone;
 use crate::support::process::parent_process;
 use crate::support::process::process_exists;
@@ -331,14 +332,12 @@ impl ShippingDevCycle {
         number: i32,
     ) {
         self.trace_phase("signal-cli-group", Some(signal_name));
-        signal_process_group(&format!("-{signal_name}"), self.cli_pid)
-            .unwrap_or_else(|error| panic!("group {signal_name} failed: {error}"));
-        let status = self
-            .cli
-            .as_mut()
-            .expect("live shipping CLI")
-            .wait()
-            .expect("wait signaled shipping CLI");
+        let status = signal_group_and_await_exit(
+            self.cli.as_mut().expect("live shipping CLI"),
+            self.cli_pid,
+            signal_name,
+            Instant::now() + EVENT_DEADLINE,
+        );
         assert_eq!(status.signal(), Some(number));
         assert!(
             process_exists(self.host_pid),
@@ -431,4 +430,88 @@ impl Drop for ShippingDevCycle {
             let _ = signal_process_group("-KILL", self.bun_pid);
         }
     }
+}
+
+/// Signal the CLI's process group and wait for the CLI's own kernel exit
+/// status until the caller's original deadline. A CLI that ignores or
+/// survives the signal fails with the exit-census message at the deadline
+/// instead of blocking forever in `Child::wait()`.
+fn signal_group_and_await_exit(
+    cli: &mut Child,
+    group: u32,
+    signal_name: &str,
+    deadline: Instant,
+) -> std::process::ExitStatus {
+    // Arm before signaling, so the exit cannot be missed.
+    let exit = ProcessExitObserver::arm(cli.id());
+    signal_process_group(&format!("-{signal_name}"), group)
+        .unwrap_or_else(|error| panic!("group {signal_name} failed: {error}"));
+    let status = exit.wait_before(deadline);
+    // The kernel already reported this exit, so reaping it cannot block.
+    let reaped = cli.wait().expect("reap signaled shipping CLI");
+    assert_eq!(
+        reaped, status,
+        "reaped CLI status differs from the kernel census"
+    );
+    status
+}
+
+fn signal_stand_in(script: &str) -> Child {
+    let mut child = Command::new("/bin/sh")
+        .args(["-c", script])
+        .process_group(0)
+        .stdout(Stdio::piped())
+        .spawn()
+        .expect("spawn CLI stand-in");
+    // Signal only after the stand-in installed its disposition.
+    let mut ready = String::new();
+    BufReader::new(child.stdout.take().expect("stand-in stdout"))
+        .read_line(&mut ready)
+        .expect("stand-in ready line");
+    assert_eq!(ready, "ready\n");
+    child
+}
+
+#[test]
+fn signaled_cli_exit_is_observed_with_its_signal() {
+    let mut child = signal_stand_in("echo ready; exec /bin/sleep 600");
+    let group = child.id();
+    let status =
+        signal_group_and_await_exit(&mut child, group, "INT", Instant::now() + EVENT_DEADLINE);
+    assert_eq!(status.signal(), Some(2));
+}
+
+#[test]
+fn signaled_cli_that_ignores_the_signal_fails_at_the_deadline_instead_of_hanging() {
+    let mut child = signal_stand_in("trap '' INT; echo ready; exec /bin/sleep 600");
+    let group = child.id();
+    let started = Instant::now();
+    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        signal_group_and_await_exit(
+            &mut child,
+            group,
+            "INT",
+            started + crate::support::PROCESS_DEADLINE,
+        )
+    }));
+    // Owned cleanup before the oracle: the stand-in must not outlive the test.
+    let _ = child.kill();
+    let _ = child.wait();
+    let panic = outcome.expect_err("an ignored signal cannot become a CLI exit");
+    let message = panic
+        .downcast_ref::<String>()
+        .map(String::as_str)
+        .or_else(|| panic.downcast_ref::<&str>().copied())
+        .unwrap_or_default();
+    // Both are the exit census's deadline outcomes: the kevent wait timed out
+    // at the deadline, or the deadline had passed before the next wait.
+    assert!(
+        message.contains(&format!("kernel exit census timeout for {group}\n"))
+            || message == format!("no kernel exit status for PID {group}"),
+        "unexpected failure for an ignored signal: {message}"
+    );
+    assert!(
+        started.elapsed() < crate::support::PROCESS_DEADLINE * 2,
+        "the ignored signal was not bounded by the original deadline"
+    );
 }

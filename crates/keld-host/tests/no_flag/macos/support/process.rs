@@ -382,8 +382,12 @@ impl ProcessExitObserver {
     }
 
     pub(crate) fn wait(self) -> std::process::ExitStatus {
+        self.wait_before(Instant::now() + PROCESS_DEADLINE)
+    }
+
+    /// Wait for the kernel exit status until the caller's original deadline.
+    pub(crate) fn wait_before(self, deadline: Instant) -> std::process::ExitStatus {
         use std::os::fd::AsRawFd as _;
-        let deadline = Instant::now() + PROCESS_DEADLINE;
         loop {
             let remaining = deadline.saturating_duration_since(Instant::now());
             assert!(
