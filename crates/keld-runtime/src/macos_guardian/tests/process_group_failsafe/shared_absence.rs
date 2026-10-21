@@ -13,7 +13,7 @@ use nix::unistd::{Pid, getpgid, setpgid};
 
 use super::super::super::process_group::{
     observe_group_identity, reconcile_denied_signal_after_reap, require_attested_group_absence,
-    terminate_attested_group,
+    require_attested_group_absence_for_test, terminate_attested_group,
 };
 use super::TestOwnedGroupChild;
 
@@ -89,6 +89,88 @@ fn post_reap_reconciliation_shares_the_clear_absence_deadline() {
     require_attested_group_absence(original, fresh).expect("same real absence, live budget");
     reconcile_denied_signal_after_reap(original, denied_group_signal(), fresh)
         .expect("same real absence reconciles EPERM inside a live budget");
+}
+
+// Each deadline guard of the one absence owner refuses on its own. The kernel
+// reads are real dual ESRCH; only the monotonic clock is injected, so removing
+// EITHER the before-read guard OR the after-read guard alone turns this red.
+#[test]
+fn each_absence_deadline_guard_refuses_without_the_other() {
+    let mut leader = TestOwnedGroupChild(
+        Command::new("/bin/sleep")
+            .arg("30")
+            .process_group(0)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("own isolated native leader"),
+    );
+    let group = leader.0.id();
+    let original = observe_group_identity(group).expect("pin original native leader birth");
+    let raw = i32::try_from(group).expect("positive native group");
+    terminate_attested_group(original).expect("signal only the original attested group");
+    leader.0.wait().expect("reap exact owned leader");
+    assert_eq!(getpgid(Some(Pid::from_raw(raw))), Err(Errno::ESRCH));
+    assert_eq!(kill(Pid::from_raw(-raw), None), Err(Errno::ESRCH));
+
+    let deadline = Instant::now() + Duration::from_secs(1);
+    let before = deadline
+        .checked_sub(Duration::from_millis(1))
+        .expect("representable pre-deadline instant");
+    let after = deadline + Duration::from_millis(1);
+    let real_probe = |native: i32| {
+        let reads = (
+            getpgid(Some(Pid::from_raw(native))),
+            kill(Pid::from_raw(-native), None),
+        );
+        assert_eq!(reads, (Err(Errno::ESRCH), Err(Errno::ESRCH)));
+        reads
+    };
+
+    // Before-read guard alone: an already expired budget issues no kernel read.
+    let mut expired_probes = 0;
+    require_attested_group_absence_for_test(
+        original,
+        deadline,
+        || after,
+        |native| {
+            expired_probes += 1;
+            real_probe(native)
+        },
+    )
+    .expect_err("an expired budget cannot prove absence");
+    assert_eq!(
+        expired_probes, 0,
+        "the before-read guard must refuse before any kernel observation"
+    );
+
+    // After-read guard alone: a budget live at the read but expired at the
+    // decision cannot turn that real dual ESRCH into success.
+    let mut clock_reads = 0;
+    let mut late_probes = 0;
+    require_attested_group_absence_for_test(
+        original,
+        deadline,
+        || {
+            clock_reads += 1;
+            if clock_reads == 1 { before } else { after }
+        },
+        |native| {
+            late_probes += 1;
+            real_probe(native)
+        },
+    )
+    .expect_err("dual ESRCH decided after the budget is not absence");
+    assert_eq!(late_probes, 1, "the real kernel reads executed once");
+    assert_eq!(
+        clock_reads, 2,
+        "the decision re-reads the clock after the probe"
+    );
+
+    // Positive control: the same real absence inside the budget succeeds.
+    require_attested_group_absence_for_test(original, deadline, || before, real_probe)
+        .expect("the same real absence inside a live budget");
 }
 
 // A live original leader that left its PGID leaves that numeric group empty
