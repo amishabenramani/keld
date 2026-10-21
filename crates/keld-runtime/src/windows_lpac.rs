@@ -288,8 +288,10 @@ impl WindowsLpacProfile {
         // Preserve the API's explicit embedded-NUL refusal before opening.
         let _ = wide_nul(path.as_os_str(), "ACL path")?;
         // This handle owns both the identity and the authority to read/write
-        // its DACL. Excluding DELETE sharing limits ordinary name mutations,
-        // but identity rests on this retained HANDLE even if rename succeeds.
+        // its DACL. The share mode does not stop a rename: this handle asks
+        // for no data or DELETE access, so Windows does not check sharing
+        // against it, and the race test observes the rename succeed while it
+        // is open. Identity rests on this retained HANDLE alone.
         // OPEN_REPARSE_POINT permits fail-closed inspection of the final leaf.
         let original = OpenOptions::new()
             .access_mode(READ_CONTROL | WRITE_DAC | FILE_READ_ATTRIBUTES)
