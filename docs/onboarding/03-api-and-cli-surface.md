@@ -38,7 +38,8 @@ the required sibling executables.
 Every verb is matched by hand in
 [`crates/keld-cli/src/main.rs`](../../crates/keld-cli/src/main.rs) — there is no
 `clap`, no flag parser, and no subcommand framework. Arguments are read positionally
-from `std::env::args()`.
+from `std::env::args_os()` and decoded by `keld_core::unicode_args` on every OS: a
+non-Unicode argument is **`KELD-CLI-051`**, exit **2**, before any verb is selected.
 
 | Invocation | Implemented in | Effect |
 |---|---|---|
@@ -358,7 +359,7 @@ exits **2**. The server opens no network listener.
 
 | Today (verified) | Specified target |
 |---|---|
-| `0` success, `1` general failure, `2` for `keld mcp` misuse, unknown `create`/`dev`/`doctor`/`hello` flags (`KELD-CLI-044`), reserved verbs (`KELD-CLI-045`), and unknown verbs (`KELD-CLI-046`) | `0` ok · `1` failure · `2` misuse · `3` environment ([`docs/architecture/07-agent-experience.md`](../architecture/07-agent-experience.md) §7) |
+| `0` success, `1` general failure, `2` for `keld mcp` misuse, unknown `create`/`dev`/`doctor`/`hello` flags (`KELD-CLI-044`), reserved verbs (`KELD-CLI-045`), unknown verbs (`KELD-CLI-046`), and non-Unicode arguments (`KELD-CLI-051`) | `0` ok · `1` failure · `2` misuse · `3` environment ([`docs/architecture/07-agent-experience.md`](../architecture/07-agent-experience.md) §7) |
 | `keld doctor --json` emits a findings array | `--json` on anything with parseable output (same section) |
 
 The full target exit-code and machine-readable-output contract is not implemented yet.
