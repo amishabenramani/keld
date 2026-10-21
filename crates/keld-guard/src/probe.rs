@@ -400,6 +400,90 @@ mod tests {
     }
 
     #[test]
+    fn filesystem_probe_does_not_pass_on_a_directory_at_the_probe_name() {
+        let fixture = ProbeFixture::new("directory");
+        let predicted = fixture.predicted_path();
+        fs::create_dir(&predicted).expect("preseed predicted filename as a directory");
+
+        let row = probe_direct_filesystem_in(fixture.directory());
+
+        assert!(
+            fs::symlink_metadata(&predicted)
+                .expect("pre-existing directory remains")
+                .is_dir(),
+            "the probe must not remove an entry it did not create"
+        );
+        assert_eq!(row.verdict, ProbeVerdict::Fail, "{row:?}");
+        assert_eq!(row.oracle, ProbeOracle::NotOsDeny, "{row:?}");
+    }
+
+    /// `CreateFileW(CREATE_NEW)` reports `ERROR_ACCESS_DENIED` for a name held by a
+    /// delete-pending file, which is an occupant, not an OS deny of the create.
+    #[cfg(windows)]
+    #[test]
+    fn filesystem_probe_does_not_pass_on_a_delete_pending_file_at_the_probe_name() {
+        use std::os::windows::fs::OpenOptionsExt as _;
+        const DELETE: u32 = 0x0001_0000;
+        const SHARE_ALL: u32 = 0x1 | 0x2 | 0x4;
+        const FILE_FLAG_DELETE_ON_CLOSE: u32 = 0x0400_0000;
+
+        let fixture = ProbeFixture::new("delete-pending");
+        let predicted = fixture.predicted_path();
+        fs::write(&predicted, b"occupant").expect("seed occupant");
+        let holder = fs::OpenOptions::new()
+            .read(true)
+            .share_mode(SHARE_ALL)
+            .open(&predicted)
+            .expect("hold the occupant open");
+        drop(
+            fs::OpenOptions::new()
+                .access_mode(DELETE)
+                .share_mode(SHARE_ALL)
+                .custom_flags(FILE_FLAG_DELETE_ON_CLOSE)
+                .open(&predicted)
+                .expect("open the occupant delete-on-close"),
+        );
+        let pending = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&predicted)
+            .expect_err("the delete-pending name cannot be created");
+        assert_eq!(
+            pending.kind(),
+            ErrorKind::PermissionDenied,
+            "fixture must reproduce the ambiguous Win32 ACCESS_DENIED: {pending}"
+        );
+
+        let row = probe_direct_filesystem_in(fixture.directory());
+        drop(holder);
+
+        assert_eq!(row.verdict, ProbeVerdict::Fail, "{row:?}");
+        assert_eq!(row.oracle, ProbeOracle::NotOsDeny, "{row:?}");
+        assert!(row.detail.contains("not an OS deny"), "{row:?}");
+    }
+
+    /// Positive control: a real permission deny on an unoccupied name stays an OS deny.
+    #[cfg(unix)]
+    #[test]
+    fn filesystem_probe_passes_a_real_permission_deny_on_an_unoccupied_name() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let fixture = ProbeFixture::new("denied");
+        let denied = fixture.directory().join("read-only");
+        fs::create_dir(&denied).expect("create denied parent");
+        fs::set_permissions(&denied, fs::Permissions::from_mode(0o500))
+            .expect("make denied parent read-only");
+
+        let row = probe_direct_filesystem_in(&denied);
+        fs::set_permissions(&denied, fs::Permissions::from_mode(0o700))
+            .expect("restore denied parent for cleanup");
+
+        assert_eq!(row.verdict, ProbeVerdict::Pass, "{row:?}");
+        assert_eq!(row.oracle, ProbeOracle::OsDeny, "{row:?}");
+        assert!(row.detail.starts_with("OS deny:"), "{row:?}");
+    }
+
+    #[test]
     fn live_direct_network_is_not_an_os_deny_pass() {
         let report = run_synthetic_probes();
         let net = report.direct_network().expect("direct_network row");
