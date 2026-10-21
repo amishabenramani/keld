@@ -254,6 +254,17 @@ impl WindowsLpacProfile {
     /// Adds the package SID to an existing filesystem DACL without replacing
     /// its other access entries.
     ///
+    /// The DACL is read, merged and written through one retained handle to the
+    /// object the path named when it was opened, so renaming or replacing the
+    /// path afterwards cannot redirect the write.
+    ///
+    /// Only the final path component (the leaf) is checked for a reparse point.
+    /// Reparse points in ancestor components (junctions, directory symbolic
+    /// links, mount points) are followed by the open like any Win32 path, so
+    /// the grant lands on whatever object the resolved path named at open
+    /// time. The caller must pass a path whose ancestors a less-trusted
+    /// principal cannot replace.
+    ///
     /// # Errors
     ///
     /// Fails if the path does not exist, the opened leaf is a reparse point,
@@ -263,17 +274,17 @@ impl WindowsLpacProfile {
         path: &Path,
         access: WindowsLpacPathAccess,
     ) -> Result<(), WindowsLpacError> {
-        self.grant_path_with_before_write(path, access, || {})
+        self.prepare_grant(path, access)?.publish()
     }
 
-    // The production call supplies a no-op. The private test seam forces a
-    // competing path substitution precisely between the ACL read and publish.
-    fn grant_path_with_before_write(
+    /// Opens the grant target, refuses a reparse-point leaf, and reads and
+    /// merges that exact object's DACL. [`PreparedGrant::publish`] writes the
+    /// merged DACL through the same retained handle.
+    fn prepare_grant(
         &self,
         path: &Path,
         access: WindowsLpacPathAccess,
-        before_write: impl FnOnce(),
-    ) -> Result<(), WindowsLpacError> {
+    ) -> Result<PreparedGrant, WindowsLpacError> {
         // Preserve the API's explicit embedded-NUL refusal before opening.
         let _ = wide_nul(path.as_os_str(), "ACL path")?;
         // This handle owns both the identity and the authority to read/write
@@ -350,26 +361,10 @@ impl WindowsLpacProfile {
             return Err(WindowsLpacError::win32("filesystem DACL merge", status));
         }
         let new_acl = LocalAllocation(new_acl.cast());
-        before_write();
-        // SAFETY: `original` is still the exact WRITE_DAC handle from the
-        // preceding GetSecurityInfo; renaming the path cannot redirect this
-        // write. The merged DACL is live for the synchronous SetSecurityInfo.
-        let status = unsafe {
-            SetSecurityInfo(
-                original.as_raw_handle().cast(),
-                SE_FILE_OBJECT,
-                DACL_SECURITY_INFORMATION,
-                std::ptr::null_mut(),
-                std::ptr::null_mut(),
-                new_acl.0.cast(),
-                std::ptr::null(),
-            )
-        };
+        // The merged ACL is its own allocation; the read descriptor that owns
+        // the old ACL is no longer referenced.
         drop(descriptor);
-        if status != ERROR_SUCCESS {
-            return Err(WindowsLpacError::win32("filesystem DACL write", status));
-        }
-        Ok(())
+        Ok(PreparedGrant { original, new_acl })
     }
 
     /// Creates a suspended LPAC child with an explicit environment and exact
@@ -1072,6 +1067,39 @@ impl InheritedHandleCopies {
     }
 }
 
+/// A merged DACL ready to be written to the exact object
+/// [`WindowsLpacProfile::prepare_grant`] opened and read.
+struct PreparedGrant {
+    /// The retained READ_CONTROL | WRITE_DAC handle the DACL was read from.
+    original: std::fs::File,
+    /// The merged DACL, one `LocalAlloc` allocation from `SetEntriesInAclW`.
+    new_acl: LocalAllocation,
+}
+
+impl PreparedGrant {
+    /// Writes the merged DACL through the retained handle and closes it.
+    fn publish(self) -> Result<(), WindowsLpacError> {
+        // SAFETY: `original` is still the exact WRITE_DAC handle from the
+        // preceding GetSecurityInfo; renaming the path cannot redirect this
+        // write. The merged DACL is live for the synchronous SetSecurityInfo.
+        let status = unsafe {
+            SetSecurityInfo(
+                self.original.as_raw_handle().cast(),
+                SE_FILE_OBJECT,
+                DACL_SECURITY_INFORMATION,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                self.new_acl.0.cast(),
+                std::ptr::null(),
+            )
+        };
+        if status != ERROR_SUCCESS {
+            return Err(WindowsLpacError::win32("filesystem DACL write", status));
+        }
+        Ok(())
+    }
+}
+
 struct LocalAllocation(*mut c_void);
 
 impl Drop for LocalAllocation {
@@ -1322,9 +1350,14 @@ mod tests {
             after, before,
             "granting a reparse alias must never change the unrelated target's actual DACL"
         );
-        assert!(
-            granted.is_err(),
-            "a reparse alias must not be admitted as a grant target"
+        // The exact admission refusal, not any open or metadata failure.
+        assert_eq!(
+            granted
+                .expect_err("a reparse alias must not be admitted as a grant target")
+                .to_string(),
+            "KELD-RUNTIME-015: Windows LPAC admission failed during ACL object admission: \
+             refuse a reparse-point grant target. Do not start an unconfined replacement; \
+             repair the profile, ACL, or handle list."
         );
         assert!(
             Path::new(&outsider).is_dir(),
@@ -1334,7 +1367,6 @@ mod tests {
 
     #[test]
     fn grant_path_retained_directory_refuses_post_read_substitution() {
-        use std::cell::Cell;
         use std::ffi::OsString;
         use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -1356,49 +1388,44 @@ mod tests {
         let profile = super::WindowsLpacProfile::create(&name).expect("fresh test-owned LPAC SID");
         let outsider_before = observed_dacl(&outsider);
         let original_before = observed_dacl(&claimed);
-        let substituted = Cell::new(false);
 
-        // The private gate executes after the shipping ACL read and merge,
-        // immediately before publishing. The same-user rename may succeed on
-        // this Windows build: only original HANDLE identity can guarantee that
-        // the outsider never receives this ACL grant.
-        let grant = profile.grant_path_with_before_write(
-            &claimed,
-            super::WindowsLpacPathAccess::RolePrivate,
-            || {
-                match std::fs::rename(&claimed, &moved) {
-                    Ok(()) => {
-                        if let Err(error) = std::fs::rename(&outsider, &claimed) {
-                            std::fs::rename(&moved, &claimed)
-                                .expect("rescue original after failed outsider substitution");
-                            panic!("test-owned outsider substitution failed: {error}");
-                        }
-                        substituted.set(true);
-                    }
-                    Err(error) => {
-                        // Windows may refuse a rename while the original
-                        // HANDLE is pinned. Only an actual sharing/permission
-                        // refusal is an acceptable no-substitution outcome;
-                        // a missing path or another fixture error must fail.
-                        assert!(
-                            matches!(error.raw_os_error(), Some(5 | 32)),
-                            "unexpected original-rename failure instead of substitution or OS refusal: {error}"
-                        );
-                        assert!(
-                            claimed.is_dir() && outsider.is_dir() && !moved.exists(),
-                            "a refused rename must leave both test-owned identities intact"
-                        );
-                    }
+        // The substitution runs between the shipping ACL read and merge and
+        // the publish, in this test body rather than inside the code under
+        // test. The same-user rename may succeed on this Windows build: only
+        // original HANDLE identity can guarantee that the outsider never
+        // receives this ACL grant.
+        let prepared = profile
+            .prepare_grant(&claimed, super::WindowsLpacPathAccess::RolePrivate)
+            .expect("an ordinary retained directory admits its DACL read and merge");
+        let mut substituted = false;
+        match std::fs::rename(&claimed, &moved) {
+            Ok(()) => {
+                if let Err(error) = std::fs::rename(&outsider, &claimed) {
+                    std::fs::rename(&moved, &claimed)
+                        .expect("rescue original after failed outsider substitution");
+                    panic!("test-owned outsider substitution failed: {error}");
                 }
-            },
-        );
-        let outsider_after = observed_dacl(if substituted.get() {
-            &claimed
-        } else {
-            &outsider
-        });
-        let original_after = observed_dacl(if substituted.get() { &moved } else { &claimed });
-        if substituted.get() {
+                substituted = true;
+            }
+            Err(error) => {
+                // Windows may refuse a rename while the original HANDLE is
+                // pinned. Only an actual sharing/permission refusal is an
+                // acceptable no-substitution outcome; a missing path or
+                // another fixture error must fail.
+                assert!(
+                    matches!(error.raw_os_error(), Some(5 | 32)),
+                    "unexpected original-rename failure instead of substitution or OS refusal: {error}"
+                );
+                assert!(
+                    claimed.is_dir() && outsider.is_dir() && !moved.exists(),
+                    "a refused rename must leave both test-owned identities intact"
+                );
+            }
+        }
+        let grant = prepared.publish();
+        let outsider_after = observed_dacl(if substituted { &claimed } else { &outsider });
+        let original_after = observed_dacl(if substituted { &moved } else { &claimed });
+        if substituted {
             // Restore only test-owned entries before any assertion panics. Do
             // not follow links or remove unrelated files in this cleanup.
             std::fs::rename(&claimed, &outsider).expect("rescue owned outsider name");
