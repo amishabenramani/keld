@@ -15,7 +15,6 @@ use super::sessions::{
     LifecycleObservation, ObservedSession, SeamedHost, assert_first_exited_before_second,
     engine_constructions, read_lifecycle_record,
 };
-use crate::PRODUCT_DEADLINE;
 use crate::support::control::{accept_ready_generation, try_read_control_line};
 use crate::support::installed::{INSTALLER_ENV, InstalledApp, SIGNED_HOST_A_P1, fixture_env};
 use crate::support::process::{
@@ -24,6 +23,7 @@ use crate::support::process::{
 };
 use crate::support::product::ProductFixture;
 use crate::support::profile_run::{ProfileTestRoot, assert_profile_test_root_feature};
+use crate::ui_end_kill_switch;
 use serde_json::Value;
 use std::io::BufReader;
 use std::net::{TcpListener, TcpStream};
@@ -60,12 +60,10 @@ const FORCED_END_HOST_SLACK: Duration = Duration::from_secs(1);
 const FORCED_END_TEST_SLACK: Duration = Duration::from_secs(2);
 
 /// Kill switch over each wait of a handover cell, never a synchronization wait. The
-/// longest wait is a UI end, which keld-wv bounds by its one owner of that rule,
-/// `keld_wv::webview2::WEBVIEW2_UI_END_BOUND`. The forced end adds D, and the
-/// harness's per-step `PRODUCT_DEADLINE` covers the rest of the step: the window
-/// close, the record writes and the control line.
+/// longest wait is a UI end (`ui_end_kill_switch`, which also covers the window
+/// close, the record writes and the control line); the forced end adds D.
 fn handover_kill_switch() -> Duration {
-    keld_wv::webview2::WEBVIEW2_UI_END_BOUND + QUIT_DEADLINE + PRODUCT_DEADLINE
+    ui_end_kill_switch() + QUIT_DEADLINE
 }
 
 /// The run-owned installation, profile root and control listener one cell uses.

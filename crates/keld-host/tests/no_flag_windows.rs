@@ -85,6 +85,17 @@ const PRODUCT_TITLE: &str = "KEL96 T4 Windows Fixture";
 const PRODUCT_DEADLINE: Duration = Duration::from_secs(20);
 const RENDERER_ACCEPT_POLL: Duration = Duration::from_millis(10);
 const CONTROL_LINE_LIMIT: usize = 4096;
+
+/// Kill switch over a host exit that includes a `WebView2` UI end (after `Quit` or a
+/// host-fatal Bun exit), never a synchronization wait. The UI end is bounded by its
+/// one owner, `keld_wv::webview2::WEBVIEW2_UI_END_BOUND`; `PRODUCT_DEADLINE` covers
+/// the rest of the exit. A healthy UI end is not bounded by `PRODUCT_DEADLINE`: the
+/// owner records healthy host releases of up to 59.1 s under full-core load and
+/// hosted `windows-latest` shutdowns past 15 s.
+fn ui_end_kill_switch() -> Duration {
+    keld_wv::webview2::WEBVIEW2_UI_END_BOUND + PRODUCT_DEADLINE
+}
+
 #[test]
 fn keld_dev_windows_helper() {
     let Some(project) = std::env::var_os("KELD_T4_HELPER_PROJECT") else {
