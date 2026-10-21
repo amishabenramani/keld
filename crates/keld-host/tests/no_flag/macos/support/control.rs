@@ -14,61 +14,98 @@ use std::time::Duration;
 use std::time::Instant;
 
 /// A fixture listener whose peers are accepted by polling a NONBLOCKING
-/// socket. One owner for every no-flag macOS fixture accept: a completed
-/// client `connect` does not mean the server side is already dequeued, so a
-/// single immediate `accept` may return `WouldBlock` (Darwin errno 35).
+/// socket. Every single-peer no-flag macOS fixture accept (observer TCP,
+/// control and recovery-generation Unix sockets) goes through
+/// [`try_accept_before_observing`]: a completed client `connect` does not mean
+/// the server side is already dequeued, so a single immediate `accept` may
+/// return `WouldBlock` (Darwin errno 35).
 pub(crate) trait FixtureListener {
     type Stream;
 
-    /// One native `accept`; the accepted stream is normalized to blocking
-    /// because BSD `accept` inherits the listener's `O_NONBLOCK`.
-    fn accept_blocking(&self) -> std::io::Result<Self::Stream>;
+    /// One native `accept`, with no flag changes.
+    fn accept_stream(&self) -> std::io::Result<Self::Stream>;
+
+    /// BSD `accept` inherits the listener's `O_NONBLOCK`; fixture readers
+    /// rely on blocking reads with their own read deadline.
+    fn normalize_blocking(stream: &Self::Stream) -> std::io::Result<()>;
 }
 
 impl FixtureListener for UnixListener {
     type Stream = UnixStream;
 
-    fn accept_blocking(&self) -> std::io::Result<UnixStream> {
-        let (stream, _) = self.accept()?;
-        stream
-            .set_nonblocking(false)
-            .expect("normalize accepted fixture stream");
-        Ok(stream)
+    fn accept_stream(&self) -> std::io::Result<UnixStream> {
+        self.accept().map(|(stream, _)| stream)
+    }
+
+    fn normalize_blocking(stream: &UnixStream) -> std::io::Result<()> {
+        stream.set_nonblocking(false)
     }
 }
 
 impl FixtureListener for TcpListener {
     type Stream = TcpStream;
 
-    fn accept_blocking(&self) -> std::io::Result<TcpStream> {
-        let (stream, _) = self.accept()?;
-        stream
-            .set_nonblocking(false)
-            .expect("normalize accepted fixture stream");
-        Ok(stream)
+    fn accept_stream(&self) -> std::io::Result<TcpStream> {
+        self.accept().map(|(stream, _)| stream)
     }
+
+    fn normalize_blocking(stream: &TcpStream) -> std::io::Result<()> {
+        stream.set_nonblocking(false)
+    }
+}
+
+/// Why [`try_accept_before_observing`] produced no peer.
+#[derive(Debug)]
+pub(crate) enum AcceptFailure {
+    /// The original deadline passed before an accept attempt could start.
+    Deadline,
+    /// `accept` failed with something other than an empty queue.
+    Accept(std::io::Error),
+    /// The accepted stream could not be returned to blocking mode.
+    Normalize(std::io::Error),
 }
 
 pub(crate) fn accept_before<L: FixtureListener>(listener: &L, deadline: Instant) -> L::Stream {
     accept_before_observing(listener, deadline, || {})
 }
 
-/// Accept the next queued peer, retrying only an empty queue until the
-/// caller's ORIGINAL deadline. The deadline is checked before every native
-/// attempt, so a peer dequeued after it never counts as timely. `on_empty`
-/// observes each real `WouldBlock`; it cannot substitute an accept result.
+/// Panicking form of [`try_accept_before_observing`] for test bodies.
 pub(crate) fn accept_before_observing<L: FixtureListener>(
     listener: &L,
     deadline: Instant,
-    mut on_empty: impl FnMut(),
+    on_empty: impl FnMut(),
 ) -> L::Stream {
+    match try_accept_before_observing(listener, deadline, on_empty) {
+        Ok(stream) => stream,
+        Err(AcceptFailure::Deadline) => panic!("fixture peer was not accepted before its deadline"),
+        Err(AcceptFailure::Accept(error)) => panic!("accept fixture peer: {error}"),
+        Err(AcceptFailure::Normalize(error)) => {
+            panic!("normalize accepted fixture stream: {error}")
+        }
+    }
+}
+
+/// Accept the next queued peer, retrying only an empty queue until the
+/// caller's ORIGINAL deadline. The deadline is checked before every native
+/// attempt, so no attempt starts after it. A peer dequeued by the last
+/// attempt that started before the deadline is accepted even if that one
+/// `accept` syscall returns just after it; that window is one syscall wide.
+/// `on_empty` observes each real `WouldBlock`; it cannot substitute an
+/// accept result.
+pub(crate) fn try_accept_before_observing<L: FixtureListener>(
+    listener: &L,
+    deadline: Instant,
+    mut on_empty: impl FnMut(),
+) -> Result<L::Stream, AcceptFailure> {
     loop {
-        assert!(
-            Instant::now() < deadline,
-            "fixture peer was not accepted before its deadline"
-        );
-        match listener.accept_blocking() {
-            Ok(stream) => return stream,
+        if Instant::now() >= deadline {
+            return Err(AcceptFailure::Deadline);
+        }
+        match listener.accept_stream() {
+            Ok(stream) => {
+                L::normalize_blocking(&stream).map_err(AcceptFailure::Normalize)?;
+                return Ok(stream);
+            }
             Err(error)
                 if matches!(
                     error.kind(),
@@ -78,9 +115,28 @@ pub(crate) fn accept_before_observing<L: FixtureListener>(
                 on_empty();
                 thread::yield_now();
             }
-            Err(error) => panic!("accept fixture peer: {error}"),
+            Err(error) => return Err(AcceptFailure::Accept(error)),
         }
     }
+}
+
+/// Darwin SDK sys/fcntl.h `O_NONBLOCK`.
+pub(crate) const O_NONBLOCK: std::ffi::c_int = 4;
+
+/// Independent census of a live descriptor's file status flags (`F_GETFL`).
+pub(crate) fn file_status_flags(descriptor: &impl AsRawFd) -> std::ffi::c_int {
+    // Darwin SDK sys/fcntl.h: F_GETFL=3, takes no variadic argument.
+    const F_GETFL: std::ffi::c_int = 3;
+    // SAFETY: the borrow keeps the descriptor live for this call. F_GETFL
+    // only reads descriptor status; no pointer, ownership transfer, lifetime
+    // extension or status mutation occurs in this independent census.
+    let flags = unsafe { fcntl(descriptor.as_raw_fd(), F_GETFL) };
+    assert!(
+        flags >= 0,
+        "file status flag census: {}",
+        std::io::Error::last_os_error()
+    );
+    flags
 }
 
 #[test]
@@ -114,6 +170,13 @@ fn accept_before_waits_for_a_peer_that_connects_after_real_would_block() {
     peer.join().expect("native peer joins");
     let mut accepted = outcome.expect("WouldBlock before the peer is not an accept failure");
     assert!(empty_polls >= 1, "the helper never saw a real empty queue");
+    // The listener is nonblocking and Darwin accept inherits that flag; the
+    // owner must hand back a blocking stream.
+    assert_eq!(
+        file_status_flags(&accepted) & O_NONBLOCK,
+        0,
+        "accepted TCP fixture stream stayed nonblocking"
+    );
     let mut byte = [0_u8; 1];
     accepted
         .set_read_timeout(Some(super::EVENT_DEADLINE))
@@ -269,17 +332,8 @@ impl<P: Read + AsRawFd> PipeCapture<P> {
         if let Some(pipe) = &pipe {
             // Darwin SDK sys/fcntl.h: retain every existing status flag while
             // enabling nonblocking reads for bounded fixture cleanup.
-            const F_GETFL: std::ffi::c_int = 3;
             const F_SETFL: std::ffi::c_int = 4;
-            const O_NONBLOCK: std::ffi::c_int = 4;
-            // SAFETY: pipe owns this live descriptor for the entire borrow;
-            // F_GETFL has no variadic argument and transfers no ownership.
-            let flags = unsafe { fcntl(pipe.as_raw_fd(), F_GETFL) };
-            assert!(
-                flags >= 0,
-                "read capture flags: {}",
-                std::io::Error::last_os_error()
-            );
+            let flags = file_status_flags(pipe);
             // SAFETY: same owned descriptor, integer F_SETFL argument from its
             // flags plus Darwin O_NONBLOCK. No pointers or lifetime extension.
             let result = unsafe { fcntl(pipe.as_raw_fd(), F_SETFL, flags | O_NONBLOCK) };

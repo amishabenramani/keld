@@ -1,5 +1,5 @@
 use crate::support::EVENT_DEADLINE;
-use crate::support::control::accept_before;
+use crate::support::control::{O_NONBLOCK, accept_before, file_status_flags};
 use std::io::{Read as _, Write as _};
 use std::net::{TcpListener, TcpStream};
 use std::sync::mpsc;
@@ -185,7 +185,6 @@ fn respond(stream: &mut TcpStream, body: &str) {
 
 #[test]
 fn accepted_observation_stream_preserves_split_header_and_body() {
-    const O_NONBLOCK: std::ffi::c_int = 4; // Darwin SDK 26.5 sys/fcntl.h.
     let listener = TcpListener::bind(("127.0.0.1", 0)).expect("real split-request listener");
     listener
         .set_nonblocking(true)
@@ -205,10 +204,10 @@ fn accepted_observation_stream_preserves_split_header_and_body() {
         .expect("nonblocking accepted fixture");
     // Darwin SDK 26.5 sys/fcntl.h: O_NONBLOCK=4. Observe the kernel flag,
     // independently of the normalizer and before any scheduling/traffic race.
-    assert_ne!(socket_file_flags(&accepted) & O_NONBLOCK, 0);
+    assert_ne!(file_status_flags(&accepted) & O_NONBLOCK, 0);
     prepare_stream(&accepted);
     assert_eq!(
-        socket_file_flags(&accepted) & O_NONBLOCK,
+        file_status_flags(&accepted) & O_NONBLOCK,
         0,
         "accepted request reader stayed nonblocking"
     );
@@ -248,25 +247,6 @@ fn accepted_observation_stream_preserves_split_header_and_body() {
         assert_eq!(actual, body);
         writer.join().expect("split-request writer completes");
     });
-}
-
-fn socket_file_flags(stream: &TcpStream) -> std::ffi::c_int {
-    use std::os::fd::AsRawFd as _;
-    unsafe extern "C" {
-        fn fcntl(fd: std::ffi::c_int, command: std::ffi::c_int, ...) -> std::ffi::c_int;
-    }
-    // Darwin SDK 26.5 sys/fcntl.h: F_GETFL=3, takes no variadic argument.
-    const F_GETFL: std::ffi::c_int = 3;
-    // SAFETY: stream retains the live socket for this entire shared borrow.
-    // F_GETFL only reads descriptor status; no pointer, ownership transfer,
-    // lifetime extension or status mutation occurs in this independent census.
-    let flags = unsafe { fcntl(stream.as_raw_fd(), F_GETFL) };
-    assert!(
-        flags >= 0,
-        "socket flag census: {}",
-        std::io::Error::last_os_error()
-    );
-    flags
 }
 
 fn await_byte_count(observed: &mpsc::Receiver<usize>, expected: usize) {
