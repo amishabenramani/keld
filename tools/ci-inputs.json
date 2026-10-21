@@ -213,7 +213,7 @@
         "README.md",
         "docs/audits/*"
       ],
-      "contract": "Copies README and the audit tree and reads historical publication anchors. Live verifier runs unconditionally for ancestry/history changes. The Windows architecture closeout tests (tools/test_windows_architecture_closeout.py, importing the closeout tool and the ledger generator) are offline unit tests over in-memory CSV (#942).",
+      "contract": "Copies README and the audit tree and reads historical publication anchors. Live verifier runs unconditionally for ancestry/history changes.",
       "reader_set": "audit-readers"
     },
     {
@@ -374,7 +374,7 @@
         "packages/*",
         "justfile"
       ],
-      "sha256": "84c70db30184c4d6452967cba903811eb7febd0fc63bbb0cb51292e1ea5590cd"
+      "sha256": "2eea5ded911b56cfcc602f71dccf1f6d6d05c4c1aee8f8311fd6d64f59e4282e"
     },
     "policy-readers": {
       "patterns": [
@@ -384,17 +384,14 @@
         ".githooks/*",
         "rust-toolchain.toml"
       ],
-      "sha256": "b667f0c26dbcbaece3a7ffe62fb452440746a89ca77d1802def98f0ea9f45db4"
+      "sha256": "aed3e7f2bb174b9d23efdd3885c2445863ff0a3966aec52c352ec26a88c2e290"
     },
     "audit-readers": {
       "patterns": [
         "docs/audits/*.py",
-        "justfile",
-        "tools/windows_architecture_closeout.py",
-        "tools/test_windows_architecture_closeout.py",
-        "tools/windows_architecture_ledger.py"
+        "justfile"
       ],
-      "sha256": "9f55e247684735cefccaf74d40c3d67a522e9f0f2695e82ac57253d2702e51e7"
+      "sha256": "0c1a16cd84136bbdfba1ae89eb3a56ff2a61027e890de2c9ee3b1b373ab98b07"
     },
     "rustdoc-readers": {
       "patterns": [
@@ -404,13 +401,13 @@
         "rust-toolchain.toml",
         ".cargo/*"
       ],
-      "sha256": "96e1d3de5cf240f8b45e50e32bdccdeaa99c2fea992a39f952f1484956bc0848"
+      "sha256": "6e4a111c2d56e4e359ed30e0305db0ee135c81d9d52406ced9cfe51e2ff78c6c"
     },
     "dependency-command": {
       "patterns": [
         "justfile"
       ],
-      "sha256": "8b8b9c8c2e932b0733c6f31a6ecf4e3630fdddb1189877e414eee316f9882218"
+      "sha256": "9ade1617cb85c5d5076d49c8cdca088c1a7136907465d94938c1243753808701"
     },
     "status-test-readers": {
       "patterns": [
@@ -420,12 +417,12 @@
         "rust-toolchain.toml",
         "justfile"
       ],
-      "sha256": "bad335fd87f7362aa87ddc63eec6f36d3c40d2cc40735bbf9dab870194f51364"
+      "sha256": "43632bd843760d67eb8145f364039354aa3dc96c6f540ddab01e5c5b27232703"
     }
   },
   "live_inputs": {
     "agent-context": "Ignored/local workspace task and resource records are read by tools/workspace.py check; malformed records can fail with identical tracked bytes.",
-    "audit-docs": "Publication ancestry, historical report bytes and Git object availability are read by docs/audits/verify.py, and tools/windows_architecture_closeout.py --check reads the pinned b9b3c10a tree objects; missing/replaced history can fail with identical tracked bytes.",
+    "audit-docs": "Publication ancestry, historical report bytes and Git object availability are read by docs/audits/verify.py; missing/replaced history can fail with identical tracked bytes.",
     "product-status-check": "The ledger names evidence commits whose object availability and ancestry are validated; that live Git state is not represented by changed source paths.",
     "deny": "cargo deny check consumes the mutable advisory database as well as the lockfile; a new advisory can change its result with identical tracked bytes."
   },
@@ -433,7 +430,7 @@
     "patterns": [
       "crates/*"
     ],
-    "membership_sha256": "a78e4274577ad94fdce29e2b879a63aee474f70e459d28ccf0df7036ae39d26d",
+    "membership_sha256": "bf150256c341850de3fb635bec7d7b73267a8d97ccbe7ca5c87119244398a6b0",
     "contract": "Broad census binds path membership only: new/removed crate paths fail closed. Existing crate-content edits select Rust through the crates/* input edge. A new cross-tree read in an existing source must register that reader and its input edge in the same change; exact-reader content digests then guard future drift."
   },
   "rust_package_inputs": {
