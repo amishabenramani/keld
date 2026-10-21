@@ -194,8 +194,8 @@ Recipes are grouped by developer task and lifecycle stage:
 | Recipe | Primary fallback | Filesystem impact | Cost | Notes |
 |---|---|---|---|---|
 | `just hello` | `cargo run -p keld-host --bin keld-host -- --hello` | Writes `target/` artifacts | Moderate | Diagnostic window only; not the app-session demo |
-| `just fmt-check` | `cargo fmt --all --check` | None (read-only) | Fast | Fails on unformatted code |
-| `just fmt` | `cargo fmt --all` | **Modifies tracked files** | Fast | Overwrites unformatted Rust files in place |
+| `just fmt-check` | `cargo fmt --all --check` then `tools/fmt_included.sh test` and `--check` | None (read-only) | Fast | Fails on unformatted code |
+| `just fmt` | `cargo fmt --all` then `tools/fmt_included.sh` | **Modifies tracked files** | Fast | Overwrites unformatted Rust files in place |
 | `just clippy` | `cargo clippy --workspace --all-targets -- -D warnings` | Writes `target/` artifacts | Moderate | Warnings treated as errors |
 | `just test` | `cargo nextest run --workspace --profile ci` (Linux: `xvfb-run -a`; partial fallback: `cargo test --workspace`, on headless Linux `xvfb-run -a cargo test --workspace`) | Writes `target/` artifacts | Heavy | Nextest enforces zero retries; Linux host suite requires virtual display (`xvfb-run -a`); raw `cargo test` is partial fallback |
 | `just doc` | `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps` | Writes `target/doc/` | Moderate | Builds rustdoc without dependencies |
@@ -224,8 +224,8 @@ policy statement, **not** an executable raw substitute:
 | `just` target | Raw alternative or availability |
 |---|---|
 | `just hello` | `cargo run -p keld-host --bin keld-host -- --hello` |
-| `just fmt` | `cargo fmt --all` |
-| `just fmt-check` | `cargo fmt --all --check` |
+| `just fmt` | `cargo fmt --all` then `tools/fmt_included.sh` |
+| `just fmt-check` | `cargo fmt --all --check` then `tools/fmt_included.sh test` and `tools/fmt_included.sh --check` |
 | `just clippy` | `cargo clippy --workspace --all-targets -- -D warnings` |
 | `just test` | `cargo nextest run --workspace --profile ci` (Linux requires virtual display: `xvfb-run -a cargo nextest run --workspace --profile ci`) |
 | `just doc` | `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps` |
@@ -293,7 +293,7 @@ job count and trigger details. Its stable responsibilities are:
 
 | Job | Runner(s) | What it does |
 |---|---|---|
-| `rustfmt` | ubuntu | `cargo fmt --all --check` |
+| `rustfmt` | ubuntu | `cargo fmt --all --check`, then `tools/fmt_included.sh test` and `--check` for `include!`d and macro-body `#[path]` files `cargo fmt` never visits |
 | `clippy + test` | ubuntu **and** macos **and** windows, `fail-fast: false` | `cargo clippy --workspace --all-targets -- -D warnings`, then `cargo nextest run --workspace --profile ci`; plus `cargo doc --workspace --no-deps` with `RUSTDOCFLAGS: -D warnings` on ubuntu only |
 | `MSRV` | ubuntu | reads `rust_version` out of `cargo metadata` and runs `cargo check --workspace --all-targets` on that exact toolchain — so the job can never drift from `Cargo.toml` |
 | `cargo-deny` | ubuntu | licenses / advisories / bans / sources per `deny.toml` |
