@@ -122,7 +122,12 @@ flowchart TB
 ```
 
 - **keld-host** owns every OS resource. App developers never compile it — they download a
-  signed prebuilt binary. "No Rust toolchain for app developers" is principle #5.
+  prebuilt binary, and the host in a shipped app is signed. Target behaviour on Windows
+  (KEL-19 T3, blocked on an authenticated Keld release channel): the packaging-input
+  host is distributed unsigned, and `keld build` verifies its digest from that channel
+  and embeds the app identity before the app publisher applies the only signature
+  (`docs/specs/kel254-expected-identity-container.md`). "No Rust toolchain for app
+  developers" is principle #5.
 - **The app process** is the developer's own code with the full npm world but **zero
   ambient OS authority**. It can crash and be restarted without tearing down windows,
   because the host — not the app — owns the webviews.
@@ -206,8 +211,8 @@ platform-scoped slices, and links every current claim to tracked code/test/CI ev
 plus the immutable commit at which that evidence was verified.
 
 The seven architecture documents remain normative target design; they do not imply
-implementation. Linear remains the owner of live issue status, assignees, dependencies,
-and claims. The status-table check compares ledger crate records with Cargo workspace
+implementation. The tracker issue (Linear, or GitHub under #517) remains the owner of live
+issue status, assignees, dependencies, and claims. The status-table check compares ledger crate records with Cargo workspace
 metadata without making documentation consistency a product or real-OS completion claim.
 
 Run `just product-status-check` for semantic consistency and `just llms-check` for
@@ -217,8 +222,9 @@ forces full-corpus Mermaid assurance; gitleaks remains GitHub-only.
 
 ## How work is tracked
 
-- **Linear** is the issue tracker: workspace `gyldlab-keld`, team/project **KELD**, issues
-  numbered **KEL-\***. You will see these IDs everywhere in the code — `KEL-27` and
+- **Linear** is the default issue tracker: workspace `gyldlab-keld`, team/project **KELD**,
+  issues numbered **KEL-\***; a GitHub issue only when no live Linear issue covers the work
+  and Linear cannot take one (#517, `docs/agents/workflow.md` § Tracker issue). You will see these IDs everywhere in the code — `KEL-27` and
   `KEL-28` head the Windows and Linux `keld-wv` backend modules, `KEL-29`/`KEL-30`
   head the CLI and IPC modules. Grepping a KEL number is a fast way to find every file
   that participates in a work item.

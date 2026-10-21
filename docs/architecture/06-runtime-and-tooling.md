@@ -46,8 +46,14 @@
   ordered return, including CLI loss; an uncatchable host `SIGKILL` can retain
   that owner-private stage for a future bounded GC policy.
 - **Windows no-flag primary (KEL-96/T4 Windows slice):** `keld dev` creates a
-  fresh protected-current-user stage, launches `keld-host.exe` with no Keld
-  flag, forwards logs and retains only the host handle plus stdin-v1 writer.
+  fresh protected-current-user stage and an unnamed, non-inheritable,
+  kill-on-close outer attempt Job, then launches `keld-host.exe` with no Keld
+  flag, forwards logs and retains the host handle, stdin-v1 writer and sole
+  outer Job handle. Before application resources, the launcher assigns the
+  host to that exact Job, reads membership back, and releases a fixed startup
+  token on the private stdin pipe. Missing, extra or malformed token bytes,
+  pipe loss, or Job-assignment failure refuses startup. This outer Job is
+  process-family cleanup only; it grants no updater write authority.
   The host starts in a separate Windows process group with Ctrl+C disabled.
   Interactive terminal Ctrl+C retains the CLI's native interrupt exit while
   closing its lease, so the host can forward captured output and finish its
@@ -66,7 +72,7 @@
   termination. Accepted shutdown also closes successor
   admission without killing the current child before its correlated reply.
   The host clears inheritance and starts watching the stdin-v1 lease before the
-  first Bun spawn; a locked `PeekNamedPipe` preflight rejects already-observed
+  first app resource; a locked `PeekNamedPipe` preflight rejects already-observed
   EOF before listener/child or WebView startup. It preserves lease-read/tail
   errors through the window result, and gates listener/child and initial
   WebView2 creation under the common shutdown transition. A bounded existing
@@ -75,18 +81,52 @@
   `KELD-CORE-033` with its retained PID/status; crash-loop/runtime failures use
   the same outer code with their `KELD-RUNTIME-*` cause nested.
   Correlated Quit and CLI EOF use the shared
-  quiesce/link-close/supervisor-reap/UI-exit tail. Normal CLI-owned completion
-  removes the stage after the host exits. Windows staging atomically protects,
+  quiesce/link-close/supervisor-reap/UI-exit tail. Windows staging atomically protects,
   pins and validates `.keld`/`dev` before nonce creation and pins the nonce
   before the first staged file write, rejecting or preventing junctions without
   writing through them. The installed
   `keld.windows-dev-stage-cleanup/v1` role is the approved surviving
   post-CLI-death stage-deletion owner: it validates the exact stage and host
-  identity, waits for that host object, and removes the stage. Before the first
-  Bun spawn, the no-flag host also installs KEL-78/T3's unnamed,
-  non-breakaway, kill-on-close Job, so abnormal host death reaps Bun and its
-  enrolled descendants. KEL-101 separately owns the named-pipe/DACL boundary;
-  this KEL-96 slice makes no LPAC or privileged-dispatch claim.
+  identity, then waits for a one-shot cleanup release. The CLI sends that
+  release after the direct host exits. Its inherited Job handle has only query
+  and terminate rights and is bound to that exact host before helper readiness;
+  it cannot assign processes or change Job limits. If the CLI disappears, pipe EOF gives the host a
+  bounded graceful-shutdown interval; if it stalls, the helper terminates the
+  exact Job. In either case, the helper deletes the stage only after the direct
+  host exits and Job accounting reports zero active processes. Failed proof
+  leaves the stage for safe recovery. Before WebView/app startup, the no-flag host also
+  installs KEL-78/T3's separate unnamed, non-breakaway, kill-on-close inner
+  Job, so host-only death reaps Bun and its enrolled descendants even while the
+  launcher survives. The two Jobs have separate owners and separate host-death
+  falsifiers. The host keeps the inner Job's handle as a capability that nothing
+  closes while it runs, and clears that Job's kill-on-close exactly once, on a
+  `PerUserDirect` exit after a committed update, after a census of the Job shows only
+  the host and the committed candidate's family (KEL-53 §4 "Candidate release after
+  commit", slice S6b3); every other exit, and every abnormal death before that clear,
+  keeps the kill-on-close reap. The CLI keeps the full outer Job handle; only the
+  reduced cleanup duplicate reaches the sentinel, never the host or Bun. This
+  `keld dev` proof does not make it an installed updater launcher or select a
+  MachineSeamless writer mechanism. KEL-101 separately owns the named-pipe/DACL
+  boundary; this KEL-96 slice makes no LPAC or privileged-dispatch claim.
+- **Windows installed-root product direction (KEL-254/KEL-53):** the default direct
+  install is per-user under the user's application location, with automatic updates
+  under the same-user authority and no UAC. Program Files installs support explicit-UAC
+  activation, and an opt-in seamless mode only after KEL-270 supplies its lifecycle
+  proof and a separately approved architecture/spec amendment selects and qualifies
+  the privileged authority. KEL-270 does not select the mechanism. All direct modes
+  share one KEL-53 updater state machine; only acquisition of its activation write
+  lease differs. The ordinary application host and
+  Bun roles remain non-SYSTEM. MSIX, App Installer, Store, enterprise and other
+  deployment-owned installs remain with that owner and cannot acquire a competing Keld
+  writer. This is approved product direction, not evidence that the seamless authority
+  is implemented. KEL-96 boots the Windows dev stage only under a valid dev lease;
+  without one it boots only the authenticated installed package that KEL-53's
+  executable-located selection admits (KEL-254 T3 Part B). That selection also admits a
+  machine-mode installation read-only and keld-core applies no install-mode filter, so a
+  machine-mode installed boot is reachable but unqualified: native boot evidence covers
+  `PerUserDirect` alone, and each machine-mode cell stays unqualified until KEL-53's
+  native install-mode proof and the consumer's own native boot evidence exist for it.
+  This is not KEL-254 installed-boot acceptance; KEL-19 T2 and KEL-254 T4 remain open.
 - **macOS host-death guardian (KEL-78/T2b):**
   `keld_runtime::macos_guardian` is the live shared cleanup owner.
   `GuardianBootstrap` mints an authenticated private registration link, owns
@@ -144,6 +184,39 @@
   manifest, one writable role root, and exact authenticated socket mounts. It
   does not create a second restart loop. Other named roles and unproved profile
   or artifact combinations remain fail-closed.
+
+### 1.0 Platform-scoped runtime unsafe contracts
+
+This section is conditional guidance for native runtime owners. Read it when editing
+the named Windows Job/LPAC, macOS Guardian registration/pre-exec, or Linux strict
+paths. The always-loaded [crate AGENTS.md](../../crates/keld-runtime/AGENTS.md) is the
+sole exact-path/operation production `unsafe` allowlist (root AGENTS.md); this section
+adds no sanction and owns only rationale, resource and native-proof details.
+
+**Windows Job Win32 FFI and KEL-270 scope.** The exact file list and KEL-270 Win32 API whitelist live only in the crate AGENTS.md; change them there with independent `unsafe` gate evidence.
+
+**macOS Guardian pre-exec/host-retention seam.** `macos_guardian/spawn_admission.rs` only. Before fork, the parent creates the pipes, owns their exact descriptor identities and starts the reporter; the pre-exec closure may use only fixed-stack `close`, `getpid`, `write`, `poll`, `read` and `_exit` with no heap allocation, Rust locks or general I/O. The child closes every inherited parent-only permit writer **before** waiting, and runs no Bun code without an authenticated host-retention response. Reporter registration errors send explicit denial, never a release byte. Guard with real macOS/Bun crash-and-denial tests, exact test discovery, and warning-denied Clippy. This is not proof of cleanup for a SIGSTOP-suspended pre-exec child or detached descendants; those require a separately owned containment design.
+
+**macOS registered-child kernel proof.** `macos_guardian/process_group.rs` uses read-only, exact-size `proc_pidinfo(PROC_PIDTBSDINFO)` to verify a reported KGR1/KGC1 group leader is the retained Guardian's actual direct child before the host's exec-retention ACK. The host retains the kernel process-start seconds/microseconds and real UID with that group; before a host-side fail-safe `killpg`, it rechecks the leader's PID, PGID and birth. A live leader with a changed birth refuses the signal. If the original leader is gone and no group exists, cleanup is already satisfied. If that original leader is reaped but the group still contains descendants, the host preserves group-wide cleanup: Darwin's PID allocator retains an occupied PGID while members exist. An inaccessible live leader or mismatched identity still fails closed. Pre-registration rejection never accepts arbitrary numeric kill authority. Real macOS adversarial tests cover birth mismatch with outsider survival, original leader reaped with descendant cleanup, authenticated malformed/zero-byte KGR1 and initial KGC1, and pre-/post-ACK Bun processes.
+
+**Guardian-side birth-attested group custody and native retirement.** The one-group, supervised and generation leases independently retain a `LocalGroupWitness` (original macOS kernel child PID, real UID and birth time) sampled by the Guardian's parent-side pre-exec reporter **before** it sends authenticated KGR1/KGC1 group records. The Guardian consumes this witness on local revoke rather than trusting a stale numeric `group_pid`; a discovered but unproven PID fails closed and cannot authorize a group signal. Existing test-only synthetic control fixtures have an explicitly cfg(test)-limited legacy raw-PGID path, not a shipping bypass. The host's KGC1 `CONTROL_CLEARED` cannot discard its birth-attested group custody merely because a Guardian reported `CONTROL_REVOKED` and claimed `CLEAR`: the host independently retires the still-enrolled group **before** publishing CLEARED and allowing successor preparation. Native real Bun + same-PGID descendant tests prove the wrong-order CLEAR no longer silently strands the group, and a Guardian-local corrupted birth witness cannot kill another test-owned group. These checks remain read-then-signal observations, not kernel-pinned atomic group handles.
+
+**macOS live-generation shutdown: reap before `CONTROL_CLEAR`.** A native CI failure on `dev_lifecycle::dev_lease_bytes_are_non_authority_and_only_eof_stops_the_host` exposed a distinct kernel scheduling cut. After the Guardian performs an authorized birth-attested `SIGKILL` on the actual Bun group, the original leader can remain as an *unreaped zombie* owned by the Guardian's retained `Child`. Darwin may then report no inspectable leader through `proc_pidinfo`/`getpgid` while `killpg(group, 0)` yields `EPERM` rather than `ESRCH`. The host **must** reject that ambiguous group state, not falsely claim a clear or relax its outsider-signal protections. Guardian KGC1 now uses a private spawned-child revocation path: revoke the exact role/IPC lease, signal only the originally attested group, wait/reap the **same owned direct `Child`** within the existing shutdown deadline, and only then request host `CONTROL_CLEAR`. The host still independently retires the enrolled group before sending `CONTROL_CLEARED`, and failed original-child reaping prevents that ACK. Today that host retirement is a birth-attested `killpg(SIGKILL)` whose success means the signal was delivered, not that the group is gone: after a delivered `killpg` the host does not wait for `kill(-pgid, 0)` to report `ESRCH`, so a signalled member can still be exiting when `CONTROL_CLEARED` is sent. A bounded wait for `ESRCH` exists only on the path where the original leader is no longer inspectable and the group probe returns `EPERM` (at most a quarter of the shutdown deadline); `EPERM` alone never certifies absence. The post-kill absence wait is not implemented and remains open on #947 / review thread r4308763083. Other supervisor leases retain their existing default revocation behavior, and pre-spawn error paths retain ordinary lease-only cleanup. A real macOS test with authenticated KGC1, Bun and a same-PGID `/bin/sleep` descendant reproduced the original `UnexpectedEof` plus unproven-leader error **before** the change, passed afterward, and returned to red when the exact post-signal original-child reap was deliberately removed. This is a bounded cleanup-order repair, not a lifetime-pinned PGID handle, process-escape guarantee or wider timeout.
+
+**Authenticated Guardian startup versus host shutdown.** Guarded Guardian validates the host-only liveness descriptor **before** establishing authenticated KGC1 control. A legitimate immediate `S` after authentication but before a first supervisor generation receives exactly one `KSA`, then requires bounded host EOF; an early `Q` or duplicate/conflicting shutdown byte is rejected without a forged acknowledgment. Native subprocess cuts after private authentication **and** immediately after the no-pending-S probe (before synchronous first-PREPARE startup) prove that a real S write/flush receives KSA and the Guardian exits without executing Bun. The post-probe case first failed because host recovery denial rejected initial PREPARE before the Guardian could read S. On that exact startup-failure path, the Guardian now distinguishes authenticated S from bare EOF, sends KSA only after real S, and requires bounded host EOF. The host accepts only its privately typed first-PREPARE recovery-denial result after verified KSA, permanent initial denial, and absence of a registered group. The host retains its original recovery mutex through the physical S write/flush so a control worker cannot observe denied recovery before the actual orderly byte is queued; it drops the lock before reading KSA or joining the worker. A Guardian that has already received an authentic initial `CONTROL_PREPARED` stores that admission fact and cannot reinterpret a later local factory/spawn/codec error—even `UnexpectedEof`—as the host denying initial PREPARE. Native adversarial tests exercise a held real after-PREPARED failing factory and a complete first KGC1 PREPARE decoded by the host while its denial-before-S mutex remains held; mutation controls independently demonstrate false-clean startup failure and early denial exposure when each check is removed. No new timeout, privilege, wire record or public API was introduced. These exercised cuts do not establish every later shutdown interleaving. The no-flag host therefore cancels an unbound startup after dev-lease loss with that orderly S, never Q; a real host test with the lease closed before Bound failed with the Guardian's missing KQA and passes with S. When a stop arrives after a successor was prepared but before it was spawned, the Supervisor drops the unspawned command (and with it the only child-side pre-exec PID writer) before revoking its lease, so revoke proceeds at pipe EOF instead of waiting out the PID-receipt deadline that would overrun the host's own Guardian-exit deadline.
+
+**Post-shutdown `CONTROL_SPAWNED` admission.** An already minted `CONTROL_PREPARED` locator does not grant future execution. The host now holds the same recovery decision mutex across native `SPAWNED` lineage/birth validation, registered-generation retention and the complete `CONTROL_REGISTERED` write. The physical host `S` is serialized against that release: if permanent denial wins first, no `REGISTERED` or Bun pre-exec permit may be emitted. A late, real Guardian-child `SPAWNED` takes temporary birth-attested host custody, terminates that native group and revokes its prepared role lease before reporting a fatal refused-registration result. Unexpected, malformed or foreign-PID records never gain signal authority. A failure-first real macOS test stops the Guardian reporter before its KGC1 `SPAWNED`, flushes the host's actual S, and independently witnesses the host decoding the full post-S SPAWNED record, verifying the original Guardian-child kernel birth, refusing the corresponding REGISTERED gate, retiring the group and observing no Bun JavaScript marker. The pre-fix host wrongly reached REGISTERED; after the fix the native denied child does not receive an exec permit. This intentionally **does not promise clean KSA** when an initial native spawn was already in flight: the host reports that shutdown cut as a terminal startup/refusal if it cannot attribute the acknowledgment, rather than certifying an unfinished generation. A separate real-process KGC1 state regression proves that after `REVOKE` consumes the prepared lease, a later `SPAWNED` cannot use even a genuine test-owned live child as a native signaling target; removing the missing-lease guard makes the test fail. This latter test exercises host recovery state, not a physical S writer. Existing read-then-signal PGID limitations remain; no kernel-pinned group handle or outside-process custody was introduced.
+
+**macOS reaped-member ambiguity after Guardian CLEAR.** The later hosted macOS `dev_lifecycle::dev_lease_bytes_are_non_authority_and_only_eof_stops_the_host` run exposed another kernel timing cut even with the original Bun `Child` reaped: a killed same-group descendant can temporarily remain a zombie under a different parent. The registered leader then yields `getpgid(leader) == ESRCH`, while `kill(-PGID, 0)` yields `EPERM` until that member is itself reaped. The previous host fail-closed path returned immediately, closed authenticated KGC1, and made the Guardian's orderly shutdown fatal. The host now retries **only that ambiguous, read-only absence probe** for at most one quarter of the existing five-second shutdown deadline, using the existing control polling interval. It accepts retirement only on genuine `ESRCH`; if a signallable group is observed at the FIRST probe with the original leader already missing, the original retained-group kill path still applies; after any EPERM ambiguity, only ESRCH can succeed and a newly signallable group fails closed. No EPERM is accepted as absence, no unknown group gains kill authority, and the shipping timeout remains unchanged. A deterministic macOS test with two real test-owned same-group children, the original leader reaped and the killed second member temporarily left as a zombie, reproduced the exact previous `registered group identity unavailable` fault before the patch and passed after it. That local proof does not yet imply a green hosted macOS rerun or atomic kernel custody.
+
+**macOS containment limit and stronger packaged owner.** The birth check is a point-in-time observation, **not** an atomic kernel-bound signal handle: there remains a check-to-`killpg` race, and a denied unknown group may contain legitimate escaped descendants. A process group alone cannot prevent a Bun child calling `setsid`/changing groups, guarantee that a `SIGSTOP`-suspended pre-exec child promptly processes pipe EOF, or clean up when both the host and Guardian are killed after Bun exec. macOS offers no portable unprivileged parent-death kill primitive in this raw executable-adjacent stage. Apple's app-bundled XPC/launchd custody and `AbandonProcessGroup` rules are a distinct packaged, independently validated candidate (KEL-78 primary-source ledger M13), not an authorized implicit dependency of the raw-stage Guardian. Do not admit a `strict` containment state or claim universal descendant cleanup until that separate lifecycle, signing/sandbox and adversarial OS evidence exists.
+
+Native negative controls explicitly demonstrate both unsolved schedules: a real Bun + same-group descendant remains live when **host and Guardian** are killed together after exec, and a real Bun `detached: true` child moves to a separate process group/session and survives ordinary Guardian cleanup. Each test observes the escape before its separate birth-attested test-only rescue. Neither test is evidence of universal containment. Launchd/XPC requires a new signed packaged-owner design with explicit lifecycle, app-sandbox and installation approvals; no raw-stage fallback may silently register a persistent OS service.
+
+The platform-scoped rules above do not waive the common default-deny host
+contract. Native acceptance must exercise real process-group, FD inheritance and
+cleanup behavior. Test-layout and OS evidence are owned by .agents/test-layout.md
+and .agents/testing.md, respectively.
 
 ### 1.1 Named role and lifecycle contract (destination, KEL-75)
 
@@ -275,7 +348,9 @@ command". Garbage verbs are `KELD-CLI-046` (exit 2).
 **The Bun bootstrap env var is `KELD_APP_LINK`, not
 `KELD_LINK`/`KELD_SHM`/`KELD_CONTRACT`.** The separate
 `KELD_DEV_LEASE=stdin-v1` value is private CLI-to-host liveness classification:
-it is removed at macOS guardian spawn or Windows primary spawn and never reaches Bun or selects authority.
+it is removed at macOS guardian spawn or Windows primary spawn and never reaches Bun or
+grants authority. On Windows it only routes boot to the owner-private `DevStage`
+validator instead of installed admission (KEL-254 AC2).
 §1's contract above is the destination shape; `keld-runtime`'s pinning/download of Bun,
 the destination env vars, `--inspect` passthrough, and Bun watch hot-restart are not
 built yet. Spawn/backoff/crash-loop supervision **is** built (KEL-70):
@@ -371,13 +446,36 @@ KEL-78; KEL-96 consumes only the landed per-OS mechanisms.
 The Bun side speaks kipc directly — `packages/@keld/kipc/src/transport.ts` is the
 one TypeScript framing/HELLO/deadline/write owner (KEL-136). `keld create` embeds
 that file as `src/kipc-transport.ts`; the hello echo adapter and `@keld/electron`
-lifecycle adapter import it. `DirectedReader` on that transport parks lifecycle
-Events while waiting for Echo Reply so stock echo survives a preceding `Ready`.
+lifecycle adapter import it, and both open the role's link through its GH-527
+transport Worker (#528 T3). That Worker's entry is the transport file itself
+(`new Worker(new URL(import.meta.url))`), so the transport MUST stay its own staged
+file and MUST NOT be bundled into `src/main.ts`; `WorkerLink.open` refuses to run from
+any other file name. A release build of the transport (the future `keld build`,
+KEL-19) MUST build it as that separate file with `KELD_KIPC_RELEASE` defined as `true`
+and syntax minification, which removes every test-hook code path
+(`packages/@keld/kipc/src/release-build.test.ts`). `keld create` already writes every
+app's `src/kipc-transport.ts` with that constant defined
+(`crates/keld-cli/src/template.rs` `KIPC_RELEASE_DEFINITION`), so no created app can
+reach the hooks (`crates/keld-cli/tests/bun_echo.rs`
+`created_transport_registers_no_test_hook_seam`). Only the in-repo canonical file keeps
+them, reachable from `src/test-hooks.ts` under `KELD_KIPC_TEST_HOOKS=1`. The
+build path MUST keep the staged basename rule: the transport ships as its own file
+named `kipc-transport.ts` or `.js`. `WorkerLink.open` refuses a hashed chunk name, a
+transport that is the process entry (`bun build --compile` output included), and a
+call from inside a transport Worker. A name is not identity, so it also refuses a file
+whose line-1 transport stamp is not the SHA-256 of the bytes after it (#653,
+`TRANSPORT_STAMP_PREFIX`). It checks this before the Worker exists, so a bundle named
+`transport.js` is never evaluated by a transport Worker. `bun run echo:generate`
+restamps the canonical file and `keld create` restamps the copy it writes; the future
+`keld build` MUST stamp the transport file it stages.
 The non-release boot compiler copies that sidecar
 into the owner-private stage when present so `keld dev` Bun can resolve it.
 Linux strict remaps the entry to `/code/main.ts` and, when the sidecar exists,
 binds `src/kipc-transport.ts` to `/code/kipc-transport.ts` as a second file
-mount (directory-wide `/code` mounts stay forbidden). KEL-98's bounded cold generator
+mount (directory-wide `/code` mounts stay forbidden). The transport Worker loads from
+that second mount; no third file is bound
+(`crates/keld-runtime/tests/linux_strict_boundary.rs`
+`worker_link_self_entry_runs_from_the_two_staged_files`). KEL-98's bounded cold generator
 derives the checked-in `src/echo.generated.ts` payload declarations from the Rust echo
 structs for `keld create`; type-only use keeps that source-time file out of the runtime
 stage. General `keld gen` / `@keld/schema` codegen (KEL-13) is not built, so this shared
@@ -426,15 +524,225 @@ the [product-status ledger](../engineering/product-status.md#packages) owns pack
   with exact no-migration policy admission. `keld-pack::produce_windows_v0` supplies
   the matching Windows-host streaming producer as a library API. Windows extraction
   binds the receipt's installation/key/profile to an actual owner-private, fixed-NTFS
-  staging root and retains flushed/read-back files in an unpublished incomplete stage.
-  The platform loader that proves installer provenance protection, live feed
-  orchestration, completed-version publication, activation, health and recovery remain
-  unimplemented.
+  staging root and retains flushed/read-back files in an unpublished incomplete stage;
+  PerUserDirect can complete an immutable stage under the retained writer lease without
+  publishing or selecting it. KEL-266 implements actual-SYSTEM machine-baseline
+  initialization and a read-only protected baseline loader. KEL-270 adds the
+  PerUserDirect baseline/bootstrap primitive with owner-private records and provenance-last
+  commit, and the common journaled transaction: PerUserDirect journals, publishes and
+  activates a completed stage, binds an exact attempt health receipt, commits or rolls back, and resumes from
+  every persisted cut under the writer lease. Its journal is `keld.activation-journal/v2`
+  (KEL-270 T4d S3): minting the attempt identities writes nothing, and a separate call
+  journals them with the owner's process and initiating-logon facts, so an owner can hold
+  its connect-back endpoint before any record reveals them. A landed v1 journal still
+  decodes; it carries no owner facts, so it can admit no candidate claim. Its phase
+  writes keep v1 until a resumed unlaunched attempt's re-mint record supplies the resumed
+  owner's facts; that record and every later write of the attempt are v2.
+  `select_windows_active_package` mints the
+  journal-free `ActivePackageSelection` (KEL-254 AC4): under the shared snapshot lease it
+  requires `current` to equal last-known-good or previous-known-good within the floor,
+  admits only referenced versions, gives each the baseline loader's metadata admission
+  plus its signed no-migration package policy, refuses a pending journal as
+  journal-bound and a lease sharing conflict (normally the held writer lease) as
+  `WriterActive`, and keeps the selected version,
+  its tree and the protected ancestry pinned. It carries the protected installation
+  identity and publisher scope. When the
+  `current` record is absent or does not decode, a `PerUserDirect` selection republishes
+  last-known-good under the exclusive writer lease after re-validating both known-good
+  slots and the floor; a decoded non-known-good `current` still halts, and a machine
+  installation refuses because only its elevated writer may repair. In
+  `MachineUacDirect` that refusal (once the same read-only checks of both known-good
+  slots and the floor pass under the snapshot lease; a failed check keeps its own error)
+  and the refusal of a pending journal in any phase are the typed
+  `MachineRecoveryRequired` effect: the ordinary process writes nothing, and until the
+  helper's recovery-only role is enabled its guidance is `RecoveryDisabled`. The
+  KEL-254 T2b executable-located entrypoint (`select_active_package_for_executable`)
+  and its payload codec, the KEL-19 `.keldeai` host container (T1) and its boot-time
+  reader `ExpectedAppIdentity::from_signed_image` (KEL-254 T3 Part B) have landed, and
+  the KEL-96 host consumes them: a lease-less Windows launch verifies its own image once
+  through `keld-guard`, reads the expectation from that pinned handle and selects its
+  installation before any listener, child or window. That verification opens the
+  `current_exe()` path, so until KEL-53 T4d slice S9d binds the opened file to the
+  running image, for the host and the helper alike, the two are not proven to be one
+  file (KEL-270 owner decision `740998f4`, 2026-10-07, item 1). The entrypoint takes a
+  closed image choice, `keld-host.exe` or `keld-updater-helper.exe`, and the verified
+  signer, and `keld-update` requires the record's publisher scope and app id to equal
+  that signer before the snapshot lease, the one rule for both images (KEL-53 T4d
+  S9a). The same
+  locator anchors the elevated helper itself: `anchor_updater_helper` reads the helper's
+  own expectation, refuses every mode but `MachineUacDirect`, applies the signer rule and
+  requires its own image to be the journaled one or, without a journal, its role's
+  version (`current` for activation, last-known-good for recovery), all before the writer
+  lease or any write. The host derives the activation role's helper only through
+  `ActivePackageSelection::open_activation_helper`: the selected tree's
+  `keld-updater-helper.exe`, opened without following a reparse point under the recorded
+  mode's profile and held while its path is offered, and nothing outside
+  `MachineUacDirect`. No `keld build` step embeds the
+  container yet (KEL-19 T3). KEL-53 T4d S6b adds the primitives that the host
+  coordinator and candidate mode compose (S6c): the candidate's lease-less provenance
+  read (`locate_candidate_claimant`), criterion 20's candidate-boot read with the
+  `KELD-AB1` health-receipt digest, the owner's expected digest and the two-step
+  `accept_health` (a durable `health-accepted` before completion), the launch handle's
+  liveness check, and the same-token `CREATE_SUSPENDED` candidate launch whose
+  attempt-Job membership precedes its first instruction. KEL-53 T4d S6b3 adds the
+  candidate release after commit: the host keeps its host-death Job as an opaque
+  capability, one clear primitive strips kill-on-close with a read-back, the attempt
+  Job is released only after the journal is removed, and the host-death Job only after
+  the host has reaped its roles and a census shows only itself and the candidate
+  family; rollback releases nothing, and a release refused at its deadline costs only
+  availability. KEL-53 T4d S6c specifies the profile handover and S6b4 the launch-record
+  detach: the old host closes its window, gives the application a bounded time to quit
+  on its own before ending it, and releases the persistent WebView2 profile before it
+  launches the candidate; the writer lease refuses every other launch until the
+  candidate's or the restored session's profile is held; a rolled-back attempt restores
+  a fresh session in process, acquiring the profile before the journal is rolled back;
+  and after both Job clears the host detaches its launch record instead of terminating
+  the candidate on drop. Live feed orchestration, that
+  composition (host candidate launch, the profile handover, the private health channel
+  and its 30-second `Ready` observation, candidate-mode selection, the release order,
+  the detach) and installed-host lifecycle composition remain unimplemented. Planned Windows
+  direct modes share this state machine: same-user authority for per-user installs,
+  explicit UAC for machine installs, and no-UAC machine activation only after KEL-270's
+  lifecycle proof and a separately approved architecture/spec amendment selects and
+  qualifies the authority. In UAC mode, only KEL-53's bounded updater runs elevated; it
+  must launch the candidate under the exact initiating user's ordinary token. Managed
+  deployment owners retain mutation.
 - Optional delta: only a measured later transport optimization. It reconstructs the
   same full-package content identity, retains a same-attempt full fallback and cannot
   change activation, health, trust-floor or rollback semantics.
 - UI hooks, `autoUpdater` compatibility and the bridge-release recipe remain target
   behavior. All platform/format/channel support cells qualify independently.
+
+### Windows install modes and update authority
+
+The default Windows direct install is per-user under the installing user's
+`FOLDERID_LocalAppData` application tree. `PerUserDirect` updates run as that ordinary
+user without UAC; strict Keld role restrictions deny Bun/webview writes to the install
+and updater state. This does not claim protection from the owning user or arbitrary
+native malware already running as that user. Before it launches a candidate, the old
+host closes its window, gives the application a bounded time to quit on its own, ends
+its session and releases the persistent WebView2 profile, so the candidate's session
+owns that profile and at most one application instance runs on the user's data
+(KEL-53 §4 "Profile handover"). After a committed `PerUserDirect`
+update the old host releases the healthy candidate from its own two Jobs before it
+exits, so the candidate outlives it (KEL-53 §4 "Candidate release after commit").
+
+An explicitly selected Program Files installation records one of two machine-wide
+modes. `MachineUacDirect` is the simple fallback: its trusted installer assigns BUILTIN
+Administrators as owner only when that SID is a valid owner group in the actual
+installer token, then provisions a protected DACL that grants full control to
+Administrators and SYSTEM while ordinary BUILTIN Users/Keld roles receive only
+read/execute (`0x1200A9`). If Administrators cannot be assigned as owner, installation
+fails without owner/ACL takeover. Each protected activation invokes a fixed signed
+updater helper through UAC: a dedicated minimal `keld-updater-helper.exe` whose signer
+matches the protected publisher scope and whose image the verified artifact covers,
+never an elevated `keld-host.exe`. Cancellation performs no protected write. The helper
+owns that live attempt through commit/rollback; any keeper is minimal and bound to one
+attempt, and no persistent privileged broker exists. The ordinary-user host may download and
+prevalidate into its owner-private cache, but the cache is only untrusted input. After
+authenticating the admitted-host request and obtaining the lease, the helper independently
+revalidates bounded source bytes under retained read handles, then materializes a fresh
+protected sibling through the shared extraction/copy/readback pipeline. Every destination
+directory and file receives the exact Administrators/SYSTEM/Users DACL at creation,
+before payload writes; it never promotes a user-owned stage by rename or seals an
+ordinary-user-writable stage afterward. The helper starts the exact candidate as the
+initiating ordinary user, including when a different administrator approves UAC, with
+the primary token it takes from the verified host process object; KEL-53 "Machine-UAC
+bootstrap" owns that hand-off. If the elevated owner exits, Windows restarts or every owner is lost
+before resolution, the next ordinary launch infers and writes nothing: it returns the
+typed `MachineRecoveryRequired` state before admission, and only the helper's
+recovery-only role, behind fresh UAC consent and without an ordinary host boot, may
+recover or repair (KEL-53 "Machine-UAC recovery-required state and recovery-only
+role"); until the T4d rows pass that role is disabled and administrator action is the
+only resolution. For a launched attempt after owner loss, retirement needs KEL-53's
+two-fact "Machine-UAC owner-loss retirement" proof: the recovery helper holds the
+share-zero writer lease, and a logon-session query shows that the initiating user's
+logon session, which every family token was qualified to reference, has ended. The
+helper's kill-on-close Job only ends the candidate promptly and proves nothing about
+the family; until T4d qualifies that proof, the case halts. The application and Bun roles
+never run elevated or as SYSTEM. This ACL profile differs from KEL-266's SYSTEM-only
+machine-baseline profile; updates never take ownership or repair ACLs ad hoc. The
+profile label and descriptor predicates are owned by `keld-guard`; a persisted profile
+id does not prove the live owner or DACL.
+
+`MachineSeamlessDirect` is an explicit opt-in for machine-wide installs. The product
+requires no repeated UAC and the same common updater guarantees, but its privileged
+authority mechanism remains unselected. A fixed Scheduled Task is only a candidate; a
+service or other Windows-native mechanism must meet the same authentication, fresh
+attempt, replay, exclusive-writer, process-family, ordinary-user launch, exact-health
+and crash/reboot-recovery contract before selection. A privileged trigger is a wake-up,
+never update authorization. Do not add a broad broker. Package/deployment-managed
+installations record `Managed(owner)` and defer mutation to MSIX/App Installer, Store,
+enterprise deployment or the owning package manager.
+
+Every direct mode uses the single `keld-update` transaction below. Mode selection changes
+only how the updater obtains its one exclusive write lease; signed-candidate
+verification, floor, journal, staging, current/LKG, candidate health, commit/rollback
+and crash recovery have one owner and identical semantics. KEL-135 owns publisher/app/
+profile identity. KEL-53 alone mints `ActivePackageSelection` from journal/current/LKG and
+owns mode provenance and the sole updater writer. KEL-254 verifies installed-image and
+protection profiles but never selects current/LKG or mints an active selection. KEL-96/
+`keld-core` consumes `ActivePackageSelection`, performs host boot admission and returns
+`ValidatedBootSelection` to the ordinary-user host. No boot/profile owner grants updater
+write authority or infers mode from a path.
+
+Each trusted direct install seeds one stable regular `activation.lock` in its protected
+`update_root`. It is never deleted, recreated or replaced, and its presence does not
+prove a process owns the transaction; KEL-266's `bootstrap.lock` remains a separate
+initializer marker. A writer opens the existing lease read/write with share mode zero;
+normal selection readers open it read-only with `FILE_SHARE_READ` only and retain that
+short lease for one coherent mutable-record snapshot. A sharing conflict returns busy
+or refusal without sleep, retry or PID takeover. The writer keeps the exclusive lease
+through the attempt and health window. KEL-53 criterion 20 owns the single reader
+exception, the accepted candidate's authenticated boot read, and the typed refusal of
+every other conflict. Lease ownership never replaces OS-backed process-family death
+proof.
+
+The approved Windows lifecycle proof slice uses one bounded keeper per exact unnamed
+attempt Job. Its reduced handle is limited to query and termination; the keeper is not
+a transaction writer. A trusted install-scoped rendezvous lets a cold successor find
+the keeper before reading mutable journal state under the share-zero lease; the
+rendezvous is only a locator. A reduced `activation.lock` handle couples writer
+exclusion to the keeper's lifetime. After exact Job-family zero is independently
+queried by the authenticated successor and acknowledged on the fresh attempt-bound
+connection, the keeper releases its retention handle; only then does the successor
+acquire and revalidate the writer lease. A competing writer without that witness must
+refuse pending recovery. Coordinator/keeper loss before the proof is authenticated to a
+successor preserves the journal and pointers and halts recovery. Job-name absence, PID
+enumeration, reboot or hibernation does not establish retirement. The proof slice stays
+disconnected from production activation writes until its adversarial crash and replay
+controls pass; boot recovery after all owners are lost remains an evidence blocker.
+The lifecycle installation ID comes only from the updater's canonical protected
+provenance contract: `BLAKE3(UTF8("keld.installation-binding/provenance-v2/v1\0") ||
+u64_le(record_bytes.len()) || record_bytes)`, where `record_bytes` is the exact
+canonical `keld.install-provenance/v2` encoding. This binds install mode, owner,
+application scope, install/update roots, signing key, baseline, profile, principal
+model, publisher scope and volume. The host derives its expected ID from trusted
+installer configuration (on the KEL-254 executable-located path, only from provenance
+admitted under that path's anchor); recovery re-derives it from admitted protected
+provenance.
+This public identifier is context, not authentication. The v2 projection is frozen;
+future provenance schema changes preserve it or version the lifecycle-ID derivation.
+Lifecycle authentication uses its own named-pipe namespace and retained connected-pipe/
+process objects plus exact installed-role, image and token-profile validation; a bearer
+HELLO, DACL, PID or signer alone is insufficient. Fresh client/server nonces bind
+purpose, install, attempt and generation but provide freshness rather than identity.
+The listener consumes the one-shot before issuing its final accepted receipt. A cold
+successor revalidates keeper-supplied attempt/channel IDs against the protected journal
+after lease acquisition and before mutation. Pipe handles MUST remain
+non-inheritable and undistributed to app roles; server-side message authentication also
+checks the last writer's token using identification-level named-pipe impersonation and
+always reverts. If endpoint-handle isolation is not proved, peer PID observations cannot
+authorize capability transfer. Failure of `RevertToSelf` MUST terminate the process;
+the impersonating thread MUST NOT return to admission or retry work.
+
+The explicit-UAC Program Files profile has BUILTIN Administrators as owner only when
+the installer token's Administrators SID is a valid owner group (`SE_GROUP_OWNER` and
+not deny-only). Its protected DACL grants full control to BUILTIN Administrators and
+SYSTEM and read/execute (`0x1200A9`) to BUILTIN Users. The trusted installer creates
+and verifies this profile; updates never repair it. The per-user profile remains owned
+by the installing user while application roles lack updater-state mutation rights.
+Managed installs do not seed a direct-update lease or admit Keld as a writer.
 
 ### 4a. v0 manifest & feed wire contract (KEL-53 trigger)
 
@@ -689,6 +997,9 @@ release missing `full` is part of AC1):
    ed25519 public key **compiled into the host binary at build time** (never fetched
    from the feed itself — a feed that can serve a fake manifest could equally serve a
    fake "trusted" key, so the key cannot be feed-supplied and stay a trust root).
+   "Compiled-in" in this document means fixed at build time inside the signed host; on
+   Windows direct installs the prebuilt host carries the key, app id, channel and target
+   in its signed `ExpectedAppIdentity` payload (KEL-254 §4).
    Reject and stop on any signature failure, before parsing a single field for meaning.
 2. Parse JSON only after step 1 passes, with a parser that rejects duplicate keys.
    Reject unknown `schema`. Reject if `app.id`, `channel`, or `target` do not match this
@@ -739,25 +1050,56 @@ The canonical tar contains `.keld/update-policy.v1` with exact UTF-8 bytes
 file. `keld-pack` is the single owner of its path and portable byte constant, and
 `keld-update` consumes that owner through a one-way internal dependency. Missing,
 duplicate or different policy refuses activation. The package producer includes it;
-the consumer checks its exact bytes before any extraction. macOS/Linux and any
+the consumer checks its exact bytes before any extraction. Every Windows package also
+carries exactly one regular file `keld-updater-helper.exe` at its tree root, beside
+`keld-host.exe`, in every install mode, because the signed artifact is mode-agnostic
+(KEL-53 T4d). `keld-pack` owns that path and the presence rule: its producer refuses a
+tree without it before any I/O, and `keld-update` refuses an archive without it only
+after the content digest, as it does the policy. macOS/Linux and any
 package requiring executable modes, links or other v0-excluded metadata remain blocked
 on an approved KEL-137 representation.
 
-The installer creates an OS-protected provenance record naming app id, channel, target,
-install root, update root, installed baseline artifact, compiled-in signing-key identity
-channel owner and the admitted strict/distinct-OS-principal security profile.
-`Direct` admits the updater only when every value matches the running host.
-`Managed(mechanism)` refuses mutation and names the store/package manager.
-Missing/mutable/mismatched provenance also refuses before feed access or filesystem
-mutation. Paths, executable names, registry-location guesses and writable config never
-infer direct ownership. Legacy same-user role mode refuses direct update because its
-role token cannot be ACL-distinguished from the per-user host. The installer first
-writes and synchronizes the immutable
+The trusted installer creates canonical `keld.install-provenance/v2` naming app id,
+channel, target, explicit install mode, owner, install root, update root, installed
+baseline artifact, compiled-in signing-key identity, channel owner and admitted
+mode-specific OS protection profile. `PerUserDirect` is the default and records its
+LocalAppData user owner; application roles cannot write updater metadata, while the
+installing user retains normal package/update authority and arbitrary native malware
+under that user remains outside the threat claim. `MachineUacDirect` records the Program
+Files profile writable by elevated Administrators/SYSTEM and read/execute for ordinary
+users/Keld roles. `MachineSeamlessDirect` is explicit opt-in and retains the
+SYSTEM-protected machine profile; its runtime authority remains a separate unselected
+gate. `Managed(mechanism)` records the package/deployment owner and refuses direct
+mutation before feed access. `Direct` admits the updater only when every recorded value
+matches the running host; on the KEL-254 executable-located path that means the host's
+`ExpectedAppIdentity`, the located roots' file identities and the recorded mode's
+protection profile. Provenance changed by a principal outside its mode's admitted
+writer authority refuses before feed access or filesystem mutation. Missing/mutable/
+mismatched provenance refuses. Paths, executable names, registry-location guesses and
+writable config never infer mode or direct ownership. Legacy same-user role mode refuses
+direct update because its role token cannot be restricted away from updater state. The
+installer first writes and synchronizes the immutable
 baseline version directory, then durably seeds `version-floor`, `current` and
 `last-known-good` to that exact baseline artifact/version, and publishes provenance
 last as the install transaction's commit record. Once direct provenance exists, a
 missing/corrupt floor fails closed; it never means “accept any signed version.” The
 first update therefore has both a replay floor and authenticated rollback destination.
+
+KEL-266's actual SYSTEM initializer implements only the protected machine baseline
+profile. It is not the default per-user installer or the Machine-UAC writer. The latter
+uses a separately provisioned Administrators/SYSTEM DACL and a signed UAC helper; no
+update may repair descriptors or take ownership. The Machine-UAC helper is the authority
+adapter for the common transaction: it authenticates its bootstrap from the admitted
+host, obtains the write lease, and then reuses the shared verifier on the exact staged
+candidate under retained read handles before creating the protected journal; KEL-53
+criterion 17 and its single-writer transition own the exact order.
+UAC consent alone and caller-supplied
+paths/argv/environment are not attempt authorization. The optional post-exit helper,
+which is not used in `MachineUacDirect`,
+described below remains a separate inherited-handle-only component for an already
+journaled attempt; it has no manifest/package parser. Per-user bootstrap uses the same
+signature, baseline and local-record validators while installing under the owning
+user's LocalAppData tree.
 
 **Independent trust and runnable-state owners.**
 
@@ -781,44 +1123,110 @@ synchronized. An incomplete directory is never current, last-known-good, a delta
 a recovery source.
 
 A versioned local activation journal replaces a version-only
-`publish-intent`. It carries one fresh host-generated 32-byte attempt id, exact
-candidate `(app id, channel, target, version, contentBlake3)`, validated rollback
-target, exact prior floor, prior last-known-good, prior previous-known-good, the verified activation-
-coordinator/helper image digest, a fresh health-channel identity, and exactly one phase:
+`publish-intent`. Its exact fields, their canonical encoding and the identities that
+`keld-update` mints inside the lease-holding attempt owner are owned by KEL-53 §4
+("Internal state and transition contract"); it has exactly one phase:
 
 ```text
 publish-pending -> awaiting-health -> health-accepted -> journal removed
                                  \-> rollback-pending -> journal removed
 ```
 
-Every phase retains the common attempt context. `rollback-pending` additionally
-binds its target/prior current but never drops the expected floor, both known-good slots,
-coordinator/helper image or optional health-channel identity.
+Every phase retains the one common attempt context, and `rollback-pending` adds only its
+closed failure class; KEL-53 §4 owns that context, including T4d's wire-gated v2 fields.
 
 Unknown journal versions, duplicate/missing fields, noncanonical values, replayed attempt
 ids, artifact/pointer mismatch and mixed component sets fail closed. Directory presence,
 the trust floor or a generic health marker cannot reconstruct or replace journal facts.
 
-**Single-writer transition.** One protected lock serializes selection through recovery:
+**Single-writer transition.** One mode-specific authority adapter obtains the same
+installation-wide exclusive write lease and serializes selection through recovery. It
+does not change journal semantics. `PerUserDirect` uses the ordinary user-owned updater;
+`MachineUacDirect` uses the live explicitly elevated helper; `MachineSeamlessDirect`
+remains unavailable until its coordinator passes the named proof gate; `Managed(owner)`
+does not enter this transaction:
 
-1. Validate direct-channel provenance; verify and stage `full`; validate the
-   policy; retain valid current as the rollback target plus both known-good slots.
-2. Durably write `publish-pending` with exact attempt/artifact identities.
-3. Durably advance `version-floor`. A crash cannot expose a candidate while
+1. Validate direct-channel provenance and mode; obtain the mode's exclusive write lease;
+   verify and stage `full`; validate the policy; retain valid current as the rollback
+   target plus both known-good slots.
+2. Durably write `publish-pending` with exact attempt/artifact identities. Until then
+   the candidate exists only as a completed `incomplete-*` stage.
+3. Durably rename that stage to the candidate's absent version name, then fully
+   re-verify and pin the published candidate.
+4. Durably advance `version-floor`. A crash cannot expose a candidate while
    still allowing its version or an older one to be re-offered as new.
-4. Durably publish `current` to the candidate.
-5. Durably write `awaiting-health`, then launch that exact candidate with a
+5. Durably publish `current` to the candidate.
+6. Durably write `awaiting-health`, then launch that exact candidate with a
    private attempt-bound health channel.
-6. On accepted health, durably write `health-accepted`, publish the prior
+7. On accepted health, durably write `health-accepted`, publish the prior
    last-known-good to `previous-known-good`, publish
-   `last-known-good` to the candidate, remove the journal durably, and only then
-   apply bounded cleanup that retains both known-good slots.
-7. On launch/health failure, durably write `rollback-pending`, republish
-   `current` to the attempt's validated rollback target, remove the journal durably,
-   and report failure. Rollback never changes the floor. The failed candidate therefore
+   `last-known-good` to the candidate, retire the superseded older version (if any), then
+   remove the journal durably. Deleting retired trees afterwards is best-effort
+   cleanup that never touches either known-good slot.
+8. On launch/health failure, durably write `rollback-pending`, republish
+   `current` to the attempt's validated rollback target, retire the failed candidate,
+   remove the journal durably, and report failure. Rollback never changes the floor. The failed candidate therefore
    cannot be automatically selected again at the same version: selection returns the
    successful no-update result until a newly signed release advances beyond that floor.
-   Failures that occur before step 3 may retry the same signed version after repair.
+   Failures that occur before step 4 may retry the same signed version after repair.
+
+Retirement is the only mutation of a published version. While the journal still
+authorizes it, the writer renames the one unreferenced version directory, with the
+same-parent absent-target write-through adapter, to a generated `retired-<64 hex>`
+name. Generated `incomplete-*` and `retired-*` names can never equal a SemVer version
+directory, so the census admits them only as never-selectable diagnostics. Retiring
+under the journal closes the crash window in which a removed journal would leave an
+orphan complete version that halts every later writer. On NTFS an open file handle
+anywhere in the retiring tree, with any sharing mode, makes the rename fail; the journal
+then stays for journal-bound recovery. A process still executing a mapped image from
+that tree does not block the rename: it keeps running from the retired tree, cannot
+open further files by their original path, and its tree is deleted only after it
+exits. A launched candidate is therefore retired only after process-family retirement,
+and the host must not run other instances from a superseded version.
+Journal removal is a write-through rename of the journal to a generated `pending-*`
+leaf followed by deletion. A crash before any record sibling's publication rename
+leaves only such a `pending-*` file. The census admits `pending-*` names; before its
+first write, the next transaction removes each one only after verifying a regular,
+single-link file with the exact installation profile, and refuses anything else.
+A new attempt never publishes a version before its `PublishPending` journal is
+durable. A refused start, or a process crash before the journal, leaves only the
+completed stage under its `incomplete-*` name: no version, record or journal is
+published, and the next resolution deletes stale completed `incomplete-*` stages
+together with `retired-*` trees through retained handles. After installation only the
+writer-lease holder completes a stage (the initializer does so only in an empty
+`versions` before provenance exists), so a stage without a completion record, which may
+be a live or failed extraction by a root without the lease, stays as a diagnostic. Recovery identifies the stage by its
+completion record, which must name the exact journaled candidate; a pending attempt
+whose candidate is neither published nor staged at the recorded prior floor is
+abandoned with no record changed. Only a missing completion record or one naming
+another artifact excludes a stage; any fault reading a stage halts recovery with the
+journal intact. A published copy that fails its full re-verification is retired under
+the journal and the next exact stage is tried; with none left the attempt is abandoned
+before the floor moves, so the same signed version may be retried. A census fault about
+other entries retires nothing and keeps the journal. An installation that already holds an
+orphan complete version from the earlier publication order still halts the ordinary
+loader; only the explicit unjournaled-version repair, admitted when no journal exists
+and every record validates, retires it under the writer lease. The repair first verifies and pins every
+referenced version, removes stale `pending-*` record siblings, and admits for retirement
+only strict-SemVer entries whose completion record names that version in the
+installation's scope; any other unknown or damaged entry, including a non-directory under a
+generated name, refuses the repair before any rename and needs manual recovery.
+
+A `PublishPending` journal is resumable under the exclusive writer lease alone: no
+candidate is launched before `AwaitingHealth` is durable, and every live transaction
+owner retains the share-zero lease (or its keeper retains a duplicate), so acquiring
+the lease proves no prior owner can still write and no candidate family exists. Every
+resumed owner durably re-mints the attempt's health and lifecycle channel identities
+before continuing, so no health receipt or retirement witness from a lost owner binds
+to the resumed run. Launched phases still require an exact process-family retirement
+binding; KEL-53 §4 owns who composes it and from which evidence, and why a sealed
+witness type was rejected.
+
+`HealthAccepted` records `BLAKE3(UTF8("keld.activation-health-receipt/v1\0") ||
+attempt_id || health_channel_id || u64_le(n) || a)`, where `a` is the canonical
+artifact-identity encoding of the candidate and `n` its byte length. The receipt binds
+the attempt, its private health channel and the exact candidate; recovery recomputes
+the digest from the journal's own fields and halts on a mismatch.
 
 No required pointer or journal is removed before its replacement is durable. A temporary
 file is created in the same directory as its target; cross-filesystem copy/delete is a
@@ -827,48 +1235,99 @@ An explicit rollback selects only `previous-known-good`, journals
 `rollback-pending`, publishes `current` to that package and keeps the trust
 floor plus both known-good slots unchanged.
 
-**Health identity.** A candidate receives a private host-owned channel minted for the
-journaled attempt. Its receipt repeats the attempt id and full artifact identity. The
-host must prove it booted from that exact version, reached application `Ready`,
+Each direct installation receives a persistent installer-created `activation.lock`
+regular file under `update_root`; never delete or replace it and never infer ownership
+from its presence. Writers open the existing file read/write with share mode zero.
+Snapshot readers open it read-only with `FILE_SHARE_READ` only and hold that short
+lease while they read the complete mutable-record set. Sharing conflicts return a
+typed busy/refusal without retry or sleep. The writer holds its lease through candidate
+health. KEL-53 criterion 20 owns the single reader exception, the accepted candidate's
+authenticated boot read, and the typed `WriterActive` refusal of every other conflict. Recovery
+separately requires proof that the prior process family exited. `bootstrap.lock`
+remains KEL-266's initializer marker.
+
+Windows keeps absent-target version publication separate from mutable-record
+replacement. Both use `NtCreateFile` to open the exact source without following a
+reparse point, relative to the retained same-volume parent handle with
+`FILE_WRITE_THROUGH`, then synchronous `NtSetInformationFile(FileRenameInformation)`
+with one checked destination component relative to that same `RootDirectory`.
+`publish_new` refuses an occupied target; the fixed-slot replacement adapter permits
+only journal/floor/current/last-known-good/previous-known-good and sets replace-existing
+under the writer lease after flushing and reading back the protected pending sibling
+and closing conflicting record pins. Reopen and verify exact bytes and profile before
+advancing. Neither path truncates in place, resolves ambient paths, copies across
+volumes, schedules work after reboot or accepts caller paths/flags. A replacement
+failure is effect-aware; it does not claim old bytes stayed unchanged. All updater
+unsafe remains in `windows_fs.rs` and requires independent security review.
+
+**Health identity.** A candidate reports over a private channel whose identity
+`keld-update` mints inside the lease-holding attempt owner for the journaled attempt.
+Its receipt binds the attempt id and the full artifact identity through the §4 receipt
+digest (approved: KEL-270 owner decision `eff8e2fb`, 2026-10-06). The
+candidate host must
+prove it booted from that exact version, reached application `Ready`,
 and remained alive for 30 monotonic seconds with no unexpected application-generation
 exit. A prior receipt, generic file marker, wrong artifact, clean early exit, lost
 channel, timeout, crash or crash-loop result cannot commit health. The 30-second window
 reuses KEL-70's default crash-window duration but treats any unexpected generation exit
-as failure; it delays commit/LKG replacement, not initial candidate launch.
+as failure; it delays commit/LKG replacement, not initial candidate launch. In candidate
+mode the host neither arms its pre-Ready recovery gate (§1) nor treats a generation
+revocation as recoverable until the owner's accepted health result; from `Ready` until
+then an unexpected generation exit denies the gate, installs no successor and ends the
+host, and the attempt owner's rollback, not an in-process successor, recovers from it
+(approved: KEL-270 owner decision `eff8e2fb`, 2026-10-06); KEL-53 §4
+"Candidate connect-back" owns the sequence.
 
-The coordinator passes the channel's client endpoint through the platform's protected
-inherited-handle mechanism. Its presence selects authenticated candidate-boot mode
-before ordinary updater startup. Candidate mode verifies the exact
-attempt/current/artifact, does not acquire the writer lock or invoke orphan recovery,
-starts the application and reports boot/Ready/health over that channel. It cannot write
-the journal or commit itself. A missing/replayed/mismatched endpoint fails before app
-code. A normal startup has no endpoint and follows the recovery path below.
+The candidate inherits no endpoint and takes no authority from argv or environment; it
+connects back to its attempt owner, and only that owner's acceptance selects
+authenticated candidate-boot mode before ordinary updater startup. KEL-53 §4 "Candidate
+connect-back" owns the endpoint, claim, acceptance and refusal rules. Candidate mode
+verifies the exact attempt/current/artifact, does not acquire the writer lock or invoke
+orphan recovery, starts the application and reports boot/Ready/health over that
+connection. It cannot write the journal or commit itself. The candidate runs under the initiating ordinary user's token/session in every
+direct mode; an elevated helper or SYSTEM coordinator must not run the application or a
+Bun role with its own token. UAC approval authority and the initiating-user candidate
+identity are separate facts, including over-the-shoulder consent. With no live owner,
+startup follows the recovery path below.
 
 **Startup recovery.** With no journal, validate the protected provenance, floor,
 `current`, both known-good slots, policy and complete markers. If current is
 valid, it must equal last-known-good or previous-known-good; any other complete artifact
-is an orphan and halts. If current is invalid and last-known-good is valid, republish
+is an orphan and halts (generated `incomplete-*` and `retired-*` diagnostics are not
+artifacts). If current is invalid and last-known-good is valid, republish
 last-known-good. Missing/invalid last-known-good after installation halts;
 previous-known-good may be absent only before the first successful update. With a valid
 journal, first acquire its exclusive attempt lease. If another coordinator retains the
 lease, that owner continues and the new process performs no recovery. After acquisition,
 the platform process-family owner must prove the recorded coordinator and candidate
 have exited; an unknown/live process state halts rather than starting a second
-candidate. Windows places the candidate in the helper/host's kill-on-close Job and
-waits for its zero-active-process observation before recovery proceeds.
+candidate. The one exception is an unlaunched `publish-pending` attempt, which the lease
+alone proves has no live owner or candidate family. Windows places the candidate in the helper/host's kill-on-close Job and
+waits for its zero-active-process observation before recovery proceeds; after
+Machine-UAC owner loss, the qualified owner-loss retirement proof above replaces that
+observation.
 
 1. For `publish-pending`, validate the floor and `current` against the exact
    journaled values. If current still equals the rollback target, the floor must equal
-   either the recorded prior floor or the candidate: advance the former to the exact
-   candidate, then publish and enter `awaiting-health`. If current already equals
+   either the recorded prior floor or the candidate. At the prior floor, publish a
+   still-staged candidate, or abandon the attempt without changing any record when the
+   candidate is neither published nor staged; then advance the floor to the exact
+   candidate, publish `current` and enter `awaiting-health`. At the candidate floor the
+   candidate must already be published. If current already equals
    the candidate, the floor must equal that exact candidate and recovery enters
    `awaiting-health` without republishing. Any third pointer/floor value, including
-   a floor above the candidate, halts. The journal is never cleared before health or
-   rollback.
+   a floor above the candidate, halts. Outside the abandon intent below, the journal is
+   never cleared before health or rollback. In `MachineUacDirect` the recovery-only role
+   instead applies KEL-53's abandon intent (owner decision D1 refined): it never
+   advances the floor, never selects the candidate as `current`, never enters
+   `awaiting-health`, and it removes
+   the journal as abandoned while the phase is still `publish-pending`.
 2. `awaiting-health` rolls back only after the process-family proof above; recovery
    never accepts an old receipt.
-3. `health-accepted` completes both known-good publications and journal removal.
-4. `rollback-pending` completes current rollback and journal removal only when
+3. `health-accepted` completes both known-good publications, the superseded
+   version's retirement and journal removal.
+4. `rollback-pending` completes current rollback, the candidate's retirement and
+   journal removal only when
    floor, both known-good slots, coordinator/helper identity, optional health identity
    and current exactly match its recorded context. Any substitution halts.
 
@@ -880,21 +1339,26 @@ state.
 same-filesystem condition is unavailable, and each support cell retains native crash-cut
 evidence.
 
-- Windows: require a supported local volume. Stage the entire version as one unique
-  sibling directory under `versions/`; create `tree/`, `content.tar`
-  and `.complete` there in that order, call `FlushFileBuffers` on every
-  writable file handle, close all stage handles, then publish the absent final version
-  directory with same-volume `MoveFileExW(MOVEFILE_WRITE_THROUGH)`. Reopen the
-  final directory and read back every digest, policy and marker before pointer
-  publication. Journal/pointer/policy record replacement separately uses a
-  same-directory temporary file, `FlushFileBuffers`, and same-volume
-  `MoveFileExW` with replace-existing plus write-through. Neither path sets
-  `MOVEFILE_COPY_ALLOWED` or claims directory-handle `FlushFileBuffers`.
-  Real crash-cut evidence must establish this admitted filesystem cell before support.
-  Microsoft documents the
-  [file flush](https://learn.microsoft.com/windows/win32/api/fileapi/nf-fileapi-flushfilebuffers)
-  and [write-through move](https://learn.microsoft.com/windows/win32/api/winbase/nf-winbase-movefileexw)
-  contracts.
+- Windows: require a supported fixed local NTFS volume. Stage the entire version
+  as one unique sibling directory under `versions/`; create `tree/`,
+  `content.tar` and `.complete` in order, call `FlushFileBuffers` on each
+  writable file handle, and close the stage handles. Publish the absent final version
+  with `NtCreateFile` (nofollow and `FILE_WRITE_THROUGH`) for the source and synchronous
+  `NtSetInformationFile(FileRenameInformation)` for one checked destination component,
+  both relative to the same retained directory handle. An update publishes only
+  after its `publish-pending` journal is durable; reopen and read back all digests,
+  policy and marker before floor/pointer advancement. Journal/pointer replacement
+  separately uses a same-directory protected temporary file, `FlushFileBuffers`,
+  and the same handle-relative rename with the typed replace-existing flag.
+  Neither path copies across volumes, schedules reboot work, reconstructs ambient
+  paths or claims directory-handle `FlushFileBuffers`. Native process-crash cuts
+  establish journal/rename ordering, not sudden power-loss equivalence with the old
+  `MoveFileExW` adapter; independent physical persistence proof remains pending.
+  The contract does not waive that durability gate. Microsoft's
+  [file flush](https://learn.microsoft.com/windows/win32/api/fileapi/nf-fileapi-flushfilebuffers),
+  [write-through NTFS metadata](https://learn.microsoft.com/windows/win32/api/fileapi/nf-fileapi-createfilea)
+  and [native rename](https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/ntifs/nf-ntifs-ntsetinformationfile)
+  contracts govern the adapter.
 - Linux, after its package predecessor: `fsync` each file,
   same-filesystem `rename`, then `fsync` every directory whose entry
   changed, bottom-up. POSIX notes that directory synchronization is required for
@@ -908,24 +1372,28 @@ evidence.
   ([Apple `fcntl(2)`](https://developer.apple.com/library/archive/documentation/System/Conceptual/ManPages_iPhoneOS/man2/fcntl.2.html)).
 
 If Windows locked-file behavior requires a post-exit helper, it is a signed minimal
-package component, not a second updater. The trusted host passes only protected
-update-root/lock handles, its process wait handle, the observer/server endpoint and a
-sealed forward-once candidate endpoint for the already minted attempt-health channel.
-The helper waits for that exact host to exit, reads attempt/artifact/path identity from
-the protected journal, performs the journaled same-volume publish, passes only the
-sealed candidate endpoint in the explicit inherited-handle list, closes its copy after
-spawn, launches only that journaled executable, observes exact health, commits or rolls
-back, and exits. It has no feed, network, manifest/package parser, shell, arbitrary-path
+package component, not a second updater, and is not used in `MachineUacDirect` (KEL-53
+criterion 10). The trusted host passes only protected
+update-root/lock handles and its process wait handle; no endpoint is inherited. The
+helper waits for that exact host to exit, reads attempt/artifact/path identity from the
+protected journal, continues the attempt as a resumed owner that re-mints its channel
+identities, creates its own one-shot connect-back endpoint (KEL-53 "Candidate
+connect-back"),
+performs the journaled same-volume publish, launches only that journaled executable,
+observes exact health, commits or rolls back, and exits. It has no feed, network, manifest/package parser, shell, arbitrary-path
 or caller-provided command authority. The journal binds the helper image and
 health-channel identities. Replayed attempt, endpoint substitution/reuse, helper
 substitution, mixed
 host/runtime/app/native-role set or path substitution rejects.
 
-In an admitted strict/distinct-OS-principal package, application roles and webviews
-cannot write provenance, trust root, floor, journal, packages, pointers, helper inputs
-or install state. Legacy same-user role mode refuses direct update. This boundary does
-not claim protection from administrators or arbitrary same-user native malware on an
-already compromised host account.
+In every admitted direct mode, application roles and webviews cannot write provenance,
+trust root, floor, journal, packages, pointers, helper inputs or install state. The
+per-user updater and host may share the ordinary user's OS identity, but strict role
+restrictions must still deny Keld roles write access to that user's updater state.
+Legacy same-user role mode refuses direct update. Per-user mode does not protect against
+its owning user or arbitrary same-user native malware; machine modes do not protect
+against administrators or arbitrary native malware on an already compromised host
+account.
 
 The first slice exposes no migration hook and accepts only the content-hashed
 `dataMigration:"none"` policy. A release requiring data migration waits for a

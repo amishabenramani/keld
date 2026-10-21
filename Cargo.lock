@@ -1551,9 +1551,12 @@ dependencies = [
  "getrandom 0.4.3",
  "keld-guard",
  "keld-ipc",
+ "keld-native",
  "keld-runtime",
+ "keld-update",
  "keld-wv",
  "nix",
+ "objc2",
  "serde",
  "serde_json",
  "sha2 0.10.9",
@@ -1580,6 +1583,7 @@ dependencies = [
  "keld-cli",
  "keld-core",
  "keld-runtime",
+ "keld-wv",
  "serde_json",
  "tempfile",
  "windows-sys 0.61.2",
@@ -1589,8 +1593,10 @@ dependencies = [
 name = "keld-ipc"
 version = "0.0.1"
 dependencies = [
+ "blake3",
  "getrandom 0.4.3",
  "keld-guard",
+ "keld-ipc",
  "postcard",
  "serde",
  "sha2 0.10.9",
@@ -1602,12 +1608,20 @@ dependencies = [
 name = "keld-native"
 version = "0.0.1"
 dependencies = [
+ "base64 0.23.1",
+ "block2",
  "cap-fs-ext",
  "cap-std",
+ "getrandom 0.4.3",
  "keld-guard",
  "keld-ipc",
+ "objc2",
+ "objc2-app-kit",
+ "objc2-authentication-services",
+ "objc2-foundation",
  "rustix",
  "serde",
+ "serde_json",
  "sha2 0.10.9",
  "windows-sys 0.61.2",
 ]
@@ -1618,6 +1632,8 @@ version = "0.0.1"
 dependencies = [
  "blake3",
  "keld-guard",
+ "sha2 0.10.9",
+ "tempfile",
  "zstd",
 ]
 
@@ -1648,6 +1664,7 @@ dependencies = [
  "ed25519-dalek",
  "getrandom 0.4.3",
  "keld-guard",
+ "keld-ipc",
  "keld-pack",
  "keld-runtime",
  "semver",
@@ -1657,6 +1674,17 @@ dependencies = [
  "windows-permissions",
  "windows-sys 0.61.2",
  "zstd",
+]
+
+[[package]]
+name = "keld-updater-helper"
+version = "0.0.1"
+dependencies = [
+ "keld-guard",
+ "keld-ipc",
+ "keld-runtime",
+ "keld-update",
+ "tempfile",
 ]
 
 [[package]]
@@ -1874,6 +1902,18 @@ dependencies = [
  "bitflags 2.13.0",
  "objc2",
  "objc2-core-foundation",
+ "objc2-foundation",
+]
+
+[[package]]
+name = "objc2-authentication-services"
+version = "0.3.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ee6d6f7dab884a28adaec1012eb3889257a49cc145724e35f93ece2d209f8b25"
+dependencies = [
+ "block2",
+ "objc2",
+ "objc2-app-kit",
  "objc2-foundation",
 ]
 

@@ -4,20 +4,36 @@
 //! `docs/architecture/06-runtime-and-tooling.md` §3; repository maturity and evidence
 //! live in `docs/engineering/product-status.tsv`.
 //! [`produce_windows_v0`] streams a package on Windows; other hosts refuse before I/O.
+//! [`ExpectedAppIdentityPayload`] owns the canonical expected-app-identity bytes that a
+//! signed host carries (KEL-254 A3). [`embed_host_identity`] writes them exactly once
+//! into the unsigned prebuilt Windows host as the `.keldeai` container, and
+//! [`read_host_identity_bytes`] (or `read_host_identity` on a Windows handle) reads them
+//! back with bounded positioned reads (KEL-19 container spec §4).
 //! This library API does not create installers, sign releases, or activate updates.
 
 use std::fmt;
 use std::io::{self, Read, Write};
 
+mod expected_identity;
+mod host_identity;
 #[cfg(windows)]
 mod producer;
 #[cfg(test)]
 mod tests;
 
+pub use expected_identity::{EXPECTED_APP_IDENTITY_KEY_BYTES, ExpectedAppIdentityPayload};
+#[cfg(windows)]
+pub use host_identity::read_host_identity;
+pub use host_identity::{embed_host_identity, read_host_identity_bytes};
+
 /// Exact relative path of the content-authenticated Slice-A update policy.
 pub const UPDATE_POLICY_PATH: &str = ".keld/update-policy.v1";
 /// Exact UTF-8 policy payload; this slice provides no data-migration hooks.
 pub const NO_MIGRATION_POLICY: &[u8] = b"{\"schema\":1,\"dataMigration\":\"none\"}\n";
+/// Exact relative path of the updater helper that every canonical Windows package carries
+/// (KEL-53 T4d): one regular file at the tree root, beside `keld-host.exe`, in every
+/// install mode, because the signed artifact is mode-agnostic.
+pub const UPDATER_HELPER_PATH: &str = "keld-updater-helper.exe";
 /// Block size of the canonical v0 ustar representation.
 pub const ARCHIVE_BLOCK_BYTES: usize = 512;
 /// Positive artifact counts must fit the signed feed's JSON safe-integer domain.
@@ -93,6 +109,32 @@ pub fn validate_v0_members(members: &[ArchiveMember<'_>]) -> Result<(), PackErro
     Ok(())
 }
 
+/// Requires exactly one regular file at [`UPDATER_HELPER_PATH`] (KEL-53 T4d canonical
+/// content).
+///
+/// The rule is presence only: the name compares exactly, so a case variant or a nested
+/// copy is not the helper, and the helper's image is checked when it anchors itself at
+/// run time. The producer applies it to its plan before any source read or sink write;
+/// the verifier applies it only after the content digest, so a changed archive stays a
+/// digest failure.
+///
+/// # Errors
+/// Returns [`PackError::InvalidMetadata`] when no member has that exact name, when that
+/// member is not a regular file, or when more than one member has it.
+pub fn require_updater_helper(members: &[ArchiveMember<'_>]) -> Result<(), PackError> {
+    let mut helpers = members
+        .iter()
+        .filter(|member| member.name == UPDATER_HELPER_PATH);
+    match (helpers.next(), helpers.next()) {
+        (None, _) => Err(invalid("required keld-updater-helper.exe is missing")),
+        (Some(_), Some(_)) => Err(invalid("keld-updater-helper.exe appears more than once")),
+        (Some(helper), None) if helper.kind != ArchiveEntryKind::File => {
+            Err(invalid("keld-updater-helper.exe is not a regular file"))
+        }
+        (Some(_), None) => Ok(()),
+    }
+}
+
 /// Borrowed package source. Readers begin at their current positions.
 pub enum PackageEntry<'a> {
     /// Explicit application directory.
@@ -160,9 +202,10 @@ impl ProducedFull {
 
 /// Produces a Windows x64 v0 update package, including the fixed no-migration policy.
 ///
-/// All metadata and the augmented Windows namespace are checked before any source
-/// read or sink write. Caller entries are not reordered. An exact `.keld` directory
-/// may be supplied; the policy file itself is reserved to the producer.
+/// All metadata, the augmented Windows namespace and the required
+/// [`UPDATER_HELPER_PATH`] member are checked before any source read or sink write.
+/// Caller entries are not reordered. An exact `.keld` directory may be supplied; the
+/// policy file itself is reserved to the producer.
 ///
 /// # Errors
 /// Unsupported hosts and invalid metadata perform no I/O. After streaming begins,
@@ -209,6 +252,41 @@ pub enum PackError {
         /// Original I/O error.
         source: io::Error,
     },
+    /// Expected-app-identity payload bytes or fields are not canonical.
+    ExpectedIdentityInvalid {
+        /// Stable reason naming the failing part, without untrusted bytes.
+        detail: &'static str,
+    },
+    /// The executable image is not an admissible Windows x64 PE32+ executable.
+    HostImageInvalid {
+        /// Stable reason naming the failing header rule, without untrusted bytes.
+        detail: &'static str,
+    },
+    /// The executable image has no `.keldeai` expected-identity container.
+    IdentityContainerMissing,
+    /// The executable image already has, or carries more than one, `.keldeai` container.
+    IdentityContainerDuplicate,
+    /// The executable image is signed or has bytes after its last section's raw data.
+    HostImageNotPristine {
+        /// Stable reason naming what makes the image not pristine.
+        detail: &'static str,
+    },
+    /// The executable image has no header room for one more section header.
+    HostImageNoRoom {
+        /// Stable reason naming the missing room.
+        detail: &'static str,
+    },
+    /// The single `.keldeai` container is not in its canonical v1 form, or the writer's
+    /// own read-back did not return the embedded payload.
+    IdentityContainerInvalid {
+        /// Stable reason naming the non-canonical field.
+        detail: &'static str,
+    },
+    /// A positioned read of the verified executable handle failed.
+    IdentityContainerRead {
+        /// Original I/O error.
+        source: io::Error,
+    },
 }
 
 impl PackError {
@@ -220,6 +298,14 @@ impl PackError {
             Self::InvalidMetadata { .. } => "KELD-PACK-002",
             Self::SourceSizeMismatch { .. } => "KELD-PACK-003",
             Self::Processing { .. } => "KELD-PACK-004",
+            Self::ExpectedIdentityInvalid { .. } => "KELD-PACK-005",
+            Self::HostImageInvalid { .. } => "KELD-PACK-006",
+            Self::IdentityContainerMissing => "KELD-PACK-007",
+            Self::IdentityContainerDuplicate => "KELD-PACK-008",
+            Self::HostImageNotPristine { .. } => "KELD-PACK-009",
+            Self::HostImageNoRoom { .. } => "KELD-PACK-010",
+            Self::IdentityContainerInvalid { .. } => "KELD-PACK-011",
+            Self::IdentityContainerRead { .. } => "KELD-PACK-012",
         }
     }
 }
@@ -231,6 +317,14 @@ impl fmt::Display for PackError {
             Self::InvalidMetadata { detail } => write!(f, "KELD-PACK-002: invalid Windows v0 package input ({detail}). Supply a complete file/directory tree with canonical Windows names and leave update-policy.v1 to the producer; no output was written."),
             Self::SourceSizeMismatch { name, expected, observed } => write!(f, "KELD-PACK-003: package source `{name}` declared {expected} bytes but supplied {observed}. Discard partial output and rebuild from sources with correct lengths."),
             Self::Processing { stage, source } => write!(f, "KELD-PACK-004: package {stage} failed ({source}). Discard partial output, repair the source or sink, and rebuild the package."),
+            Self::ExpectedIdentityInvalid { detail } => write!(f, "KELD-PACK-005: expected-app-identity payload is not canonical ({detail}). Correct the app id (1-255 bytes), channel (1-16) or target (1-64) in the packaging configuration, with no control characters, and rebuild the image (`keld-host.exe` or `keld-updater-helper.exe`); never hand-edit the embedded bytes."),
+            Self::HostImageInvalid { detail } => write!(f, "KELD-PACK-006: executable image is not an admissible Windows x64 PE32+ executable ({detail}). Use the unmodified prebuilt `keld-host.exe` or `keld-updater-helper.exe` of this Keld release; reinstall the signed package if an installed image is damaged."),
+            Self::IdentityContainerMissing => f.write_str("KELD-PACK-007: executable image carries no `.keldeai` expected-identity container. Rebuild with `keld build` so `keld-pack` embeds the expected identity into `keld-host.exe` or `keld-updater-helper.exe` before signing."),
+            Self::IdentityContainerDuplicate => f.write_str("KELD-PACK-008: executable image already carries a `.keldeai` expected-identity container, or more than one. Embed exactly once into the unmodified prebuilt `keld-host.exe` or `keld-updater-helper.exe`; never re-run embedding on its output."),
+            Self::HostImageNotPristine { detail } => write!(f, "KELD-PACK-009: executable image is signed or has bytes after its last section ({detail}). Embed into the unsigned prebuilt `keld-host.exe` or `keld-updater-helper.exe` before signing; never embed into a signed image or after appending data."),
+            Self::HostImageNoRoom { detail } => write!(f, "KELD-PACK-010: executable image has no header room for the expected-identity container ({detail}). Use a Keld-released prebuilt `keld-host.exe` or `keld-updater-helper.exe`; an image without header room is a Keld build defect to report."),
+            Self::IdentityContainerInvalid { detail } => write!(f, "KELD-PACK-011: expected-identity container is not canonical ({detail}). The image's identity container is damaged or was produced by another tool; reinstall the signed package or rebuild with `keld build`."),
+            Self::IdentityContainerRead { source } => write!(f, "KELD-PACK-012: reading the identity container of the verified executable (`keld-host.exe` or `keld-updater-helper.exe`) failed ({source}). Make sure its volume is readable and relaunch, and reinstall the signed package if the failure persists."),
         }
     }
 }
@@ -238,7 +332,9 @@ impl fmt::Display for PackError {
 impl std::error::Error for PackError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
-            Self::Processing { source, .. } => Some(source),
+            Self::Processing { source, .. } | Self::IdentityContainerRead { source } => {
+                Some(source)
+            }
             _ => None,
         }
     }

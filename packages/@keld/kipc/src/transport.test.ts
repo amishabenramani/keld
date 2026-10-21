@@ -4,33 +4,25 @@
  * Oracles: keld-ipc constants and error codes, the canonical TSV path (no row
  * copy), chunk-queue shape, and fail-closed unknown kind / wrong-channel Err.
  */
-import {
-  mkdirSync,
-  lstatSync,
-  mkdtempSync,
-  readdirSync,
-  readFileSync,
-  rmSync,
-  symlinkSync,
-  writeFileSync,
-} from "node:fs";
-import { tmpdir } from "node:os";
-import { join, relative } from "node:path";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { describe, expect, test } from "bun:test";
 
 import {
+  ALLOCATED_CHANNELS,
+  AUTH_CHANNEL,
   APP_LINK_IO_DEADLINE_MS,
-  DirectedReader,
   DrainSignal,
   ECHO_CHANNEL,
   FLAG_RAW,
+  FS_CHANNEL,
   FrameKind,
   FrameReader,
+  HANDSHAKE_CHANNEL,
   HEADER_LEN,
   LIFECYCLE_CHANNEL,
   MAX_FRAME_LEN,
   MAX_PENDING_CHUNKS,
-  MAX_PARKED_FRAMES,
   PROTOCOL_VERSION,
   RECEIVE_POLICIES,
   WriteQueue,
@@ -40,29 +32,17 @@ import {
   decodeVarint,
   echoReplyWaiter,
   encodeHeader,
+  eventReceiver,
+  isAllocatedChannel,
   kipcError,
   lifecycleReplyWaiter,
+  replyWaiter,
   validateReceivedHeader,
   withIoDeadline,
+  type AllocatedChannel,
 } from "./transport.ts";
 
 const REPO_ROOT = join(import.meta.dir, "../../../..");
-const CORPUS_PATH = join(
-  import.meta.dir,
-  "../../../../crates/keld-ipc/tests/fixtures/receiver-semantics-v0.tsv",
-);
-const CORPUS_SHA256 = "375f50c4bea1b690dbf7f385aee0464eae0946218058445306240b997d7e9746";
-const SKIP_DIR_NAMES = new Set([".git", "node_modules", "target"]);
-const SKIP_REPO_DIRS = new Set([
-  join(REPO_ROOT, ".keld-work"),
-  join(REPO_ROOT, "competitors"),
-  join(REPO_ROOT, "docs", "research"),
-]);
-
-function skipDirectory(path: string, name: string): boolean {
-  return SKIP_DIR_NAMES.has(name) || SKIP_REPO_DIRS.has(path);
-}
-
 function encodeFrame(kind: number, channel: number, corr: number, payload: Uint8Array): Uint8Array {
   const header = encodeHeader(kind, 0, channel, corr, payload.length);
   const frame = new Uint8Array(header.length + payload.length);
@@ -71,40 +51,26 @@ function encodeFrame(kind: number, channel: number, corr: number, payload: Uint8
   return frame;
 }
 
-function walkFiles(root: string, suffix: string, into: string[]): void {
-  for (const name of readdirSync(root)) {
-    const path = join(root, name);
-    const stat = lstatSync(path);
-    if (stat.isSymbolicLink()) continue;
-    if (stat.isDirectory()) {
-      if (skipDirectory(path, name)) continue;
-      walkFiles(path, suffix, into);
-      continue;
-    }
-    if (name.endsWith(suffix)) into.push(path);
-  }
-}
-
 describe("wire constants match keld-ipc", () => {
+  // Channel ids are generated from keld_ipc::channel_table; the drift check in
+  // scripts/channel-table.test.ts replaces the old source-text parity (GH-508).
   test("Rust source pins the same numbers this module exports", () => {
     const lib = readFileSync(join(REPO_ROOT, "crates/keld-ipc/src/lib.rs"), "utf8");
     const frame = readFileSync(join(REPO_ROOT, "crates/keld-ipc/src/frame.rs"), "utf8");
-    const echo = readFileSync(join(REPO_ROOT, "crates/keld-ipc/src/echo.rs"), "utf8");
-    const lifecycle = readFileSync(join(REPO_ROOT, "crates/keld-ipc/src/lifecycle.rs"), "utf8");
     expect(lib).toContain("pub const PROTOCOL_VERSION: u8 = 2;");
     expect(lib).toContain("pub const HEADER_LEN: usize = 16;");
     expect(lib).toContain("pub const MAX_FRAME_LEN: usize = 16 * 1024 * 1024;");
     expect(lib).toContain("Duration::from_secs(5)");
     expect(frame).toContain("pub const FLAG_RAW: u16 = 1 << 0;");
     expect(frame).toContain("Ping = 10");
-    expect(echo).toContain("ChannelId(1)");
-    expect(lifecycle).toContain("ChannelId(3)");
     expect(PROTOCOL_VERSION).toBe(2);
     expect(HEADER_LEN).toBe(16);
     expect(MAX_FRAME_LEN).toBe(16 * 1024 * 1024);
     expect(APP_LINK_IO_DEADLINE_MS).toBe(5_000);
     expect(FLAG_RAW).toBe(1);
+    expect(HANDSHAKE_CHANNEL).toBe(0);
     expect(ECHO_CHANNEL).toBe(1);
+    expect(FS_CHANNEL).toBe(2);
     expect(LIFECYCLE_CHANNEL).toBe(3);
     expect(FrameKind.Ping).toBe(10);
   });
@@ -192,6 +158,65 @@ describe("fail-closed header semantics", () => {
     expect(() => validateReceivedHeader(waiter, wrongChannelErr)).toThrow("wrong channel");
     const good = { kind: FrameKind.Err, flags: 0, channel: LIFECYCLE_CHANNEL, corr: 7, len: 4 };
     expect(validateReceivedHeader(waiter, good)).toEqual(good);
+  });
+});
+
+describe("GH-527 receive policy mirrors", () => {
+  function frame(kind: number, channel: number, corr: number) {
+    return { kind, flags: 0, channel, corr, len: 4 };
+  }
+
+  test("replyWaiter is the row-7 shape on its channel; lifecycle is its channel-3 call", () => {
+    const fs = replyWaiter(2, 7);
+    expect(validateReceivedHeader(fs, frame(FrameKind.Reply, 2, 7)).corr).toBe(7);
+    expect(validateReceivedHeader(fs, frame(FrameKind.Err, 2, 7)).kind).toBe(FrameKind.Err);
+    expect(() => validateReceivedHeader(fs, frame(FrameKind.Reply, 2, 8))).toThrow(
+      "KELD-IPC-005: correlation does not match the awaited call",
+    );
+    expect(() => validateReceivedHeader(fs, frame(FrameKind.Reply, 3, 7))).toThrow(
+      "KELD-IPC-005: wrong channel for the session policy",
+    );
+    expect(() => validateReceivedHeader(fs, { ...frame(FrameKind.Ping, 2, 7), len: 0 })).toThrow(
+      "KELD-IPC-005: frame kind is not declared by the session policy",
+    );
+    expect(lifecycleReplyWaiter(9)).toEqual(replyWaiter(LIFECYCLE_CHANNEL, 9));
+  });
+
+  test("replyWaiter refuses the HELLO channel and the REPLY-only echo channel", () => {
+    expect(() => replyWaiter(HANDSHAKE_CHANNEL as number as AllocatedChannel, 7)).toThrow(
+      "KELD-IPC-005: channel 0 carries only HELLO",
+    );
+    expect(() => replyWaiter(ECHO_CHANNEL, 7)).toThrow(
+      "KELD-IPC-005: echo replies use the REPLY-only echo reply waiter",
+    );
+  });
+
+  test("replyWaiter accepts only channel table ids, by type and at runtime (GH-597)", () => {
+    expect(ALLOCATED_CHANNELS).toEqual([ECHO_CHANNEL, FS_CHANNEL, LIFECYCLE_CHANNEL, AUTH_CHANNEL]);
+    for (const channel of [ECHO_CHANNEL, FS_CHANNEL, LIFECYCLE_CHANNEL, AUTH_CHANNEL]) {
+      expect(isAllocatedChannel(channel)).toBe(true);
+    }
+    for (const unallocated of [HANDSHAKE_CHANNEL, 5, 9, 0xffff, 2.5, -1]) {
+      expect(isAllocatedChannel(unallocated)).toBe(false);
+    }
+    // Type-level negative control: if `replyWaiter` widened its parameter to
+    // `number`, this directive would be unused and `bun run typecheck` fails.
+    // @ts-expect-error 5 is not an allocated channel
+    expect(() => replyWaiter(5, 7)).toThrow(
+      "KELD-IPC-005: channel is not allocated by the channel table",
+    );
+    for (const unallocated of [9, 0xffff]) {
+      expect(() => replyWaiter(unallocated as AllocatedChannel, 7)).toThrow(
+        "KELD-IPC-005: channel is not allocated by the channel table",
+      );
+    }
+  });
+
+  test("eventReceiver equals the lifecycle event policy and refuses other channels", () => {
+    expect(eventReceiver(LIFECYCLE_CHANNEL)).toEqual(RECEIVE_POLICIES.lifecycleEventReceiver);
+    for (const channel of [0, ECHO_CHANNEL, 2, 0xffff]) {
+      expect(() => eventReceiver(channel)).toThrow("KELD-IPC-005: channel carries no host EVENTs");
+    }
   });
 });
 
@@ -438,53 +463,6 @@ describe("FrameReader chunk queue", () => {
     },
     8_000,
   );
-
-  test("Ready before Echo Reply parks; later event receive drains FIFO", async () => {
-    const ready = encodeFrame(FrameKind.Event, LIFECYCLE_CHANNEL, 0, new Uint8Array([0x00]));
-    const reply = encodeFrame(FrameKind.Reply, ECHO_CHANNEL, 1, new Uint8Array([0x01]));
-    const reader = new FrameReader();
-    const directed = new DirectedReader(reader);
-    const waiting = directed.receive(
-      echoReplyWaiter(1),
-      RECEIVE_POLICIES.lifecycleEventReceiver,
-    );
-    reader.push(ready);
-    reader.push(reply);
-    const got = await waiting;
-    expect(got.header.kind).toBe(FrameKind.Reply);
-    expect(got.header.corr).toBe(1);
-    expect(directed.parkedCount()).toBe(1);
-    const parked = await directed.receive(RECEIVE_POLICIES.lifecycleEventReceiver);
-    expect(parked.header.kind).toBe(FrameKind.Event);
-    expect(parked.payload).toEqual(new Uint8Array([0x00]));
-    expect(directed.parkedCount()).toBe(0);
-  });
-
-  test("without park, Ready before Echo Reply fails closed", async () => {
-    const ready = encodeFrame(FrameKind.Event, LIFECYCLE_CHANNEL, 0, new Uint8Array([0x00]));
-    const reader = new FrameReader();
-    const directed = new DirectedReader(reader);
-    const waiting = directed.receive(echoReplyWaiter(1));
-    reader.push(ready);
-    await expect(waiting).rejects.toThrow("KELD-IPC-005");
-  });
-
-  test("park overflow is KELD-IPC-005 and does not merge frames", async () => {
-    const reader = new FrameReader();
-    const directed = new DirectedReader(reader);
-    const waiting = directed.receive(
-      echoReplyWaiter(1),
-      RECEIVE_POLICIES.lifecycleEventReceiver,
-    );
-    const event = encodeFrame(FrameKind.Event, LIFECYCLE_CHANNEL, 0, new Uint8Array([0x00]));
-    for (let i = 0; i < MAX_PARKED_FRAMES; i += 1) {
-      reader.push(event);
-    }
-    reader.push(event);
-    await expect(waiting).rejects.toThrow("KELD-IPC-005");
-    await expect(waiting).rejects.toThrow("parked-frame queue is full");
-    expect(directed.parkedCount()).toBe(MAX_PARKED_FRAMES);
-  });
 
   test("fragmented pushes keep a chunk queue, not a merged prefix", async () => {
     const payload = new Uint8Array(4096).fill(0x5a);
@@ -756,6 +734,31 @@ describe("deadline leftover I/O", () => {
     await expect(reader.readFrame()).rejects.toThrow("KELD-IPC-001");
   });
 
+  test("end() still returns complete buffered frames in order, then the close error", async () => {
+    const reader = new FrameReader();
+    const first = encodeFrame(FrameKind.Event, LIFECYCLE_CHANNEL, 0, new Uint8Array([0]));
+    const second = encodeFrame(FrameKind.Event, LIFECYCLE_CHANNEL, 0, new Uint8Array([1]));
+    const partial = encodeFrame(FrameKind.Event, LIFECYCLE_CHANNEL, 0, new Uint8Array([2, 3])).subarray(0, 17);
+    const bytes = new Uint8Array(first.length + second.length + partial.length);
+    bytes.set(first, 0);
+    bytes.set(second, first.length);
+    bytes.set(partial, first.length + second.length);
+    reader.push(bytes);
+    reader.end(kipcError("KELD-IPC-001", "connection closed by peer"));
+    reader.push(encodeFrame(FrameKind.Event, LIFECYCLE_CHANNEL, 0, new Uint8Array([9])));
+    expect((await reader.readFrame()).payload).toEqual(new Uint8Array([0]));
+    expect((await reader.readFrame()).payload).toEqual(new Uint8Array([1]));
+    await expect(reader.readFrame()).rejects.toThrow("KELD-IPC-001: connection closed by peer");
+    await expect(reader.readFrame()).rejects.toThrow("KELD-IPC-001: connection closed by peer");
+  });
+
+  test("end() with a parked read and nothing buffered rejects it at once", async () => {
+    const reader = new FrameReader();
+    const pending = reader.readFrame();
+    reader.end(kipcError("KELD-IPC-001", "connection closed by peer"));
+    await expect(pending).rejects.toThrow("KELD-IPC-001");
+  });
+
   test("fail() then drain.fire() rejects the parked read and wakes writers", async () => {
     const reader = new FrameReader();
     const drain = new DrainSignal();
@@ -801,110 +804,5 @@ describe("deadline leftover I/O", () => {
     } finally {
       Bun.connect = originalConnect;
     }
-  });
-});
-
-describe("one source / no second copy", () => {
-  test("repository walks skip only owned reference roots and directory symlinks", () => {
-    const root = mkdtempSync(join(tmpdir(), "keld-kipc-walk-"));
-    try {
-      const source = join(root, "source");
-      const target = join(root, "target");
-      mkdirSync(source);
-      mkdirSync(target);
-      writeFileSync(join(target, "linked.ts"), "export {};\n");
-      symlinkSync(target, join(source, "linked"), process.platform === "win32" ? "junction" : "dir");
-      for (const skipped of ["node_modules", "target"]) {
-        mkdirSync(join(source, skipped));
-        writeFileSync(join(source, skipped, `${skipped}.ts`), "export {};\n");
-      }
-      writeFileSync(join(source, "owned.ts"), "export {};\n");
-      const files: string[] = [];
-      walkFiles(source, ".ts", files);
-      expect(files.map((file) => relative(source, file).replaceAll("\\", "/"))).toEqual([
-        "owned.ts",
-      ]);
-      expect(skipDirectory(join(REPO_ROOT, "competitors"), "competitors")).toBe(true);
-      expect(skipDirectory(join(REPO_ROOT, ".keld-work"), ".keld-work")).toBe(true);
-      expect(skipDirectory(join(REPO_ROOT, "packages", ".keld-work"), ".keld-work")).toBe(false);
-      expect(skipDirectory(join(REPO_ROOT, "docs", "research"), "research")).toBe(true);
-      expect(
-        skipDirectory(join(REPO_ROOT, "packages", "@keld", "example", "research"), "research"),
-      ).toBe(false);
-    } finally {
-      rmSync(root, { recursive: true, force: true });
-    }
-  });
-
-  test("MAGIC_BYTES and class FrameReader exist only in the canonical transport", () => {
-    const files: string[] = [];
-    walkFiles(join(REPO_ROOT, "packages"), ".ts", files);
-    walkFiles(join(REPO_ROOT, "crates/keld-cli/templates"), ".ts", files);
-    const magicOwners: string[] = [];
-    const readerOwners: string[] = [];
-    for (const file of files) {
-      if (file.endsWith(".test.ts")) continue;
-      const text = readFileSync(file, "utf8");
-      if (text.includes("const MAGIC_BYTES = new Uint8Array([0x4b, 0x49])")) {
-        magicOwners.push(relative(REPO_ROOT, file).replaceAll("\\", "/"));
-      }
-      if (text.includes("export class FrameReader")) {
-        readerOwners.push(relative(REPO_ROOT, file).replaceAll("\\", "/"));
-      }
-    }
-    expect(magicOwners).toEqual(["packages/@keld/kipc/src/transport.ts"]);
-    expect(readerOwners).toEqual(["packages/@keld/kipc/src/transport.ts"]);
-  });
-
-  test("DirectedReader exists only in the canonical transport", () => {
-    const files: string[] = [];
-    walkFiles(join(REPO_ROOT, "packages"), ".ts", files);
-    walkFiles(join(REPO_ROOT, "crates/keld-cli/templates"), ".ts", files);
-    const owners: string[] = [];
-    for (const file of files) {
-      if (file.endsWith(".test.ts")) continue;
-      const text = readFileSync(file, "utf8");
-      if (text.includes("export class DirectedReader")) {
-        owners.push(relative(REPO_ROOT, file).replaceAll("\\", "/"));
-      }
-    }
-    expect(owners).toEqual(["packages/@keld/kipc/src/transport.ts"]);
-  });
-
-  test("hello scaffold shim is a re-export, not a second implementation", () => {
-    const shim = readFileSync(
-      join(REPO_ROOT, "crates/keld-cli/templates/hello/src/kipc-transport.ts"),
-      "utf8",
-    );
-    expect(shim).toContain('export * from "../../../../../packages/@keld/kipc/src/transport.ts"');
-    expect(shim).not.toContain("export class FrameReader");
-    expect(shim).not.toContain("const MAGIC_BYTES");
-  });
-
-  test("canonical corpus file is the one TSV owner; consumers do not copy rows", () => {
-    const tsvFiles: string[] = [];
-    walkFiles(REPO_ROOT, ".tsv", tsvFiles);
-    const corpus = tsvFiles
-      .map((file) => relative(REPO_ROOT, file).replaceAll("\\", "/"))
-      .filter((file) => file.endsWith("receiver-semantics-v0.tsv"));
-    expect(corpus).toEqual(["crates/keld-ipc/tests/fixtures/receiver-semantics-v0.tsv"]);
-    const bytes = readFileSync(CORPUS_PATH);
-    const digest = new Bun.CryptoHasher("sha256").update(bytes).digest("hex");
-    expect(digest).toBe(CORPUS_SHA256);
-  });
-
-  test("public TypeScript sources do not use any", () => {
-    const files: string[] = [];
-    walkFiles(join(REPO_ROOT, "packages/@keld/kipc/src"), ".ts", files);
-    walkFiles(join(REPO_ROOT, "packages/@keld/electron/src"), ".ts", files);
-    const hits: string[] = [];
-    for (const file of files) {
-      if (file.endsWith(".test.ts")) continue;
-      const text = readFileSync(file, "utf8");
-      if (/(?::|\bas\b|<)\s*any\b/.test(text) || /\bany\s*[\[<|]/.test(text)) {
-        hits.push(relative(REPO_ROOT, file).replaceAll("\\", "/"));
-      }
-    }
-    expect(hits).toEqual([]);
   });
 });

@@ -11,7 +11,6 @@ use std::fs;
 use std::fs::File;
 #[cfg(target_os = "macos")]
 use std::io;
-#[cfg(any(target_os = "macos", windows))]
 use std::io::Write as _;
 #[cfg(target_os = "macos")]
 use std::os::unix::fs::MetadataExt;
@@ -32,13 +31,7 @@ fn main() {
     #[cfg(windows)]
     let windows_args: Vec<std::ffi::OsString> = env::args_os().collect();
     #[cfg(windows)]
-    if windows_args.get(1).map(std::ffi::OsString::as_os_str)
-        == Some(std::ffi::OsStr::new(WINDOWS_DEV_STAGE_CLEANUP_ARG))
-    {
-        if let Err(error) = run_windows_dev_stage_cleanup(&windows_args) {
-            eprintln!("{error}");
-            process::exit(1);
-        }
+    if handle_windows_private_role(&windows_args) {
         return;
     }
     let args: Vec<String> = env::args().collect();
@@ -60,13 +53,11 @@ fn main() {
         }
         return;
     }
-    if (args.len() == 1 || args.iter().any(|arg| arg == "--hello"))
-        && let Err(error) = keld_core::prepare_webview_process()
-    {
-        eprintln!("{error}");
-        process::exit(1);
-    }
     if args.iter().any(|a| a == "--hello") {
+        if let Err(error) = keld_core::prepare_webview_process() {
+            eprintln!("{error}");
+            process::exit(1);
+        }
         if let Some(flag) = keld_core::host_hello_unknown_arg(&args) {
             eprintln!(
                 "KELD-CLI-044: unknown hello flag `{flag}`. \
@@ -90,7 +81,26 @@ fn main() {
     }
 
     #[cfg(windows)]
-    if let Err(error) = keld_runtime::windows_job::install_host_death_job() {
+    if keld_runtime::windows_job::launcher_start_gate_requested()
+        && let Err(error) = keld_runtime::windows_job::accept_host_start_v1()
+    {
+        eprintln!("{error}");
+        process::exit(1);
+    }
+
+    // The capability is kept until the host exits; nothing closes its handle
+    // (KEL-53 §4 "Candidate release after commit"). S6c adds the one
+    // `release_for_exit` call on the committed `PerUserDirect` exit path.
+    #[cfg(windows)]
+    let _host_death_job = match keld_runtime::windows_job::install_host_death_job() {
+        Ok(host_death_job) => host_death_job,
+        Err(error) => {
+            eprintln!("{error}");
+            process::exit(1);
+        }
+    };
+
+    if let Err(error) = keld_core::prepare_webview_process() {
         eprintln!("{error}");
         process::exit(1);
     }
@@ -98,14 +108,24 @@ fn main() {
     #[cfg(any(target_os = "macos", target_os = "linux"))]
     let dev_stage_cleanup = dev_stage_cleanup_root();
     let result = keld_core::app_session::ValidatedBootSelection::from_current_exe_unprivileged()
+        .map_err(keld_core::app_session::HostRunFailure::from)
         .and_then(keld_core::app_session::run_guarded);
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    let retains_main_custody = result
+        .as_ref()
+        .err()
+        .is_some_and(keld_core::app_session::HostRunFailure::retains_main_custody);
     let mut failed = false;
-    if let Err(error) = result {
-        eprintln!("{error}");
+    if let Err(error) = &result {
+        // Reporting failure must not unwind/drop an owned main-custody payload.
+        let mut output = std::io::stderr().lock();
+        let _ = writeln!(output, "{error}");
+        let _ = output.flush();
         failed = true;
     }
     #[cfg(any(target_os = "macos", target_os = "linux"))]
-    if let Some(root) = dev_stage_cleanup
+    if !retains_main_custody
+        && let Some(root) = dev_stage_cleanup
         && let Err(source) = fs::remove_dir_all(&root)
         && source.kind() != std::io::ErrorKind::NotFound
     {
@@ -116,8 +136,29 @@ fn main() {
         failed = true;
     }
     if failed {
+        // The result and any !Send unproved-custody payload are still owned.
+        // This existing fatal exit is failure, never a physical-drain receipt.
         process::exit(1);
     }
+}
+
+#[cfg(windows)]
+fn handle_windows_private_role(args: &[std::ffi::OsString]) -> bool {
+    if handle_profile_test_root_probe(args) {
+        return true;
+    }
+    if args.get(1).map(std::ffi::OsString::as_os_str)
+        == Some(std::ffi::OsStr::new(WINDOWS_DEV_STAGE_CLEANUP_ARG))
+    {
+        if let Err(error) = run_windows_dev_stage_cleanup(args) {
+            let mut output = std::io::stdout().lock();
+            let _ = writeln!(output, "{error}");
+            let _ = output.flush();
+            process::exit(1);
+        }
+        return true;
+    }
+    false
 }
 
 #[cfg(all(target_os = "macos", feature = "profile-test-hooks", debug_assertions))]
@@ -181,6 +222,33 @@ fn run_macos_profile_fixture_role(args: &[String]) -> bool {
 }
 
 #[cfg(windows)]
+fn handle_profile_test_root_probe(args: &[std::ffi::OsString]) -> bool {
+    if args.get(1).map(std::ffi::OsString::as_os_str)
+        != Some(std::ffi::OsStr::new("--keld-profile-test-root-probe-v1"))
+    {
+        return false;
+    }
+    #[cfg(feature = "kel135-profile-test-root")]
+    {
+        if args.len() != 2 {
+            eprintln!("KELD-CORE-037: profile test-root probe arguments are malformed.");
+            process::exit(2);
+        }
+        let Some(root) = env::var_os("KELD_PROFILE_TEST_ROOT") else {
+            eprintln!("KELD-CORE-037: profile test-root probe has no selected root.");
+            process::exit(2);
+        };
+        println!("KELD_PROFILE_TEST_ROOT_FEATURE {}", root.to_string_lossy());
+        return true;
+    }
+    #[cfg(not(feature = "kel135-profile-test-root"))]
+    {
+        eprintln!("KELD-CORE-037: profile test-root probe is unavailable in this host.");
+        process::exit(2);
+    }
+}
+
+#[cfg(windows)]
 fn run_windows_dev_stage_cleanup(args: &[std::ffi::OsString]) -> Result<(), String> {
     if args.len() != 4 {
         return Err(String::from(
@@ -193,6 +261,9 @@ fn run_windows_dev_stage_cleanup(args: &[std::ffi::OsString]) -> Result<(), Stri
             "KELD-CORE-037: private Windows dev-stage cleanup PID is invalid: {source}. Relaunch through `keld dev`."
         )
     })?;
+    let attempt_job =
+        keld_runtime::windows_job::WindowsProcessJob::adopt_cleanup_observer_from_stderr(host_pid)
+            .map_err(|error| format!("KELD-CORE-037: cleanup Job admission failed: {error}."))?;
     let cleanup = keld_core::app_session::WindowsDevStageCleanup::prepare(&root, host_pid)
         .map_err(|error| error.to_string())?;
     println!("KELD_WINDOWS_DEV_STAGE_CLEANUP_READY");
@@ -201,7 +272,39 @@ fn run_windows_dev_stage_cleanup(args: &[std::ffi::OsString]) -> Result<(), Stri
             "KELD-CORE-037: private Windows dev-stage cleanup readiness failed: {source}. Relaunch through `keld dev`."
         )
     })?;
-    cleanup.wait_and_delete().map_err(|error| error.to_string())
+    let signal = keld_runtime::windows_job::WindowsProcessJob::await_cleanup_release_v1();
+    let family_cleanup = if matches!(
+        &signal,
+        Ok(
+            keld_runtime::windows_job::WindowsCleanupReleaseSignal::Released
+                | keld_runtime::windows_job::WindowsCleanupReleaseSignal::LauncherLost,
+        )
+    ) {
+        attempt_job.gracefully_wait_and_reap_attached(
+            std::time::Duration::from_secs(10),
+            std::time::Duration::from_secs(30),
+        )
+    } else {
+        attempt_job.terminate_and_wait_attached(std::time::Duration::from_secs(30))
+    };
+    family_cleanup.map_err(|error| {
+        format!("KELD-CORE-037: attempt process-family cleanup failed: {error}.")
+    })?;
+    cleanup
+        .wait_and_delete_after_family_exit(&attempt_job)
+        .map_err(|error| error.to_string())?;
+    match signal {
+        Ok(
+            keld_runtime::windows_job::WindowsCleanupReleaseSignal::Released
+            | keld_runtime::windows_job::WindowsCleanupReleaseSignal::LauncherLost,
+        ) => Ok(()),
+        Ok(keld_runtime::windows_job::WindowsCleanupReleaseSignal::Malformed) => Err(String::from(
+            "KELD-CORE-037: malformed cleanup release was refused after safely reaping the exact attempt.",
+        )),
+        Err(error) => Err(format!(
+            "KELD-CORE-037: cleanup control pipe failed; exact attempt was safely reaped: {error}."
+        )),
+    }
 }
 
 #[cfg(any(target_os = "macos", target_os = "linux"))]

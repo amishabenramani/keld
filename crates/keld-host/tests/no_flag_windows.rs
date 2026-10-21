@@ -124,6 +124,8 @@ fn kel135_second_user_storage_helper() {
     let nonce = request["nonce"].as_str().expect("request nonce");
     validate_profile_state_atom(nonce, false).expect("request nonce domain");
     let host = std::ffi::OsStr::new(request["host"].as_str().expect("signed host path"));
+    let installer =
+        std::ffi::OsStr::new(request["installer"].as_str().expect("install fixture path"));
     let identity =
         std::ffi::OsStr::new(request["identity"].as_str().expect("signed identity path"));
     let namespace = signed_fixture_profile_namespace(identity, Some(host));
@@ -157,6 +159,7 @@ fn kel135_second_user_storage_helper() {
         let case = SignedProfileStateCase {
             name: message["case"].as_str().expect("remote case name"),
             host,
+            installer,
             before: message["before"].as_str().expect("remote before value"),
             after: message["after"].as_str().expect("remote after value"),
         };
@@ -198,7 +201,7 @@ fn shipping_windows_ctrl_c_preserves_host_output_and_ordered_cleanup() {
     }
     // Emergency process ownership only: normal cleanup is asserted before this
     // observer exits. Forced death can still retain its temporary stage files.
-    keld_runtime::windows_job::install_host_death_job()
+    let _host_death_job = keld_runtime::windows_job::install_host_death_job()
         .expect("install isolated observer death Job before descendants");
     if let Ok(port) = env::var("KELD_T4_CONSOLE_TIMEOUT_PORT") {
         run_console_timeout_fixture("observer", port.parse().expect("timeout fixture port"));

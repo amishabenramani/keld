@@ -25,6 +25,9 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use objc2::MainThreadMarker;
+use objc2::rc::Retained;
+use objc2_app_kit::NSWindow;
 use tao::event::{Event, WindowEvent};
 use tao::event_loop::{ControlFlow, EventLoop, EventLoopBuilder, EventLoopProxy};
 use tao::platform::run_return::EventLoopExtRunReturn;
@@ -41,13 +44,15 @@ use crate::profile::{
 };
 use crate::startup::{PageLoad, StartupPhase, StartupTrace, trace_enabled};
 
+mod macos_bridge;
 mod macos_profile;
+
+use macos_bridge::{BridgeNavigationHandle, MacRendererBridge};
+pub use macos_bridge::{RendererBridgeEndpoint, RendererBridgeOutcome, RendererBridgeRequest};
 
 #[cfg(all(feature = "profile-test-hooks", debug_assertions))]
 use macos_profile::MacMediaPromptProbe;
 use macos_profile::MacProfileOwner;
-
-const INITIAL_NAVIGATION_DEADLINE: Duration = Duration::from_secs(5);
 
 /// One live webview and the host window it fills (v0: one per window).
 #[repr(C)]
@@ -58,6 +63,7 @@ struct View {
 
 enum WkUserEvent {
     App(AppWindowCommand),
+    Renderer(RendererBridgeOutcome),
 }
 
 /// The macOS [`WebEngine`] backend.
@@ -69,6 +75,8 @@ pub struct WkWebViewEngine {
     /// Present until the run loop starts; consumed by `run_until_closed`.
     event_loop: Option<EventLoop<WkUserEvent>>,
     views: BTreeMap<u32, View>,
+    renderer_bridges: BTreeMap<u32, MacRendererBridge>,
+    renderer_outcomes: Option<Receiver<RendererBridgeOutcome>>,
     next_id: u32,
     profile: MacProfileOwner,
     profile_test_media_seed_allow: bool,
@@ -130,6 +138,8 @@ impl WkWebViewEngine {
         Ok(Self {
             event_loop: Some(event_loop),
             views: BTreeMap::new(),
+            renderer_bridges: BTreeMap::new(),
+            renderer_outcomes: None,
             next_id: 1,
             profile,
             profile_test_media_seed_allow,
@@ -253,7 +263,27 @@ impl WkWebViewEngine {
         spec: &WebviewSpec,
         events: Sender<AppWindowEvent>,
     ) -> Result<WebviewId, WvError> {
-        self.create_internal(spec, Some(events))
+        self.create_internal(spec, Some(events), None)
+    }
+
+    /// Creates the initial app window with the approved KEL-142 renderer bridge.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed webview/bridge error when the isolated-world bridge
+    /// cannot be installed before first navigation.
+    pub fn create_app_with_renderer_bridge(
+        &mut self,
+        spec: &WebviewSpec,
+        events: Sender<AppWindowEvent>,
+        endpoint: RendererBridgeEndpoint,
+    ) -> Result<WebviewId, WvError> {
+        if self.renderer_outcomes.is_some() || !self.renderer_bridges.is_empty() {
+            return Err(WvError::RendererBridge {
+                detail: String::from("this minimum slice supports one bridged WebView"),
+            });
+        }
+        self.create_internal(spec, Some(events), Some(endpoint))
     }
 
     /// Runs the live macOS event loop until a Quit or fatal app-session command.
@@ -274,6 +304,57 @@ impl WkWebViewEngine {
         commands: Receiver<AppWindowCommand>,
         events: Sender<AppWindowEvent>,
     ) -> Result<(), WvError> {
+        let mut unproved = false;
+        self.run_app_until_quit_with_main_owner(
+            commands,
+            events,
+            None,
+            &mut |_, _, _| Ok((true, None)),
+            &mut unproved,
+        )
+    }
+
+    /// Runs the same application loop with a main-owned native presentation service.
+    ///
+    /// `anchor` is the host-created view, never a caller-supplied selector.
+    /// The resolver returns its actual `AppKit` window through wry's safe accessor.
+    /// `service` receives the main-thread marker, resolver, and stop intent; it
+    /// returns (actual owner drained, next original absolute deadline), or an
+    /// owned-custody failure. `retains_main_custody` is set on that failed cut,
+    /// requiring the caller to retain this engine and the concrete service.
+    /// A pending
+    /// owner keeps its view and the main loop alive through terminal commands.
+    ///
+    /// # Errors
+    ///
+    /// Returns the existing typed loop/navigation/profile errors. Native owner
+    /// faults remain with Core's existing fatal owner; they do not authorize
+    /// view destruction or create a successful drain receipt.
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one UI-loop owner keeps terminal, window, and renderer wake ordering contiguous"
+    )]
+    pub fn run_app_until_quit_with_main_owner<F>(
+        &mut self,
+        commands: Receiver<AppWindowCommand>,
+        events: Sender<AppWindowEvent>,
+        anchor: Option<WebviewId>,
+        service: &mut F,
+        retains_main_custody: &mut bool,
+    ) -> Result<(), WvError>
+    where
+        F: FnMut(
+            MainThreadMarker,
+            &mut dyn FnMut() -> Option<Retained<NSWindow>>,
+            bool,
+        ) -> Result<(bool, Option<Instant>), WvError>,
+    {
+        *retains_main_custody = false;
+        let Some(main_thread) = MainThreadMarker::new() else {
+            return Err(WvError::EventLoop(String::from(
+                "presentation requires the main thread",
+            )));
+        };
         let Some(mut event_loop) = self.event_loop.take() else {
             return Err(WvError::EventLoop(String::from(
                 "run loop already started; call run_app_until_quit once",
@@ -288,81 +369,246 @@ impl WkWebViewEngine {
         let fatal_for_bridge = Arc::clone(&fatal_outcome);
         let bridge = spawn_app_wake_bridge(
             commands,
-            proxy,
+            proxy.clone(),
             stop_for_bridge,
             terminal_intent_for_bridge,
             fatal_for_bridge,
         )?;
+        let renderer_bridge = self
+            .renderer_outcomes
+            .take()
+            .map(|outcomes| {
+                spawn_renderer_outcome_bridge(outcomes, proxy, Arc::clone(&stop_bridge))
+            })
+            .transpose()?;
         let navigation_timed_out = Arc::new(AtomicBool::new(false));
         let navigation_timed_out_in_loop = Arc::clone(&navigation_timed_out);
-        let navigation_deadline = Instant::now() + INITIAL_NAVIGATION_DEADLINE;
+        let navigation_deadline = Instant::now() + crate::INITIAL_NAVIGATION_DEADLINE;
         let startup_in_loop = Arc::clone(&self.startup);
         let terminal_intent_in_loop = Arc::clone(&terminal_intent);
         let fatal_in_loop = Arc::clone(&fatal_outcome);
         let mut views = std::mem::take(&mut self.views);
-        let code = event_loop.run_return(move |event, _, control_flow| {
-            let terminal =
-                is_terminal_app_event(&event) || terminal_intent_in_loop.load(Ordering::Acquire);
-            if navigation_finished(&startup_in_loop) {
-                *control_flow = ControlFlow::Wait;
-            } else if navigation_deadline_expired(&startup_in_loop, navigation_deadline, terminal) {
+        let mut renderer_bridges = std::mem::take(&mut self.renderer_bridges);
+        let mut terminal_requested = false;
+        let mut closing = Vec::new();
+        let mut main_owner_failure = None;
+        let code = event_loop.run_return(|event, _, control_flow| {
+            // The existing bridge accepts terminal intent before its proxy event.
+            // One terminal state closes renderer dispatch and Native main admission.
+            if terminal_intent_in_loop.load(Ordering::Acquire) {
+                terminal_requested = true;
+                destroy_renderer_bridges(&mut renderer_bridges);
+            }
+            let terminal = is_terminal_app_event(&event) || terminal_requested;
+            let live_navigation = views.keys().any(|id| !closing.contains(id));
+            if crate::navigation_deadline_expired(
+                navigation_finished(&startup_in_loop),
+                live_navigation,
+                terminal,
+                Instant::now(),
+                navigation_deadline,
+            ) {
                 navigation_timed_out_in_loop.store(true, Ordering::Release);
+                terminal_requested = true;
+                destroy_renderer_bridges(&mut renderer_bridges);
+            }
+            if !terminal_requested || is_terminal_app_event(&event) {
+                match event {
+                    Event::LoopDestroyed => {
+                        if !terminal_requested {
+                            fatal_in_loop.store(true, Ordering::Release);
+                        }
+                        terminal_requested = true;
+                        destroy_renderer_bridges(&mut renderer_bridges);
+                    }
+                    Event::UserEvent(WkUserEvent::App(AppWindowCommand::Quit)) => {
+                        terminal_requested = true;
+                        destroy_renderer_bridges(&mut renderer_bridges);
+                    }
+                    Event::UserEvent(WkUserEvent::App(AppWindowCommand::Fatal)) => {
+                        fatal_in_loop.store(true, Ordering::Release);
+                        terminal_requested = true;
+                        destroy_renderer_bridges(&mut renderer_bridges);
+                    }
+                    Event::UserEvent(WkUserEvent::Renderer(outcome)) => {
+                        let id = outcome.webview().0;
+                        let delivered =
+                            renderer_bridges
+                                .get(&id)
+                                .zip(views.get(&id))
+                                .map(|(bridge, view)| {
+                                    let native = view.webview.webview();
+                                    bridge.deliver(&native, outcome)
+                                });
+                        if delivered.is_some_and(|result| result.is_err()) {
+                            fatal_in_loop.store(true, Ordering::Release);
+                            terminal_requested = true;
+                            destroy_renderer_bridges(&mut renderer_bridges);
+                        }
+                    }
+                    Event::WindowEvent {
+                        window_id,
+                        event: WindowEvent::CloseRequested,
+                        ..
+                    } => {
+                        let requested: Vec<u32> = views
+                            .iter()
+                            .filter_map(|(id, view)| (view.window.id() == window_id).then_some(*id))
+                            .collect();
+                        for id in requested {
+                            if let Some(bridge) = renderer_bridges.remove(&id) {
+                                bridge.destroy();
+                            }
+                            if anchor.is_some_and(|view| view.0 == id) {
+                                if !closing.contains(&id) {
+                                    closing.push(id);
+                                }
+                            } else {
+                                views.remove(&id);
+                            }
+                        }
+                        if views.is_empty() {
+                            let _ = events.send(AppWindowEvent::LastWindowClosed);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            let stopping = terminal_requested || anchor.is_some_and(|id| closing.contains(&id.0));
+            let (drained, owner_deadline) = {
+                let mut resolve = || {
+                    anchor
+                        .and_then(|id| views.get(&id.0))
+                        .and_then(|view| view.webview.webview().window())
+                };
+                match service(main_thread, &mut resolve, stopping) {
+                    Ok(progress) => progress,
+                    Err(error) => {
+                        main_owner_failure.get_or_insert(error);
+                        fatal_in_loop.store(true, Ordering::Release);
+                        *control_flow = ControlFlow::Exit;
+                        return;
+                    }
+                }
+            };
+            if drained && !closing.is_empty() {
+                for id in closing.drain(..) {
+                    views.remove(&id);
+                }
+                if views.is_empty() {
+                    let _ = events.send(AppWindowEvent::LastWindowClosed);
+                }
+            }
+            if terminal_requested && drained {
+                destroy_renderer_bridges(&mut renderer_bridges);
                 views.clear();
                 *control_flow = ControlFlow::Exit;
                 return;
-            } else {
-                *control_flow = ControlFlow::WaitUntil(navigation_deadline);
             }
-            match event {
-                Event::UserEvent(WkUserEvent::App(AppWindowCommand::Quit)) => {
-                    views.clear();
-                    *control_flow = ControlFlow::Exit;
-                }
-                Event::UserEvent(WkUserEvent::App(AppWindowCommand::Fatal)) => {
-                    fatal_in_loop.store(true, Ordering::Release);
-                    views.clear();
-                    *control_flow = ControlFlow::Exit;
-                }
-                Event::WindowEvent {
-                    window_id,
-                    event: WindowEvent::CloseRequested,
-                    ..
-                } => {
-                    views.retain(|_, view| view.window.id() != window_id);
-                    if views.is_empty() {
-                        let _ = events.send(AppWindowEvent::LastWindowClosed);
-                    }
-                }
-                _ => {}
-            }
+            let navigation_wake = (!terminal
+                && !navigation_finished(&startup_in_loop)
+                && views.keys().any(|id| !closing.contains(id)))
+            .then_some(navigation_deadline);
+            let wake = match (navigation_wake, owner_deadline) {
+                (Some(a), Some(b)) => Some(a.min(b)),
+                (a, b) => a.or(b),
+            };
+            *control_flow = wake.map_or(ControlFlow::Wait, ControlFlow::WaitUntil);
         });
+        // Tao drops its stored callback on every return, including external
+        // NSApp.run termination. The callback only borrowed these real owners.
+        let mut tail_failure = main_owner_failure;
+        let mut drained;
+        loop {
+            let progress = {
+                let mut resolve = || {
+                    anchor
+                        .and_then(|id| views.get(&id.0))
+                        .and_then(|view| view.webview.webview().window())
+                };
+                service(main_thread, &mut resolve, true)
+            };
+            let progress = match progress {
+                Ok(progress) => progress,
+                Err(error) => {
+                    tail_failure.get_or_insert(error);
+                    drained = false;
+                    break;
+                }
+            };
+            drained = progress.0;
+            if drained {
+                break;
+            }
+            let Some(original_deadline) = progress.1 else {
+                tail_failure = Some(WvError::EventLoop(String::from(
+                    "native main tail custody remains unproved",
+                )));
+                break;
+            };
+            if let Err(error) =
+                macos_bridge::service_main_tail_before(main_thread, original_deadline)
+            {
+                tail_failure = Some(error);
+                break;
+            }
+        }
+        if drained {
+            destroy_renderer_bridges(&mut renderer_bridges);
+            views.clear();
+        } else {
+            *retains_main_custody = true;
+            self.views = views;
+            self.renderer_bridges = renderer_bridges;
+        }
         stop_bridge.store(true, Ordering::Release);
         let _ = bridge.join();
+        if let Some(renderer_bridge) = renderer_bridge {
+            let _ = renderer_bridge.join();
+        }
+        if !drained {
+            // Returning this failure is not a drain receipt. Core still owns
+            // the borrowed service and this engine's retained actual views.
+            return Err(tail_failure.unwrap_or_else(|| {
+                WvError::EventLoop(String::from(
+                    "UI loop returned while the native presentation owner remains active",
+                ))
+            }));
+        }
         #[cfg(all(feature = "profile-test-hooks", debug_assertions))]
         if let Some(probe) = self.media_prompt_probe.take() {
             probe.finish();
         }
         let profile_result = self.profile.clean_shutdown();
-        let loop_result = app_loop_result(
-            navigation_timed_out.load(Ordering::Acquire),
-            fatal_outcome.load(Ordering::Acquire),
-            code,
+        let loop_result = tail_failure.map_or_else(
+            || {
+                app_loop_result(
+                    navigation_timed_out.load(Ordering::Acquire),
+                    fatal_outcome.load(Ordering::Acquire),
+                    code,
+                )
+            },
+            Err,
         );
-        match (loop_result, profile_result) {
+        let result = match (loop_result, profile_result) {
             (Ok(()), result) => result,
             (Err(primary), Ok(())) => Err(primary),
             (Err(primary), Err(cleanup)) => Err(WvError::EventLoop(format!(
                 "{primary}; profile cleanup failed: {cleanup}"
             ))),
-        }
+        };
+        // Consume the owned event sender at the original method-return boundary.
+        drop(events);
+        result
     }
 
     fn create_internal(
         &mut self,
         spec: &WebviewSpec,
         app_events: Option<Sender<AppWindowEvent>>,
+        renderer_endpoint: Option<RendererBridgeEndpoint>,
     ) -> Result<WebviewId, WvError> {
-        let result = self.create_internal_inner(spec, app_events);
+        let result = self.create_internal_inner(spec, app_events, renderer_endpoint);
         if result.is_err()
             && self.views.is_empty()
             && let Err(cleanup) = self.profile.clean_shutdown()
@@ -378,6 +624,7 @@ impl WkWebViewEngine {
         &mut self,
         spec: &WebviewSpec,
         app_events: Option<Sender<AppWindowEvent>>,
+        renderer_endpoint: Option<RendererBridgeEndpoint>,
     ) -> Result<WebviewId, WvError> {
         let Some(event_loop) = self.event_loop.as_ref() else {
             return Err(WvError::EventLoop(String::from(
@@ -397,20 +644,32 @@ impl WkWebViewEngine {
             .map_err(|error| WvError::Window(error.to_string()))?;
         mark_startup(&self.startup, StartupPhase::WindowCreated);
         let id = self.next_id;
+        let webview_id = WebviewId(id);
         let configuration = self.profile.configuration_for_view()?;
+        let installed = renderer_endpoint
+            .map(|endpoint| MacRendererBridge::install(webview_id, &configuration, endpoint))
+            .transpose()?;
+        let navigation = installed
+            .as_ref()
+            .map(|installed| installed.bridge.navigation_handle());
         let builder = guarded_default_media_builder(
-            WebviewId(id),
-            page_load_trace_handler(Arc::clone(&self.startup), app_events),
+            webview_id,
+            page_load_trace_handler(Arc::clone(&self.startup), app_events, navigation),
             self.profile_test_media_seed_allow,
         )
         .with_webview_configuration(configuration);
         let webview = builder.build_initial_window(&spec.initial, &window)?;
         let native_webview = webview.webview();
         self.profile.verify_webview(&native_webview)?;
+        if let Some(installed) = installed {
+            installed.bridge.verify_webview(&native_webview)?;
+            self.renderer_outcomes = Some(installed.outcomes);
+            self.renderer_bridges.insert(id, installed.bridge);
+        }
         mark_startup(&self.startup, StartupPhase::WebviewAttached);
         self.next_id += 1;
         self.views.insert(id, View { webview, window });
-        Ok(WebviewId(id))
+        Ok(webview_id)
     }
 
     fn view(&self, id: WebviewId) -> Result<&View, WvError> {
@@ -422,10 +681,13 @@ impl WkWebViewEngine {
 
 impl WebEngine for WkWebViewEngine {
     fn create(&mut self, spec: &WebviewSpec) -> Result<WebviewId, WvError> {
-        self.create_internal(spec, None)
+        self.create_internal(spec, None, None)
     }
 
     fn navigate(&mut self, id: WebviewId, target: NavTarget) -> Result<(), WvError> {
+        if let Some(bridge) = self.renderer_bridges.get(&id.0) {
+            bridge.navigation_handle().navigation_started();
+        }
         let view = self.view(id)?;
         match target {
             NavTarget::Html(html) => view.webview.load_html(&html),
@@ -462,6 +724,9 @@ impl WebEngine for WkWebViewEngine {
 
     fn destroy(&mut self, id: WebviewId) -> Result<(), WvError> {
         // Dropping the `View` releases the webview, then closes the window.
+        if let Some(bridge) = self.renderer_bridges.remove(&id.0) {
+            bridge.destroy();
+        }
         self.views
             .remove(&id.0)
             .map(|_| ())
@@ -499,30 +764,87 @@ fn spawn_app_wake_bridge(
     thread::Builder::new()
         .name("keld-wv-macos-app-wake".to_owned())
         .spawn(move || {
+            run_app_wake_bridge(
+                &commands,
+                &stop,
+                &terminal_intent,
+                &fatal_outcome,
+                |command| {
+                    let _ = proxy.send_event(WkUserEvent::App(command));
+                },
+            );
+        })
+        .map_err(|error| WvError::EventLoop(format!("failed to start app wake bridge: {error}")))
+}
+
+fn run_app_wake_bridge(
+    commands: &Receiver<AppWindowCommand>,
+    stop: &AtomicBool,
+    terminal_intent: &AtomicBool,
+    fatal_outcome: &AtomicBool,
+    mut forward: impl FnMut(AppWindowCommand),
+) {
+    let mut terminal_forwarded = false;
+    loop {
+        if stop.load(Ordering::Acquire) {
+            return;
+        }
+        match commands.recv_timeout(Duration::from_millis(100)) {
+            Ok(command) => {
+                terminal_forwarded |= mark_terminal_intent(terminal_intent, command);
+                if command == AppWindowCommand::Fatal {
+                    fatal_outcome.store(true, Ordering::Release);
+                }
+                forward(command);
+                // Terminal intent closes normal admission; the same bridge
+                // continues delivering main-owner stop/callback wakes until
+                // the UI loop observes its physical owner drained.
+            }
+            Err(RecvTimeoutError::Timeout) if stop.load(Ordering::Acquire) => return,
+            Err(RecvTimeoutError::Timeout) => {}
+            Err(RecvTimeoutError::Disconnected) if terminal_forwarded => return,
+            Err(RecvTimeoutError::Disconnected) => {
+                mark_terminal_intent(terminal_intent, AppWindowCommand::Fatal);
+                fatal_outcome.store(true, Ordering::Release);
+                forward(AppWindowCommand::Fatal);
+                return;
+            }
+        }
+    }
+}
+
+fn spawn_renderer_outcome_bridge(
+    outcomes: Receiver<RendererBridgeOutcome>,
+    proxy: EventLoopProxy<WkUserEvent>,
+    stop: Arc<AtomicBool>,
+) -> Result<thread::JoinHandle<()>, WvError> {
+    thread::Builder::new()
+        .name("keld-wv-macos-renderer-wake".to_owned())
+        .spawn(move || {
             loop {
-                match commands.recv_timeout(Duration::from_millis(100)) {
-                    Ok(command) => {
-                        let terminal = mark_terminal_intent(&terminal_intent, command);
-                        if command == AppWindowCommand::Fatal {
-                            fatal_outcome.store(true, Ordering::Release);
-                        }
-                        let _ = proxy.send_event(WkUserEvent::App(command));
-                        if terminal {
-                            return;
-                        }
+                if stop.load(Ordering::Acquire) {
+                    return;
+                }
+                match outcomes.recv_timeout(Duration::from_millis(100)) {
+                    Ok(outcome) => {
+                        let _ = proxy.send_event(WkUserEvent::Renderer(outcome));
                     }
                     Err(RecvTimeoutError::Timeout) if stop.load(Ordering::Acquire) => return,
                     Err(RecvTimeoutError::Timeout) => {}
-                    Err(RecvTimeoutError::Disconnected) => {
-                        mark_terminal_intent(&terminal_intent, AppWindowCommand::Fatal);
-                        fatal_outcome.store(true, Ordering::Release);
-                        let _ = proxy.send_event(WkUserEvent::App(AppWindowCommand::Fatal));
-                        return;
-                    }
+                    Err(RecvTimeoutError::Disconnected) => return,
                 }
             }
         })
-        .map_err(|error| WvError::EventLoop(format!("failed to start app wake bridge: {error}")))
+        .map_err(|error| {
+            WvError::EventLoop(format!("failed to start renderer outcome bridge: {error}"))
+        })
+}
+
+fn destroy_renderer_bridges(bridges: &mut BTreeMap<u32, MacRendererBridge>) {
+    for bridge in bridges.values() {
+        bridge.destroy();
+    }
+    bridges.clear();
 }
 
 fn app_loop_result(navigation_timed_out: bool, fatal: bool, code: i32) -> Result<(), WvError> {
@@ -546,9 +868,10 @@ fn app_loop_result(navigation_timed_out: bool, fatal: bool, code: i32) -> Result
 fn is_terminal_app_event(event: &Event<'_, WkUserEvent>) -> bool {
     matches!(
         event,
-        Event::UserEvent(WkUserEvent::App(
-            AppWindowCommand::Quit | AppWindowCommand::Fatal
-        ))
+        Event::LoopDestroyed
+            | Event::UserEvent(WkUserEvent::App(
+                AppWindowCommand::Quit | AppWindowCommand::Fatal
+            ))
     )
 }
 
@@ -560,20 +883,18 @@ fn mark_terminal_intent(intent: &AtomicBool, command: AppWindowCommand) -> bool 
     terminal
 }
 
-fn navigation_deadline_expired(
-    startup: &Mutex<StartupTrace>,
-    deadline: Instant,
-    terminal_command: bool,
-) -> bool {
-    !terminal_command && !navigation_finished(startup) && Instant::now() >= deadline
-}
-
 /// wry `PageLoadEvent::Finished` → navigation completion (`nav_finished`).
 fn page_load_trace_handler(
     startup: Arc<Mutex<StartupTrace>>,
     app_events: Option<Sender<AppWindowEvent>>,
+    renderer_navigation: Option<BridgeNavigationHandle>,
 ) -> impl Fn(wry::PageLoadEvent, String) + 'static {
     move |event, url| {
+        if matches!(event, wry::PageLoadEvent::Started)
+            && let Some(renderer_navigation) = renderer_navigation.as_ref()
+        {
+            renderer_navigation.navigation_started();
+        }
         #[cfg(not(all(feature = "profile-test-hooks", debug_assertions)))]
         let _ = url;
         #[cfg(all(feature = "profile-test-hooks", debug_assertions))]
@@ -614,7 +935,8 @@ mod startup_tests {
     use std::sync::{Arc, Mutex};
     use std::time::{Duration, Instant};
 
-    use super::{page_load_trace_handler, wry_page_load};
+    use super::{page_load_trace_handler, run_app_wake_bridge, wry_page_load};
+    use crate::AppWindowCommand;
     use crate::startup::{PageLoad, StartupPhase, StartupTrace, phase_for_page_load};
 
     #[test]
@@ -633,7 +955,7 @@ mod startup_tests {
     #[test]
     fn page_load_handler_marks_nav_finished_on_finished() -> Result<(), String> {
         let startup = Arc::new(Mutex::new(StartupTrace::new()));
-        let handler = page_load_trace_handler(Arc::clone(&startup), None);
+        let handler = page_load_trace_handler(Arc::clone(&startup), None, None);
         handler(wry::PageLoadEvent::Finished, String::new());
         let guard = startup
             .lock()
@@ -649,7 +971,7 @@ mod startup_tests {
     #[test]
     fn page_load_handler_ignores_started_for_nav_finished() -> Result<(), String> {
         let startup = Arc::new(Mutex::new(StartupTrace::new()));
-        let handler = page_load_trace_handler(Arc::clone(&startup), None);
+        let handler = page_load_trace_handler(Arc::clone(&startup), None, None);
         handler(wry::PageLoadEvent::Started, String::new());
         let guard = startup
             .lock()
@@ -664,7 +986,7 @@ mod startup_tests {
     fn app_page_load_handler_emits_navigation_ready_once() {
         let startup = Arc::new(Mutex::new(StartupTrace::new()));
         let (events_tx, events_rx) = std::sync::mpsc::channel();
-        let handler = page_load_trace_handler(Arc::clone(&startup), Some(events_tx));
+        let handler = page_load_trace_handler(Arc::clone(&startup), Some(events_tx), None);
         handler(wry::PageLoadEvent::Started, String::new());
         assert!(events_rx.try_recv().is_err());
         handler(wry::PageLoadEvent::Finished, String::new());
@@ -702,17 +1024,25 @@ mod startup_tests {
         let expired = Instant::now()
             .checked_sub(Duration::from_millis(1))
             .expect("one millisecond before now");
-        assert!(super::navigation_deadline_expired(&startup, expired, false));
+        assert!(crate::navigation_deadline_expired(
+            super::navigation_finished(&startup),
+            true,
+            false,
+            Instant::now(),
+            expired,
+        ));
         let terminal_intent = std::sync::atomic::AtomicBool::new(false);
         assert!(super::mark_terminal_intent(
             &terminal_intent,
             super::AppWindowCommand::Quit
         ));
         assert!(
-            !super::navigation_deadline_expired(
-                &startup,
+            !crate::navigation_deadline_expired(
+                super::navigation_finished(&startup),
+                true,
+                terminal_intent.load(std::sync::atomic::Ordering::Acquire),
+                Instant::now(),
                 expired,
-                terminal_intent.load(std::sync::atomic::Ordering::Acquire)
             ),
             "a queued terminal UI command must win at the navigation deadline"
         );
@@ -720,8 +1050,12 @@ mod startup_tests {
             .lock()
             .expect("startup lock")
             .on_page_load(PageLoad::Finished);
-        assert!(!super::navigation_deadline_expired(
-            &startup, expired, false
+        assert!(!crate::navigation_deadline_expired(
+            super::navigation_finished(&startup),
+            true,
+            false,
+            Instant::now(),
+            expired,
         ));
     }
 
@@ -736,6 +1070,53 @@ mod startup_tests {
             super::app_loop_result(true, false, 0),
             Err(super::WvError::Navigate(_))
         ));
+    }
+
+    #[test]
+    fn app_wake_bridge_disconnect_after_quit_does_not_emit_fatal() {
+        let (commands, receiver) = std::sync::mpsc::channel();
+        commands
+            .send(AppWindowCommand::Quit)
+            .expect("receiver is still live");
+        drop(commands);
+        let stop = std::sync::atomic::AtomicBool::new(false);
+        let terminal_intent = std::sync::atomic::AtomicBool::new(false);
+        let fatal_outcome = std::sync::atomic::AtomicBool::new(false);
+        let mut forwarded = Vec::new();
+        run_app_wake_bridge(
+            &receiver,
+            &stop,
+            &terminal_intent,
+            &fatal_outcome,
+            |command| {
+                forwarded.push(command);
+            },
+        );
+        assert_eq!(forwarded, [AppWindowCommand::Quit]);
+        assert!(terminal_intent.load(std::sync::atomic::Ordering::Acquire));
+        assert!(!fatal_outcome.load(std::sync::atomic::Ordering::Acquire));
+    }
+
+    #[test]
+    fn app_wake_bridge_disconnect_before_terminal_remains_fatal() {
+        let (commands, receiver) = std::sync::mpsc::channel();
+        drop(commands);
+        let stop = std::sync::atomic::AtomicBool::new(false);
+        let terminal_intent = std::sync::atomic::AtomicBool::new(false);
+        let fatal_outcome = std::sync::atomic::AtomicBool::new(false);
+        let mut forwarded = Vec::new();
+        run_app_wake_bridge(
+            &receiver,
+            &stop,
+            &terminal_intent,
+            &fatal_outcome,
+            |command| {
+                forwarded.push(command);
+            },
+        );
+        assert_eq!(forwarded, [AppWindowCommand::Fatal]);
+        assert!(terminal_intent.load(std::sync::atomic::Ordering::Acquire));
+        assert!(fatal_outcome.load(std::sync::atomic::Ordering::Acquire));
     }
 }
 

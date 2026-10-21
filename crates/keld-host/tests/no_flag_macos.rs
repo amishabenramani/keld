@@ -20,8 +20,12 @@ mod media;
 #[cfg(feature = "profile-test-hooks")]
 #[path = "no_flag/macos/profiles/mod.rs"]
 mod profiles;
+#[path = "no_flag/macos/public_fs.rs"]
+mod public_fs;
 #[path = "no_flag/macos/recovery.rs"]
 mod recovery;
+#[path = "no_flag/macos/renderer_bridge.rs"]
+mod renderer_bridge;
 #[path = "no_flag/macos/startup_rollback.rs"]
 mod startup_rollback;
 #[path = "no_flag/macos/support/mod.rs"]
