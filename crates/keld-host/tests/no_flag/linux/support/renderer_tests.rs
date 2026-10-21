@@ -210,6 +210,11 @@ fn rejected_request_does_not_poison_a_healthy_follow_up_on_the_same_listener() {
     let address = listener.local_addr().expect("shared beacon address");
     // Queue both peers on the one listener before either observation runs, so the
     // follow-up shares the listener, its backlog and the rejected peer's aftermath.
+    // The order is load-bearing: a loopback connect() returns only after the handshake
+    // completes, and Linux accept() takes completed connections from the head of the
+    // listen queue (FIFO), so the first observation accepts the bad peer. Were the
+    // order ever reversed, the first observation would serve the healthy peer and its
+    // `expect_err` would fail loudly; the row cannot pass vacuously.
     let mut bad_client = TcpStream::connect(address).expect("connect bad beacon");
     bad_client
         .write_all(b"GET /wrong.png HTTP/1.1\r\nHost: localhost\r\n\r\n")
