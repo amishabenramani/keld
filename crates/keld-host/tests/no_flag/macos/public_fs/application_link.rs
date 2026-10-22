@@ -1,21 +1,7 @@
 //! Existing macOS descriptor census binds one connected application socket pair.
+use super::private_diagnostics::assert_private_eq;
 use crate::support::unix_descriptors::{UnixDescriptor, unix_descriptors};
 use std::collections::BTreeSet;
-
-// Diagnostic counts are not socket authority. Never print the inspected PID,
-// private endpoint, descriptor ID or kernel socket address to test stderr.
-fn safe_socket_census_marker(
-    host_rows: &[UnixDescriptor],
-    bun_rows: &[UnixDescriptor],
-    pairs: &BTreeSet<(String, String)>,
-) -> String {
-    format!(
-        "KELD_KEL140_APPLICATION_SOCKET_CENSUS host_fd_count={} bun_fd_count={} connected_pairs={}",
-        host_rows.len(),
-        bun_rows.len(),
-        pairs.len()
-    )
-}
 
 pub(super) fn assert_single_application_link(host: u32, bun: u32, endpoint: &str) {
     let host_rows = unix_descriptors(host);
@@ -23,29 +9,34 @@ pub(super) fn assert_single_application_link(host: u32, bun: u32, endpoint: &str
     // Bound listeners and accepted FD clones can share a pathname. A Bun
     // connected-peer identity selects the actual host socket object instead.
     let pairs = application_socket_pairs(&host_rows, &bun_rows, endpoint);
+    // Diagnostic counts are not socket authority. Never print the inspected
+    // PID, private endpoint, descriptor ID or kernel socket address: only the
+    // scalar counts the #1009 source guard admits reach test stderr.
     eprintln!(
-        "{}",
-        safe_socket_census_marker(&host_rows, &bun_rows, &pairs)
+        "KELD_KEL140_APPLICATION_SOCKET_CENSUS host_fd_count={} bun_fd_count={} connected_pairs={}",
+        host_rows.len(),
+        bun_rows.len(),
+        pairs.len()
     );
     assert_eq!(pairs.len(), 1, "one connected application socket pair");
     let (server_socket, client_socket) = pairs.first().expect("one actual connected pair");
     let client_peer = format!("->{server_socket}");
     for row in bun_rows.iter().filter(|row| &row.socket == client_socket) {
-        assert!(
-            row.identity == client_peer,
-            "client FD clone changed its connected peer"
+        // Kernel socket addresses stay out of every failure text.
+        assert_private_eq(
+            &row.identity,
+            &client_peer,
+            "client FD clone changed its connected peer",
         );
     }
     for row in host_rows.iter().filter(|row| &row.socket == server_socket) {
         if let Some(peer) = row.identity.strip_prefix("->") {
-            assert!(
-                peer == client_socket.as_str(),
-                "host connected-peer symmetry"
-            );
+            assert_private_eq(peer, client_socket.as_str(), "host connected-peer symmetry");
         } else {
-            assert!(
-                row.identity == endpoint,
-                "accepted host socket lost the declared endpoint"
+            assert_private_eq(
+                row.identity.as_str(),
+                endpoint,
+                "accepted host socket lost the declared endpoint",
             );
         }
     }
@@ -91,24 +82,38 @@ mod tests {
             pairs.len() == 1,
             "actual connected peer relation must still match"
         );
-        let diagnostic = safe_socket_census_marker(&host_rows, &bun_rows, &pairs);
-        assert!(
-            diagnostic
-                == "KELD_KEL140_APPLICATION_SOCKET_CENSUS host_fd_count=1 bun_fd_count=1 connected_pairs=1",
-            "diagnostic must contain counts only"
-        );
-        assert!(
-            !diagnostic.contains(PRIVATE),
-            "private endpoint leaked into diagnostic"
-        );
-        assert!(
-            !diagnostic.contains("0xHOST"),
-            "kernel socket identity leaked"
-        );
-        assert!(
-            !diagnostic.contains("0xBUN"),
-            "kernel socket identity leaked"
-        );
+        // The census line itself is count-only by construction (pinned by the
+        // callsite test below). The identity predicates go through the #1009
+        // diagnostics owner: a mismatch still fails, naming only the reason,
+        // never the private endpoint or a kernel socket address.
+        for (left, right, reason) in [
+            (
+                host_rows[0].identity.as_str(),
+                "0xOTHER",
+                "accepted host socket lost the declared endpoint",
+            ),
+            (
+                bun_rows[0].identity.as_str(),
+                "->0xOTHER",
+                "client FD clone changed its connected peer",
+            ),
+            ("0xHOST", "0xBUN", "host connected-peer symmetry"),
+        ] {
+            let failure = std::panic::catch_unwind(|| {
+                assert_private_eq(left, right, reason);
+            })
+            .expect_err("the original identity predicate still fails");
+            let message = failure
+                .downcast_ref::<String>()
+                .expect("formatted assertion message");
+            assert!(message.contains(reason), "fixed reason missing");
+            for identity in [PRIVATE, "0xHOST", "0xBUN", "0xOTHER"] {
+                assert!(
+                    !message.contains(identity),
+                    "private endpoint or kernel socket identity leaked"
+                );
+            }
+        }
     }
 
     #[test]
@@ -122,19 +127,22 @@ mod tests {
             .collect();
         assert!(
             compact.contains(
-                "eprintln!(\"{}\",safe_socket_census_marker(&host_rows,&bun_rows,&pairs));"
+                "eprintln!(\"KELD_KEL140_APPLICATION_SOCKET_CENSUShost_fd_count={}\
+                 bun_fd_count={}connected_pairs={}\",\
+                 host_rows.len(),bun_rows.len(),pairs.len());"
             ),
-            "actual socket census stderr callsite bypassed safe counter formatter"
+            "actual socket census stderr callsite must stay count-only"
         );
         assert!(
             implementation.matches("eprintln!(").count() == 1,
             "socket census must not add a second unreviewed diagnostic sink"
         );
+        // Raw endpoint/pair interpolation anywhere in public_fs/ is rejected
+        // by the #1009 source guard (which would flag those literals here);
+        // the inspected PIDs are not guard bindings, so they stay checked.
         assert!(
-            !implementation.contains("endpoint={endpoint}")
-                && !implementation.contains("host={host}")
-                && !implementation.contains("{pairs:?}"),
-            "raw socket census interpolation must not return"
+            !implementation.contains("host={host}") && !implementation.contains("bun={bun}"),
+            "raw socket census PID interpolation must not return"
         );
     }
 }

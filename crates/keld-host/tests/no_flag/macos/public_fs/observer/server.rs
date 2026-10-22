@@ -2,22 +2,13 @@
 use super::http::{PendingHttpRequest, RequestPoll};
 use super::recovery::{RecoveryCommand, RecoveryObserver};
 use super::respond;
+use crate::public_fs::private_diagnostics::{Phase, observed_marker, route_summary};
 use crate::support::EVENT_DEADLINE;
 use serde_json::Value;
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::{Arc, mpsc};
 use std::thread::{self, JoinHandle};
-
-// A page POST is untrusted data: its token, payload and private paths must
-// remain available to test assertions, never to diagnostic stderr.
-fn safe_observation_marker(report: &Value) -> &'static str {
-    match report["phase"].as_str() {
-        Some("page-click-start") => "KELD_KEL140_OBSERVATION phase=page_click_start",
-        Some("page-result") => "KELD_KEL140_OBSERVATION phase=page_result",
-        _ => "KELD_KEL140_OBSERVATION phase=unrecognized",
-    }
-}
 
 /// HTTP observes ordinary app/page data; the retained Quit stream owns no authority.
 pub(in crate::public_fs) struct Observation {
@@ -41,7 +32,10 @@ impl Observation {
                 .reports
                 .recv_timeout(deadline.saturating_duration_since(std::time::Instant::now()))
                 .expect("actual page FS outcomes");
-            eprintln!("{}", safe_observation_marker(&report));
+            // A page POST is untrusted data: its token, payload and private
+            // paths stay available to assertions, never to diagnostic stderr.
+            let stage = Phase::observation_stage(&report);
+            eprintln!("{}", observed_marker(&report, stage));
             let click_start = report["phase"] == "page-click-start";
             journal.push(report);
             if click_start && !started {
@@ -287,7 +281,10 @@ impl ObserverServer {
                         self.send.send(report).expect("pending handler observation");
                     }
                 }
-                None => panic!("unexpected public FS observation route {path}"),
+                None => panic!(
+                    "KELD_KEL140_OBSERVER_UNEXPECTED_ROUTE {}",
+                    route_summary(path)
+                ),
             },
         }
     }
@@ -315,54 +312,25 @@ impl ObserverServer {
 }
 
 #[cfg(test)]
-mod safe_observation_marker_tests {
-    use super::*;
-
-    #[test]
-    fn untrusted_report_values_cannot_reach_observer_diagnostics() {
-        const PRIVATE: &str = "KELD_TEST_PRIVATE_HTTP_TOKEN_PATH_BODY_SENTINEL";
-        for (report, expected) in [
-            (
-                serde_json::json!({"phase": "page-click-start", "token": PRIVATE}),
-                "KELD_KEL140_OBSERVATION phase=page_click_start",
-            ),
-            (
-                serde_json::json!({"phase": "page-result", "body": PRIVATE}),
-                "KELD_KEL140_OBSERVATION phase=page_result",
-            ),
-            (
-                serde_json::json!({"phase": PRIVATE, "path": PRIVATE}),
-                "KELD_KEL140_OBSERVATION phase=unrecognized",
-            ),
-        ] {
-            let marker = safe_observation_marker(&report);
-            assert!(
-                marker == expected,
-                "diagnostic stage must use fixed allowlisted words"
-            );
-            assert!(
-                !marker.contains(PRIVATE),
-                "private HTTP report escaped into diagnostics"
-            );
-        }
-    }
-
-    // Pure marker tests alone would stay green if the actual stderr callsite
-    // were changed back to printing the untrusted report. This source-binding
-    // guard deliberately covers that one callsite as well, without evaluating
-    // or publishing any private fixture data.
+mod observation_marker_tests {
+    // Pure marker tests (`private_diagnostics`) alone would stay green if the
+    // actual stderr callsite were changed back to a stage-less marker or to
+    // printing the untrusted report. This source-binding check covers that
+    // one callsite, without evaluating or publishing any private fixture
+    // data. Rejecting a restored raw report interpolation here or anywhere in
+    // public_fs/ is owned by the private_diagnostics source guard (whose own
+    // scan would flag that interpolation shape even as a literal here).
     #[test]
     fn observation_report_log_callsite_must_use_fixed_marker() {
         let (implementation, _) = include_str!("server.rs")
-            .split_once("#[cfg(test)]\nmod safe_observation_marker_tests")
+            .split_once("#[cfg(test)]\nmod observation_marker_tests")
             .expect("adjacent regression module owns the source boundary");
         assert!(
-            implementation.contains("eprintln!(\"{}\", safe_observation_marker(&report));"),
-            "actual observation stderr callsite bypassed the fixed marker"
-        );
-        assert!(
-            !implementation.contains("KELD_KEL140_OBSERVATION {report}"),
-            "raw report interpolation must not be restored"
+            implementation.contains(
+                "let stage = Phase::observation_stage(&report);\n            \
+                 eprintln!(\"{}\", observed_marker(&report, stage));"
+            ),
+            "actual observation stderr callsite bypassed the fixed stage marker"
         );
     }
 }
