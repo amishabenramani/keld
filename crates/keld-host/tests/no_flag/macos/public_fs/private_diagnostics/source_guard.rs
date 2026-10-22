@@ -26,7 +26,7 @@ use std::path::{Path, PathBuf};
 
 /// Bindings that hold untrusted records, captured child output or private
 /// values in the public-FS fixture.
-const UNTRUSTED: [&str; 31] = [
+const UNTRUSTED: [&str; 34] = [
     "report",
     "reports",
     "result",
@@ -58,6 +58,10 @@ const UNTRUSTED: [&str; 31] = [
     "initial_document",
     "raw_bytes",
     "path",
+    // Kernel socket addresses (application-link census identities).
+    "identity",
+    "client_peer",
+    "client_socket",
 ];
 
 /// Macros whose arguments are rendered into a message or log line.
@@ -100,7 +104,24 @@ const SCALAR_PROJECTIONS: [&str; 5] = [
 ];
 
 /// Equality operands naming one of these render a private value on failure.
-const PRIVATE_FIELDS: [&str; 4] = ["nonce", "token", "endpoint", "[key]"];
+/// `server_socket` is only an equality operand here, not an untrusted format
+/// binding: `format!("->{server_socket}")` legitimately builds `client_peer`.
+/// Kernel PIDs and process images are not listed: the fixture's process
+/// custody checks assert them with `assert_eq!` by design.
+const PRIVATE_FIELDS: [&str; 10] = [
+    "nonce",
+    "token",
+    "endpoint",
+    "[key]",
+    // Kernel socket addresses (application-link census identities).
+    ".identity",
+    "client_peer",
+    "client_socket",
+    "server_socket",
+    // Kernel stdout pipe identities of the descendant fixture.
+    "bun_pipe",
+    "child_pipe",
+];
 
 fn untrusted_interpolations(source: &str) -> Vec<String> {
     untrusted_interpolations_with(source, &private_accessors(source))
@@ -606,6 +627,15 @@ fn untrusted_interpolation_guard_sees_every_known_binding_shape() {
         // Route paths carry a pending-handler nonce.
         r#"panic!("unexpected route {path}");"#,
         r#"panic!("unexpected route {}", path);"#,
+        // Application-link kernel socket identities (#1015).
+        r#"assert_eq!(row.identity, client_peer, "client FD clone changed its connected peer");"#,
+        r#"assert_eq!(peer, client_socket.as_str(), "host connected-peer symmetry");"#,
+        "assert_ne!(server_socket, other);",
+        r#"eprintln!("peer={client_peer}");"#,
+        r#"panic!("socket {}", row.identity);"#,
+        // Descendant stdout pipe identities (#1012).
+        r#"assert_eq!(bun_pipe, child_pipe, "descendant must inherit exact Bun stdout endpoint");"#,
+        "debug_assert_ne!(child_pipe, other);",
     ] {
         assert!(
             !untrusted_interpolations(leaked).is_empty(),
@@ -632,6 +662,13 @@ fn untrusted_interpolation_guard_sees_every_known_binding_shape() {
         assert_eq!(phase(&a), b, "phase {}", phase(&a).is_some());"#,
         r#"fn fresh(bytes: &mut String) { bytes.push_str("x"); let _ = "fixture nonce"; }
         fn check(a: &str) { assert_eq!(fresh_len(a), 32, "{}", fresh_len(a)); }"#,
+        // The server socket builds the expected client peer; socket counts
+        // and process-custody PIDs are not private socket identities.
+        r#"let client_peer = format!("->{server_socket}");"#,
+        r#"assert_eq!(pairs.len(), 1, "one connected application socket pair");"#,
+        r#"assert_private_eq(&row.identity, &client_peer, "client FD clone changed its connected peer");"#,
+        r#"assert_eq!(parent_process(guardian), host, "owned guardian parent");"#,
+        r#"let bun_pipe = pipe_identity(family.bun, "1");"#,
     ] {
         assert!(
             untrusted_interpolations(fixed).is_empty(),
