@@ -1528,12 +1528,12 @@ chrome.webview.postMessage('{nonce}:{phase}:'+prior+':resolved:{track}:'+matchin
     #[ignore = "real Windows COM environment ownership and native HWND Close"]
     fn windows_com_engine_lifetime_subprocess() -> Result<(), WvError> {
         run_with_watchdog(FIXTURE_DEADLINE, || {
-            COM_LIFETIME_PHASES.with(|enabled| enabled.set(true));
-            observe_com_phase("initial-engine-start");
             use tao::platform::windows::WindowExtWindows as _;
             use windows::Win32::System::Com::{APTTYPE, APTTYPEQUALIFIER, CoGetApartmentType};
             use windows::Win32::UI::WindowsAndMessaging::{PostMessageW, WM_CLOSE};
 
+            COM_LIFETIME_PHASES.with(|enabled| enabled.set(true));
+            observe_com_phase("initial-engine-start");
             let apartment = || {
                 let mut kind = APTTYPE::default();
                 let mut qualifier = APTTYPEQUALIFIER::default();
