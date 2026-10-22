@@ -172,6 +172,7 @@ fn attributed_control_eof_keeps_partial_and_registered_failures_fatal() {
                 attempt: 2,
                 group_pid: 42,
                 group_identity: None, // inert EOF-state fixture, never signal this numeric PID
+                native_signal: super::super::guarded_primary::NativeSignalAuthority::Armed,
             }),
         ),
     ] {
@@ -217,6 +218,7 @@ fn denied_recovery_cannot_be_rearmed_by_late_ready() {
         worker: None,
         shutdown_attributed: false,
         shutdown_failed: false,
+        orderly_acknowledged: false,
         shutdown_sent: None,
         #[cfg(test)]
         shutdown_denial_fence: None,
