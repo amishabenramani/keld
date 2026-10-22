@@ -27,18 +27,36 @@ and review disposition. `summary.json` pins the scope and the counts.
 | Production (B) | 18 |
 | Tests (C) | 59 |
 | **Total in this bounded macOS scope** | **77** |
-| Verified *for a prior narrow security PR*, not full architecture | 8 |
+| Verified *for a prior narrow security PR*, not full architecture | 6 |
+| Reopened: a later review found a defect in the pinned blob | 2 |
 | **Pending complete file-level architecture review** | **69** |
 | Added relative to pinned `main` | 75 |
 | Modified relative to pinned `main` | 2 |
 
 All 77 rows are pinned to Git tree objects; `added` means absent from the
 specified `main` tree only. The 69 pending rows must **not** be inferred as
-cohesive, safe, or no-change. Even the eight scoped-verified rows still require
+cohesive, safe, or no-change. Even the six scoped-verified rows still require
 any broader #824 cohesion, cross-component and integration disposition not
 demonstrated by their narrow security fixes.
 
-## Existing reviewed security paths, not reopened
+## Existing reviewed security paths
+
+**Correction (2026-10-22).** Two rows that this ledger first recorded as
+`verified-scoped` are now `reopened`, because a later review found a defect in
+the exact pinned blob. Neither blob is reviewed evidence:
+
+- `guarded_primary.rs` blob `edf7b83a` (#947 at `b88b4ef6`): the
+  [#947 review](https://github.com/gyldlab/keld/pull/947#pullrequestreview-5579005672)
+  found a HIGH defect at exactly that commit (a retained witness allowed a raw
+  `killpg` on a recycled PGID during retry). The fix landed in `1b5de775` and
+  `03815dee`, with different blobs.
+- `process_group.rs` blob `ab6e23fb` (#945 at `c20f0151`): the
+  [#945 review](https://github.com/gyldlab/keld/pull/945) of 2026-10-21 found a
+  medium duplicated group-absence predicate. The single absence owner landed in
+  `20997b55`..`90c46fa0`, with different blobs.
+
+The descriptions below record what each PR claimed at the pinned commits.
+
 
 - [#945](https://github.com/gyldlab/keld/pull/945), commit `c20f015143233d47efa1e67341e7899d7b647d26`:
   `generation_host.rs`, `process_group.rs` and
@@ -58,8 +76,10 @@ demonstrated by their narrow security fixes.
   session reuse. Five native cases include genuine externally reaped `ECHILD`
   and a direct `exec` fixture.
 
-The eight exact blobs were compared with their respective final PR heads and
-match **byte-for-byte** at this ledger's tip. Prior #948 evidence: full native
+On 2026-10-18 the eight exact blobs were compared with their then-final PR
+heads and matched **byte-for-byte** at this ledger's tip. Those PR heads have
+since moved (#945, #947 and #948 were changed after review), so this
+comparison is historical and does not describe the current PR heads. Prior #948 evidence: full native
 macOS Nextest **470/470 pass, five skipped**, warning-denied Clippy and hygiene
 green; independent exact-head review **no blockers**; hosted workflow
 [39144935715, attempt 2](https://github.com/gyldlab/keld/actions/runs/39144935715)
@@ -79,9 +99,11 @@ green; independent exact-head review **no blockers**; hosted workflow
    around lines 143–145 at the pinned tip, says `HostGuardian` consumes the
    group identity on every terminal path. That statement became false after
    #948: native cleanup failure retains the witness but cannot restart a
-   terminal session. The same file feeds generated `llms-full.txt`, which
-   overlaps separately owned draft [#938](https://github.com/gyldlab/keld/pull/938).
-   Reconcile that ownership before documentation/generation edits.
+   terminal session. **Resolved in #948 `ec503285`** (2026-10-22): the
+   paragraph now states that `HostGuardian` retains the birth on a failed
+   cleanup and never signals again, because every terminal path drops the
+   liveness writer and every public entry and `Drop` are gated on it;
+   `llms-full.txt` was regenerated in the same commit.
 3. **Independent Mac host acceptance gap.** #948 hosted attempt 1 failed in
    unchanged `keld-host::no_flag_macos::public_fs::real_pointer_public_fs_uses_stock_project_policy`
    at the child-exit/output deadline; attempt 2 passed with the same code and
