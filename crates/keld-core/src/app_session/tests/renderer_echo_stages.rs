@@ -74,6 +74,14 @@ fn echo_call_payloads(bytes: &[u8]) -> Vec<Vec<u8>> {
     calls
 }
 
+/// The renderer-visible code of one terminal; a reply has none.
+fn renderer_code(terminal: &RendererEchoTerminal) -> Option<&str> {
+    match terminal {
+        RendererEchoTerminal::Reply(_) => None,
+        RendererEchoTerminal::Error { code, .. } => Some(code),
+    }
+}
+
 fn assert_slot_empty(handle: &PrimaryRouterHandle) {
     assert!(
         handle.pending_echo.lock().expect("pending lock").is_none(),
@@ -124,6 +132,11 @@ fn s8_call_without_an_admitted_generation_reaches_no_stream() {
         .begin_echo_call(&refused)
         .expect_err("no admitted generation");
     assert!(matches!(error, EchoCallRefusal::NoGeneration), "{error:?}");
+    assert_eq!(
+        renderer_code(&error.renderer_terminal()),
+        Some("KELD-WV-012"),
+        "no write was attempted, so the call is definitely not dispatched"
+    );
     assert_slot_empty(&handle);
     assert_eq!(
         bytes_until_eof(&mut g1_peer),
@@ -167,6 +180,10 @@ fn s5_s6_s7_refusals_return_before_any_write() {
         .begin_echo_call(&request("s7-refused"))
         .expect_err("slot busy");
     assert!(matches!(busy, EchoCallRefusal::Busy), "{busy:?}");
+    assert_eq!(
+        busy.renderer_terminal(),
+        RendererEchoTerminal::error("KELD-WV-011", "another application call is already pending")
+    );
     answer_next_call(&mut peer, &call, &first);
     router.shutdown().expect("S7 router shutdown");
     assert!(
@@ -183,6 +200,10 @@ fn s5_s6_s7_refusals_return_before_any_write() {
     assert!(
         matches!(quitting, EchoCallRefusal::Quitting),
         "{quitting:?}"
+    );
+    assert_eq!(
+        quitting.renderer_terminal(),
+        RendererEchoTerminal::error("KELD-WV-011", "application is quitting")
     );
     assert_slot_empty(&handle);
     drop(router.shutdown());
@@ -212,6 +233,10 @@ fn s5_s6_s7_refusals_return_before_any_write() {
         assert!(
             matches!(unavailable, EchoCallRefusal::StateUnavailable),
             "{unavailable:?}"
+        );
+        assert_eq!(
+            unavailable.renderer_terminal(),
+            RendererEchoTerminal::error("KELD-WV-011", "host call state is unavailable")
         );
         drop(router.shutdown());
         assert!(
@@ -314,6 +339,11 @@ fn partial_write(free: usize) -> PartialWrite {
         matches!(&error, EchoCallRefusal::WriteFailed(source)
             if source.to_string().contains("renderer Echo call write")),
         "free={free}: {error:?}"
+    );
+    assert_eq!(
+        renderer_code(&error.renderer_terminal()),
+        Some("KELD-WV-013"),
+        "free={free}: a failed write is outcome unknown, never not-dispatched"
     );
     assert_slot_empty(&fixture.handle);
     let retired = fixture
@@ -512,6 +542,11 @@ fn assert_settled_once_with_error(call: &PrimaryEchoCall, arm: &str) {
         terminal.is_err(),
         "{arm}: a retirement became a reply: {terminal:?}"
     );
+    assert_eq!(
+        renderer_code(&dispatched_echo_terminal(Some(terminal))),
+        Some("KELD-WV-013"),
+        "{arm}: a retirement after the write is outcome unknown"
+    );
     assert!(
         matches!(
             call.reply.recv_timeout(KILL_SWITCH),
@@ -522,11 +557,17 @@ fn assert_settled_once_with_error(call: &PrimaryEchoCall, arm: &str) {
 }
 
 /// S10b: a Bun ERR reaches the reply channel with Bun's own code, whatever
-/// it claims, including a host-only renderer code. The renderer code is
-/// assigned later, by the dispatch mapping.
+/// it claims, including a host-only renderer code. The dispatch mapping then
+/// rewrites every `KELD-WV-*` claim to `KELD-WV-013` (criterion 11).
 #[test]
 fn s10b_bun_err_codes_reach_the_reply_channel_verbatim() {
-    for code in ["KELD-WV-011", "KELD-API-001", "KELD-IPC-023"] {
+    for code in [
+        "KELD-WV-011",
+        "KELD-WV-012",
+        "KELD-WV-013",
+        "KELD-API-001",
+        "KELD-IPC-023",
+    ] {
         let (router, handle, mut peer, _owner, _window) = primary_echo_test_router();
         let call = written_call(&handle, &mut peer, "s10b");
         let claimed = CallError {
@@ -541,7 +582,20 @@ fn s10b_bun_err_codes_reach_the_reply_channel_verbatim() {
             .expect("ERR settles the call")
             .expect("an ERR is an answer, not a retirement")
         {
-            PrimaryEchoReply::Err(error) => assert_eq!(error, claimed),
+            PrimaryEchoReply::Err(error) => {
+                assert_eq!(error, claimed);
+                let rendered = dispatched_echo_terminal(Some(Ok(PrimaryEchoReply::Err(error))));
+                let expected = if code.starts_with("KELD-WV-") {
+                    "KELD-WV-013"
+                } else {
+                    code
+                };
+                assert_eq!(
+                    renderer_code(&rendered),
+                    Some(expected),
+                    "Bun claimed {code}"
+                );
+            }
             PrimaryEchoReply::Reply(bytes) => panic!("{code}: ERR became a Reply {bytes:?}"),
         }
         router.shutdown().expect("S10b router shutdown");
@@ -552,24 +606,44 @@ fn s10b_bun_err_codes_reach_the_reply_channel_verbatim() {
 /// comes from the variant alone; the write error's text never reaches it.
 #[test]
 fn refusal_stages_map_to_their_renderer_terminal() {
-    let refused = RendererEchoTerminal::error(
-        "KELD-WV-011",
-        "application call is unavailable or already pending",
-    );
-    for refusal in [
-        EchoCallRefusal::Quitting,
-        EchoCallRefusal::StateUnavailable,
-        EchoCallRefusal::Busy,
-        EchoCallRefusal::NoGeneration,
-        EchoCallRefusal::WriteFailed(app_detail("renderer Echo call write", "test write")),
+    for (refusal, code, detail) in [
+        (
+            EchoCallRefusal::Quitting,
+            "KELD-WV-011",
+            "application is quitting",
+        ),
+        (
+            EchoCallRefusal::StateUnavailable,
+            "KELD-WV-011",
+            "host call state is unavailable",
+        ),
+        (
+            EchoCallRefusal::Busy,
+            "KELD-WV-011",
+            "another application call is already pending",
+        ),
+        (
+            EchoCallRefusal::NoGeneration,
+            "KELD-WV-012",
+            "no application generation is admitted; the call was not sent",
+        ),
+        (
+            EchoCallRefusal::WriteFailed(app_detail("renderer Echo call write", "KELD-WV-012")),
+            "KELD-WV-013",
+            "application call write failed; the application may have received it",
+        ),
     ] {
-        assert_eq!(refusal.renderer_terminal(), refused, "{refusal:?}");
+        assert_eq!(
+            refusal.renderer_terminal(),
+            RendererEchoTerminal::error(code, detail),
+            "{refusal:?}"
+        );
     }
 }
 
 /// The renderer terminal for a dispatched call (§4.2 S10, S10b, S15): a
-/// reply passes through, every retirement maps to one code, and a Bun ERR
-/// keeps its own code.
+/// reply passes through, every retirement is outcome unknown, a Bun
+/// `KELD-WV-*` claim is rewritten, and any other Bun code keeps its value.
 #[test]
 fn dispatched_calls_map_to_their_renderer_terminal() {
     assert_eq!(
@@ -577,7 +651,7 @@ fn dispatched_calls_map_to_their_renderer_terminal() {
         RendererEchoTerminal::Reply(vec![1, 2])
     );
     let ended = RendererEchoTerminal::error(
-        "KELD-WV-011",
+        "KELD-WV-013",
         "application link ended before the renderer reply",
     );
     assert_eq!(
@@ -590,7 +664,22 @@ fn dispatched_calls_map_to_their_renderer_terminal() {
         ended,
         "a dropped reply channel"
     );
-    for code in ["KELD-WV-011", "KELD-API-001"] {
+    for claimed in ["KELD-WV-011", "KELD-WV-012", "KELD-WV-013", "KELD-WV-999"] {
+        assert_eq!(
+            dispatched_echo_terminal(Some(Ok(PrimaryEchoReply::Err(CallError {
+                code: claimed.to_owned(),
+                message: format!("{claimed}: claimed by the peer"),
+            })))),
+            RendererEchoTerminal::error(
+                "KELD-WV-013",
+                "application answered with a host-only renderer code"
+            ),
+            "Bun claimed {claimed}"
+        );
+    }
+    // The rewrite is scoped to the `KELD-WV-` prefix: other codes, including a
+    // look-alike, keep Bun's code and message.
+    for code in ["KELD-API-001", "KELD-IPC-023", "KELD-WVX-012"] {
         let message = format!("{code}: claimed by the peer");
         assert_eq!(
             dispatched_echo_terminal(Some(Ok(PrimaryEchoReply::Err(CallError {
@@ -602,6 +691,41 @@ fn dispatched_calls_map_to_their_renderer_terminal() {
                 detail: message,
             },
             "a Bun ERR {code}"
+        );
+    }
+}
+
+/// Criterion 1 at the mapping: across every stage the host can reach, only
+/// the no-generation refusal yields `KELD-WV-012`. Every other input,
+/// including a Bun claim of that code, yields something else.
+#[test]
+fn only_the_no_generation_refusal_is_not_dispatched() {
+    let refusals = [
+        EchoCallRefusal::Quitting,
+        EchoCallRefusal::StateUnavailable,
+        EchoCallRefusal::Busy,
+        EchoCallRefusal::NoGeneration,
+        EchoCallRefusal::WriteFailed(app_detail("renderer Echo call write", "test")),
+    ];
+    let not_dispatched: Vec<String> = refusals
+        .iter()
+        .filter(|refusal| renderer_code(&refusal.renderer_terminal()) == Some("KELD-WV-012"))
+        .map(|refusal| format!("{refusal:?}"))
+        .collect();
+    assert_eq!(not_dispatched, ["NoGeneration"]);
+    let dispatched = [
+        Some(Ok(PrimaryEchoReply::Reply(Vec::new()))),
+        Some(Err(app_detail("renderer Echo call", "retired"))),
+        None,
+        Some(Ok(PrimaryEchoReply::Err(CallError {
+            code: "KELD-WV-012".to_owned(),
+            message: "KELD-WV-012: claimed by the peer".to_owned(),
+        }))),
+    ];
+    for reply in dispatched {
+        assert_ne!(
+            renderer_code(&dispatched_echo_terminal(reply)),
+            Some("KELD-WV-012")
         );
     }
 }
