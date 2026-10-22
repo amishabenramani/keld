@@ -36,25 +36,29 @@ impl Drop for OwnedLeader {
 }
 
 fn sleeper(group: i32) -> OwnedLeader {
-    OwnedLeader(
-        Command::new("/bin/sleep")
-            .arg("30")
-            .process_group(group)
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .expect("test-owned native group process"),
-    )
+    OwnedLeader(sleeper_child(group))
 }
 
-fn raw(pid: u32) -> i32 {
+/// A bare test-owned `/bin/sleep 30` Child, for a caller that takes the
+/// Child by value; prefer [`sleeper`], which kills it on drop.
+pub(super) fn sleeper_child(group: i32) -> Child {
+    Command::new("/bin/sleep")
+        .arg("30")
+        .process_group(group)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("test-owned native group process")
+}
+
+pub(super) fn raw(pid: u32) -> i32 {
     i32::try_from(pid).expect("positive native PID")
 }
 
 /// Await the kernel's zombie-only group state after a SIGKILL; the poll is
 /// the awaited condition, the existing deadline only a kill switch.
-fn await_zombie_only(group: i32) {
+pub(super) fn await_zombie_only(group: i32) {
     let deadline = Instant::now() + GUARDIAN_SHUTDOWN_DEADLINE;
     while kill(Pid::from_raw(-group), None) != Err(Errno::EPERM) {
         assert!(Instant::now() < deadline, "group never became zombie-only");
