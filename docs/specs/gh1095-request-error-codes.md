@@ -47,8 +47,8 @@ Non-goals:
 
 - navigation policy, the trusted-page predicate, and which documents may hold
   the bridge (separate work);
-- the restart notification's design, delivery and ordering (separate spec; this
-  spec only consumes it as the WV-012 resend trigger, §4.4);
+- the restart notification's design, delivery and ordering ([#1098](https://github.com/gyldlab/keld/issues/1098);
+  once it ships, this spec consumes it as the WV-012 restart trigger, §4.4);
 - the secure app origin (#1090, KEL-79);
 - a host-side dedup store, a "last dispatched id", or a Keld status-query API
   (all rejected, §4.1);
@@ -120,8 +120,10 @@ The design deviates from no architecture section.
 8. **One resend after WV-012 or API-002 runs once.** The page resends once,
    as a new invoke, and the handler census for the logical action is exactly 1.
    The trigger depends on the code:
-   - after WV-012, the trigger is the first generation (at startup) or the
-     successor generation becoming ready;
+   - after WV-012, at startup or after a restart: until restart readiness
+     exists ([#1098](https://github.com/gyldlab/keld/issues/1098)), the trigger is a later user action or a reliable
+     app signal. A generation becoming ready is not, by itself, an app-visible
+     trigger;
    - after API-002, the trigger is the handler being registered, which may
      happen in the same generation (late registration).
 9. **Bun outbound codes are unchanged and documented as Unknown.**
@@ -259,7 +261,7 @@ Rejected alternatives:
 - **A host-side dedup store or result cache.** The host sees the dispatch point,
   not the commit of the effect. A cache would fabricate results for Unknown
   calls and would carry a predecessor generation's results to a new principal.
-- **"Last dispatched id" in the restart notification.** "Dispatched" is not
+- **"Last dispatched id" in the restart notification ([#1098](https://github.com/gyldlab/keld/issues/1098)).** "Dispatched" is not
   "processed". The owner has also decided that the notification carries no ids
   or counters.
 - **A Keld status-query API.** Only the app's durable store knows whether the
@@ -404,14 +406,14 @@ WV-012 resend rules:
 
 - The resend is a new `invoke`, with a new local request id and a new host
   correlation. It is never a replay of the old frame.
-- WV-012 ships independently of the restart notification (owner decision Q1,
-  §10). Keld emits it only when non-dispatch is proven (S8).
+- WV-012 ships independently of the restart notification ([#1098](https://github.com/gyldlab/keld/issues/1098);
+  owner decision Q1, §10). Keld emits it only when non-dispatch is proven (S8).
 - No blind retries, no timer or backoff retry loops, and no Keld replay.
-- Until restart readiness exists, the one resend is allowed only after a later
-  user action or a reliable app signal. This applies at startup as well as
+- Until restart readiness exists ([#1098](https://github.com/gyldlab/keld/issues/1098)), the one resend is allowed
+  only after a later user action or a reliable app signal. This applies at startup as well as
   after a restart.
-- Once it ships, the trusted restart notification (tracked separately) becomes
-  the restart trigger.
+- Once it ships, the trusted restart notification ([#1098](https://github.com/gyldlab/keld/issues/1098)) becomes the
+  restart trigger.
 - Keld does not claim automatic recovery: a WV-012 call is recovered only by
   the app's own resend.
 - A second WV-012, or an API-002, on the resend is surfaced to the user and is
@@ -472,6 +474,14 @@ its `Quit`. Owner decision Q3 (§10) applies:
 - The independently proven non-execution case is kept: `KELD-IPC-024`. The
   host writes it for a CALL it read behind the accepted `Quit` and ran none of
   it. This is a host-side proof, tested by `guarded_router_and_quit.rs`.
+- The GH-527 falsifier "a caller or contract that must tell `KELD-IPC-024`
+  apart from `KELD-IPC-022`" is now met, and T0 records it as met in GH-527.
+  T0 does not change the close-on-REPLY design. Its cost is now explicit: a
+  call the host answered `KELD-IPC-024` is observed by the role as
+  `KELD-IPC-022`, which is Unknown. Whether to deliver that `024` is a decision
+  for GH-527's owner.
+- GH-531's O11 row ("the facade treats the two alike") gets a matching interim
+  note.
 - The matching comment at `transport.ts:2571-2572` is production source, so
   T0 leaves it unchanged. Correcting it is a recorded T4 follow-up.
 
@@ -611,7 +621,7 @@ without parsing the message string? The audit is at `516644b0`.
 | Native renderer bridge | Yes, inside Rust: `PageOutcome.code: Option<String>`; `RendererBridgeOutcome::Error.code: String` | `macos_bridge.rs:653-661`, `:234-259` |
 | Host | Yes, inside Rust: renderer outcomes carry `code: String`; `HostAppError::code()` | `app_session.rs:4219`, `4235`, `4276`, `4283`; `app_session/error.rs:88` |
 | IPC `CallError` (wire) | **Yes:** `code: String` beside `message` | `crates/keld-ipc/src/call_error.rs:59-65` |
-| `@keld/kipc` | **Mixed.** ERR replies and link-terminal codes reject with an own enumerable `code` (`codedError`, `linkError`; `isCallError`). Local validation and decode failures use `kipcError`, a plain `Error` with the code only in `message`, so `isCallError` is false for them | `transport.ts:1254-1262`, `1388-1390`, `1118-1135` (`errorFromErrFrame`), `1067-1074`; `kipcError` `227-229`, used at `1052`, `1059` |
+| `@keld/kipc` | **Mixed.** ERR replies and link-terminal codes reject with an own enumerable `code` (`codedError`, `linkError`; `isCallError`). Local validation and decode failures use `kipcError`, a plain `Error` with the code only in `message`, so `isCallError` is false for them | `transport.ts:1254-1262`, `1388-1390`, `1118-1135` (`errorFromErrFrame`), `1067-1074`; `kipcError` `227-229`, used at `1052`, `1059`. A malformed ERR, empty or not a `CallError`, also becomes a plain `kipcError` with no `code` (`errorFromErrFrame`, `:1126`, `:1132`). On the `WorkerLink` path the same malformation ends the link instead (`:2311`) |
 | `@keld/api` | **Mixed.** Host ERRs (fs, auth) reach the app as `KeldCallError` with `code`, re-exported with `isCallError`. Local failures are plain `Error`s with the code in `message`: an unset link (`KELD-IPC-007`), `apiError` for `channels.handle` registration, and the fs response-variant mismatch | `index.ts` exports; `app.ts:76-82`; `channels.ts:28-30`; `fs.ts:16`, `26` |
 | Rust error types | **Mixed.** `code()` exists on `HostAppError`, the keld-guard refusal types and `keld-ipc` admission. `WvError` and `IpcError` expose the code only through `Display` | `app_session/error.rs:88`; `keld-guard/src/lib.rs:347`, `507`; `keld-ipc/src/admission.rs:63`; `keld-wv/src/error.rs:55-110`; `keld-ipc/src/lib.rs:114-138` |
 | CLI/MCP `KeldErrorObject` | **Yes:** `code`, `message`, `cause`, `fix`, `docs` fields | `crates/keld-cli/src/error_object.rs:11-22` |
@@ -646,8 +656,10 @@ justified here.
   ```
 - **Backward compatibility.**
   - `message`, `name`, `instanceof Error` and `String(err)` are unchanged.
-  - The only visible difference is that `JSON.stringify(err)` now includes
-    `"code"`.
+  - `code` is enumerable, so `JSON.stringify(err)`, `Object.keys(err)` and
+    object spread (`{ ...err }`) now include it. This is intended: `code` is a
+    stable public field, enumerable exactly like `@keld/kipc` `codedError`'s.
+    These are the only visible differences.
 - **Scope.**
   - The property is set at the facade's single constructor, so it covers every
     invoke rejection.
@@ -686,7 +698,7 @@ created by another worker; no number exists yet. It covers:
   - `@keld/kipc` transport behaviour;
   - guard, permissions, workspace `Cargo.toml`;
   - navigation policy;
-  - restart-notification code.
+  - restart-notification code ([#1098](https://github.com/gyldlab/keld/issues/1098)).
 
 ## 6. Tasks (each ≈ one PR; ordered)
 
@@ -694,7 +706,7 @@ created by another worker; no number exists yet. It covers:
   - this spec;
   - the KEL-142 §7 current-behaviour correction;
   - the interim `KELD-WV-011` registry text;
-  - the GH-527 Q3 correction.
+  - the GH-527 Q3 correction, and the matching GH-531 O11 interim note.
 - [ ] T1: test-only characterisation. It pins today's codes at S8–S16 and
   S10b with negative controls, writing the AT-12a/12d/13a/13b/13c arms against
   today's strings. It also pins the cross-document settlement today (AT-S arm
@@ -721,7 +733,7 @@ created by another worker; no number exists yet. It covers:
   needs it.
 
 T2–T4 are independent once T1 lands. WV-012 does not wait for the restart
-notification (Q1).
+notification (Q1, [#1098](https://github.com/gyldlab/keld/issues/1098)).
 
 ## 7. Test plan
 
@@ -740,8 +752,8 @@ Every hosted arm prints its raw census with `--success-output immediate`.
 |---|---|---|---|---|---|---|
 | AT-12a | 1, 7 | S8 (G2 held before HELLO) | hosted macOS | 10 × arms {handler before `whenReady`, handler inside `whenReady`} | page code `KELD-WV-012`; `KIPC_CALL` = admits − 1; census 0 for G1 and G2 forever; 1 terminal | G2 released before the invoke → reply, census 1 (the oracle can count) |
 | AT-12b | 1 | S8 | macOS unit (keld-core) | deterministic | WV-012 variant returned; the counting writer saw **0 write calls** | admitted generation → 1 write call and no WV-012; **own mutation:** move the `current is None` refusal after `write_frame` → the counting writer sees 1 call and AT-12b fails; cross-check: map `WriteFailed` to WV-012 → AT-13a fails |
-| AT-12d | 1, 8 | S8 at startup (G1 held before HELLO, page already loaded) | hosted macOS | 10 | page invokes before the first admission → `KELD-WV-012`, census 0; after G1 Ready, one resend → reply, census 1; `KIPC_CALL` = admits − 1 | G1 released before the invoke → reply, census 1 (the startup gap is load-bearing) |
-| AT-12c | 8 | S8 then resend | hosted macOS | 10 | after host Ready for G2, one resend → reply; census for the logical action = 1 | resend before G2 is admitted → WV-012 again (readiness is load-bearing) |
+| AT-12d | 1, 8 | S8 at startup (G1 held before HELLO, page already loaded) | hosted macOS | 10 | page invokes before the first admission → `KELD-WV-012`, census 0, `KIPC_CALL` = admits − 1. The test then releases G1 and waits for the host Ready marker; this is a test precondition only, not a page-visible trigger. Then it drives a **user action**: an OS-visible pointer click on the fixture's resend button, as in KEL-142 AC3. The page resends once → reply, census 1 | (i) G1 released before the first invoke → reply, census 1, so the startup gap is load-bearing; (ii) the same click driven while G1 is still held → WV-012 again, surfaced, and no second resend (at most one resend) |
+| AT-12c | 8 | S8 then resend after a restart | hosted macOS | 10 | after a WV-012 in the restart gap, the test waits for G2's host Ready marker (test precondition only), then drives an OS-visible click on the resend button → one resend → reply; census for the logical action = 1 | the same click driven before G2 is admitted → WV-012 again, surfaced, and no second resend |
 | AT-13a | 2 | S9, k ∈ {0, 1, HEADER_LEN−1, HEADER_LEN, HEADER_LEN+len−1} | macOS unit (keld-core; extends `failed_primary_writes_retire_the_generation`) | deterministic per k | WV-013; slot cleared; generation retired; 0 bytes written to the stream after the failure | k = full length → DP reached, no S9; characterization: an injected completing write after failure makes the Bun `FrameReader` dispatch (proves why S9 cannot be WV-012 yet) |
 | AT-13b | 3, 7 | S10 | hosted macOS | 10 per arm | arms: (i) SIGSTOP Bun → invoke → SIGKILL: census 0; (ii) kill at `entered`: census 1; (iii) kill after `effect-committed`: effect present. Every arm: `KELD-WV-013`, 1 terminal, G2 census for the nonce 0 forever | arm (ii) census 1 under the same code proves WV-013 cannot mean "not sent"; mutation: S10 → WV-012 fails arm (ii) |
 | AT-13c | 4 | S16 | hosted macOS | 10 | handler held at `entered`; page `location.reload()`; the `pagehide` rejection beacon reports `KELD-WV-013`; census 1; no settlement in the successor document | navigate while queued before bind → census 0 with the same WV-013 (the facade cannot tell) |
@@ -754,7 +766,7 @@ Every hosted arm prints its raw census with `--success-output immediate`.
 | AT-B3 | 9 | written before Quit, pending at close | keld-core unit | deterministic | host census for that CALL recorded; only a census of 0 in every arm could reverse Q3's Unknown | written after Quit → IPC-024, census 0 (existing `guarded_router_and_quit.rs`) |
 | AT-S | 7, 12 | settlement | macOS unit (keld-wv, keld-core) + hosted macOS | deterministic (unit); 10 (hosted) | (a) late reply after retirement refused; (b) facade result after `pagehide` ignored, and native result for a stale `(navigation, request)` dropped; (c) a stale-document invoke refused after the successor binds, while the successor has a pending call with the same request id → the successor's call settles only from its own result; (d) handler held at `entered`; the test calls host `navigate()` (`WebEngine::navigate`) to a URL whose load never commits (the observer accepts the connection and never responds); then the handler is released → the **original document** receives exactly one settlement, `KELD-WV-013` (counted by a page-side beacon that carries the original document's own nonce); census 1; the later host outcome is dropped. T1 pins today's behaviour (c may cross; d: 0 settlements); T3 flips both to the target | (a) remove the corr/attempt check → second settlement observed; (c) remove the `document` check in `__keldBridgeNativeResult` → the successor settles with the stale WV-011; (d) the same host `navigate()` to a URL that loads and commits → the original document settles once with WV-013 (by `pagehide` or the delivered result, never both), and the successor document records 0 settlements |
 | AT-SP | 11 | S10b | macOS unit (keld-core; fake Bun peer on `socketpair`) | deterministic | Bun ERR `code = "KELD-WV-012"` (and `"KELD-WV-011"`) → renderer outcome `KELD-WV-013`; the frame was written (`KIPC_CALL` emitted) | Bun ERR `code = "KELD-API-002"` → forwarded unchanged (the rewrite is scoped to `KELD-WV-*`); mutation: remove the rewrite → the page sees `KELD-WV-012` and the test fails |
-| AT-EC | 10, 13 | every invoke rejection | macOS keld-wv unit + hosted macOS | deterministic (unit); 10 per code (hosted) | the hosted page reports `{code: err.code, message: err.message}` for WV-011 (`opts` given), WV-012 (AT-12a), WV-013 (AT-13b) and API-002 (AT-API2b): `err.code` is a string equal to the message prefix; `message` is byte-equal to today's format; `err instanceof Error`. Unit: `PAGE_FACADE_SCRIPT` builds every rejection through its one coded-error helper (exactly one `new Error(` in the script) | the observer run against a plain `new Error("KELD-WV-011: x")` reports `code` undefined (the oracle detects absence); mutation: drop the `code` definition in the helper → every hosted arm fails |
+| AT-EC | 10, 13 | every invoke rejection | macOS keld-wv unit + hosted macOS | deterministic (unit); 10 per code (hosted) | the hosted page reports `{code: err.code, message: err.message}` for WV-011 (`opts` given), WV-012 (AT-12a), WV-013 (AT-13b) and API-002 (AT-API2b): `err.code` is a string equal to the message prefix; `message` is byte-equal to today's format; `err instanceof Error`; `Object.keys(err)` includes `"code"` (intended, §4.9). Unit: `PAGE_FACADE_SCRIPT` builds every rejection through its one coded-error helper (exactly one `new Error(` in the script) | the observer run against a plain `new Error("KELD-WV-011: x")` reports `code` undefined (the oracle detects absence); mutation: drop the `code` definition in the helper → every hosted arm fails |
 
 Anti-flake:
 
@@ -784,15 +796,13 @@ The owner answered Q1–Q5 on 2026-10-23, and the coordinator relayed the
 answers on PR #1096. These are directions, not approval of the exact content.
 This spec stays `Status: draft` until that approval.
 
-1. **Q1, WV-012 independent of the restart notification: Option A.**
+1. **Q1, WV-012 independent of the restart notification ([#1098](https://github.com/gyldlab/keld/issues/1098)): Option A.**
    - Ship WV-012 without waiting for the notification, and emit it only when
      non-dispatch is proven (S8).
    - No blind retries, no timer retry loops, no Keld replay.
-   - Until restart readiness exists, one resend is allowed only after a later
-     user action or a reliable app signal (§4.4).
-   - The notification is tracked separately. No GitHub issue for it exists yet
-     (searched 2026-10-23), so it is listed as an open tracking item in the
-     #1096 handoff.
+   - Until restart readiness exists ([#1098](https://github.com/gyldlab/keld/issues/1098)), one resend is allowed
+     only after a later user action or a reliable app signal (§4.4).
+   - The restart notification and restart readiness are tracked in [#1098](https://github.com/gyldlab/keld/issues/1098).
    - Keld does not claim automatic recovery.
 2. **Q2, decode failure: provisional Option A, verified.** Decode failures
    stay on `KELD-API-001`. The evidence at `516644b0`:
@@ -801,8 +811,8 @@ This spec stays `Status: draft` until that approval.
      before the handler (`:100`), so the handler census is 0 by construction.
    - **What the decoders throw.** They throw plain errors:
      - `kipcError("KELD-IPC-003", …)` at `transport.ts:1052` and `1059`;
-     - the truncated-varint error from `decodeVarint` (`:1037-1039`);
-     - `apiError("trailing bytes…")` at `channels.ts:33-35`.
+     - the truncated-varint error from `decodeVarint` (`:1039-1041`);
+     - `apiError("trailing bytes…")` at `channels.ts:36`.
    - **What reaches the page.** `resolveEchoCall`'s bare `catch`
      (`echo-call.ts:30-37`) turns each of these into the fixed ERR
      `KELD-API-001: application channel call failed`. The link survives,

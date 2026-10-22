@@ -1030,7 +1030,13 @@ passed 3/3; the bound moved to the host producer, which deferred 9,976 EVENTs.
     and ends the drain quietly as a lost link (`AnswerLost`): no error, no link-failure
     report, and the Quit tail goes on to the guardian and the UI Quit. *Falsifier:* a
     caller or contract that needs data after the Quit REPLY, or that must tell
-    `KELD-IPC-024` apart from `KELD-IPC-022`. The rejected alternative, a write
+    `KELD-IPC-024` apart from `KELD-IPC-022`. **Status (2026-10-23): the second
+    limb is met.** GH-1095 §4.5 (owner decision Q3) requires callers to tell
+    `KELD-IPC-024` (the host ran none of the call) from a role-observed
+    `KELD-IPC-022` (outcome unknown). The close-on-REPLY design is unchanged. Its
+    cost is that a call the host answered `KELD-IPC-024` reaches the role as
+    `KELD-IPC-022`, which is Unknown. Whether to revisit this is a decision for
+    the owner of this spec. The rejected alternative, a write
     half-close, needed `node:net` beside `Bun.connect` (FACT, Bun 1.4.2 macOS:
     `Bun.connect`'s `shutdown(true)` and `end()` close both directions of a Unix
     socket) and would only have turned `KELD-IPC-022` into `KELD-IPC-024`. A role that
