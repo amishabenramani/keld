@@ -189,5 +189,29 @@ async function settlement(input) {
   };
 }
 
-const scenarios = { errors, settlement };
+async function reset(input) {
+  // A host navigate() whose load never commits: the current document stays
+  // live and receives the reset result for its own pending call.
+  const doc = makeDocument();
+  doc.bind(input.nonce);
+  const call = track(doc.keld.invoke(input.channel, new Uint8Array([1])));
+  await doc.flush();
+  doc.result({ ...input.reset, request: lastInvoke(doc).request });
+  await doc.flush();
+  const afterReset = call.slice();
+  // The load commits after all: pagehide finds nothing left to settle.
+  doc.pagehide();
+  await doc.flush();
+
+  // A successor document drops a reset addressed to its predecessor.
+  const successor = makeDocument();
+  successor.bind(input.successor);
+  const successorCall = track(successor.keld.invoke(input.channel, new Uint8Array([2])));
+  await successor.flush();
+  successor.result({ ...input.reset, request: lastInvoke(successor).request });
+  await successor.flush();
+  return { afterReset, settled: call, successor: successorCall };
+}
+
+const scenarios = { errors, settlement, reset };
 console.log(JSON.stringify(await scenarios[INPUT.scenario](INPUT)));

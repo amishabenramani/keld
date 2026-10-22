@@ -989,17 +989,37 @@ mod tests {
         serde_json::from_slice(&output.stdout).expect("harness JSON")
     }
 
-    /// GH-1095 T1 characterisation (criteria 4, 13): today every facade
-    /// rejection is a plain `Error` whose code is only in its message, and
-    /// `pagehide` rejects a pending call with `KELD-WV-011`.
+    /// The page-visible shape of one rejection, as the harness reports it.
+    fn assert_coded_rejection(record: &Value, code: &str, message: &str) {
+        assert_eq!(record["isError"], true, "{record}");
+        assert_eq!(record["name"], "Error", "{record}");
+        assert_eq!(record["message"], message, "message bytes are unchanged");
+        assert_eq!(record["string"], format!("Error: {message}"));
+        assert_eq!(record["code"], code, "{record}");
+        assert!(
+            message.starts_with(&format!("{code}: ")),
+            "code is the message prefix"
+        );
+        for attribute in ["own", "enumerable", "writable", "configurable"] {
+            assert_eq!(record[attribute], true, "code is {attribute}: {record}");
+        }
+        assert_eq!(record["keys"], json!(["code"]));
+        assert_eq!(record["json"], json!({"code": code}).to_string());
+    }
+
+    /// GH-1095 criteria 4, 10, 13 (AT-EC unit): every `window.keld.invoke`
+    /// rejection is an `Error` with an own, enumerable, string `code` equal
+    /// to the prefix of its unchanged message, and `pagehide` rejects a
+    /// pending call as outcome unknown.
     #[test]
-    fn facade_rejections_today_carry_the_code_only_in_the_message() {
+    fn facade_rejections_carry_an_own_enumerable_code() {
         let out = run_script_harness(&json!({
             "scenario": "errors",
             "nonce": NONCE_A,
             "channel": ADMITTED,
             "results": [
-                {"ok": false, "code": "KELD-WV-011", "detail": "renderer document is stale or forged"},
+                {"ok": false, "code": "KELD-WV-012", "detail": "no application generation is admitted; the call was not sent"},
+                {"ok": false, "code": "KELD-WV-013", "detail": "application link ended before the renderer reply"},
                 {"ok": false, "code": "KELD-API-001", "detail": "KELD-API-001: application channel call failed"},
                 {"ok": false},
             ],
@@ -1013,70 +1033,145 @@ mod tests {
                 "KELD-WV-011: another renderer invoke is already pending",
             ),
         ] {
-            assert_eq!(out[local]["message"], message, "{local}");
-            assert_eq!(out[local]["code"], Value::Null, "{local}");
-            assert_eq!(out[local]["own"], false, "{local}");
+            assert_coded_rejection(&out[local], "KELD-WV-011", message);
         }
-        let messages: Vec<&Value> = out["results"]
-            .as_array()
-            .expect("results")
-            .iter()
-            .map(|settled| {
-                assert_eq!(settled.as_array().expect("one call").len(), 1);
-                assert_eq!(settled[0]["code"], Value::Null);
-                &settled[0]["message"]
-            })
-            .collect();
-        assert_eq!(
-            messages,
-            [
-                "KELD-WV-011: renderer document is stale or forged",
+        let results = out["results"].as_array().expect("results");
+        for (settled, (code, message)) in results.iter().zip([
+            (
+                "KELD-WV-012",
+                "KELD-WV-012: no application generation is admitted; the call was not sent",
+            ),
+            (
+                "KELD-WV-013",
+                "KELD-WV-013: application link ended before the renderer reply",
+            ),
+            (
+                "KELD-API-001",
                 "KELD-API-001: application channel call failed",
-                "KELD-WV-011: renderer bridge request failed",
-            ]
+            ),
+            ("KELD-WV-011", "KELD-WV-011: renderer bridge request failed"),
+        ]) {
+            assert_eq!(settled.as_array().expect("one call").len(), 1);
+            assert_coded_rejection(&settled[0], code, message);
+        }
+        assert_eq!(results.len(), 4);
+        assert_eq!(out["pagehide"].as_array().expect("pagehide").len(), 1);
+        assert_coded_rejection(
+            &out["pagehide"][0],
+            "KELD-WV-013",
+            "KELD-WV-013: renderer document navigated before reply",
         );
-        assert_eq!(
-            out["pagehide"],
-            json!([out["pagehide"][0]]),
-            "pagehide settles once"
-        );
-        assert_eq!(
-            out["pagehide"][0]["message"],
-            "KELD-WV-011: renderer document navigated before reply"
-        );
-        assert_eq!(out["pagehide"][0]["code"], Value::Null);
+        // The oracle's control: a plain Error is reported without a code.
         assert_eq!(out["control"]["code"], Value::Null);
         assert_eq!(out["control"]["own"], false);
     }
 
-    /// GH-1095 T1 characterisation (AT-S arm c, criterion 12): today the
-    /// isolated world settles whatever result arrives. A stale refusal of the
-    /// predecessor's invoke settles the successor's call, and a result for
-    /// another request clears `inflight`, so a relayed invoke reaches native.
+    /// GH-1095 criterion 12 (AT-S arm c, unit): the isolated world settles a
+    /// result only for its own document and its in-flight request. The
+    /// predecessor's stale refusal and a result for another request are
+    /// dropped without clearing `inflight`, so a relayed invoke is still
+    /// refused as busy; the successor settles once, from its own result, and
+    /// `document` never reaches the page. The payloads are the ones keld-wv
+    /// builds.
     #[test]
-    fn isolated_results_today_cross_documents_and_clear_inflight() {
+    fn isolated_results_settle_only_their_own_document_and_request() {
+        let stale = PageOutcome::refused(1, NONCE_A, "renderer document is stale or forged");
+        let own = PageOutcome::settled(
+            RendererBridgeOutcome::Reply {
+                webview: WebviewId(1),
+                navigation: 2,
+                request: 1,
+                payload: vec![7],
+            },
+            NONCE_B.to_owned(),
+        );
         let out = run_script_harness(&json!({
             "scenario": "settlement",
             "predecessor": NONCE_A,
             "successor": NONCE_B,
             "channel": ADMITTED,
-            "staleRefusal": {
-                "request": 1,
-                "ok": false,
-                "code": "KELD-WV-011",
-                "detail": "renderer document is stale or forged",
-            },
-            "ownReply": {"ok": true, "payload": [7]},
+            "staleRefusal": serde_json::to_value(&stale).expect("encode refusal"),
+            "ownReply": serde_json::to_value(&own).expect("encode reply"),
         }));
         assert_eq!(out["sent"]["document"], NONCE_B);
-        assert_eq!(out["sent"]["request"], 1);
         assert_eq!(
-            out["afterStale"][0]["message"], "KELD-WV-011: renderer document is stale or forged",
-            "the successor's call settled from the predecessor's refusal"
+            out["sent"]["request"], 1,
+            "the same request id as the stale one"
         );
-        assert_eq!(out["nativeInvokes"], 2, "a relayed invoke reached native");
-        assert_eq!(out["successor"].as_array().expect("settlements").len(), 1);
-        assert_eq!(out["relays"].as_array().expect("relays").len(), 4);
+        assert_eq!(
+            out["afterStale"],
+            json!([]),
+            "the stale refusal crossed documents"
+        );
+        assert_eq!(
+            out["afterWrongRequest"],
+            json!([]),
+            "another request settled the call"
+        );
+        assert_eq!(out["nativeInvokes"], 1, "a dropped result cleared inflight");
+        assert_eq!(out["successor"], json!([{"ok": true, "value": [7]}]));
+        let relays = out["relays"].as_array().expect("relays");
+        assert_eq!(
+            relays.len(),
+            2,
+            "busy refusal and the one own reply: {relays:?}"
+        );
+        assert_eq!(relays[0]["request"], 99);
+        assert_eq!(relays[0]["code"], "KELD-WV-011");
+        assert_eq!(relays[1]["request"], 1);
+        for relay in relays {
+            assert!(
+                relay.get("document").is_none(),
+                "document reached the page: {relay}"
+            );
+        }
+        // The predecessor itself settled once, by its own pagehide.
+        assert_eq!(out["predecessor"].as_array().expect("predecessor").len(), 1);
+    }
+
+    /// GH-1095 criterion 7 (AT-S arm d, unit): the reset result a host
+    /// `navigate()` delivers settles the live document's call once as
+    /// outcome unknown; a later `pagehide` finds nothing to settle, and a
+    /// successor document drops the reset addressed to its predecessor.
+    #[test]
+    fn navigation_reset_result_settles_only_the_live_document_once() {
+        let reset = PageOutcome {
+            request: 0,
+            document: NONCE_A.to_owned(),
+            ok: false,
+            payload: None,
+            code: Some(String::from("KELD-WV-013")),
+            detail: Some(String::from("renderer navigation started before reply")),
+        };
+        let out = run_script_harness(&json!({
+            "scenario": "reset",
+            "nonce": NONCE_A,
+            "successor": NONCE_B,
+            "channel": ADMITTED,
+            "reset": serde_json::to_value(&reset).expect("encode reset"),
+        }));
+        assert_eq!(out["afterReset"].as_array().expect("settled").len(), 1);
+        assert_coded_rejection(
+            &out["afterReset"][0],
+            "KELD-WV-013",
+            "KELD-WV-013: renderer navigation started before reply",
+        );
+        assert_eq!(
+            out["settled"], out["afterReset"],
+            "pagehide settled it again"
+        );
+        assert_eq!(
+            out["successor"],
+            json!([]),
+            "the successor settled from a stale reset"
+        );
+    }
+
+    /// GH-1095 AT-EC unit: the page facade constructs every rejection
+    /// through its one coded-error helper.
+    #[test]
+    fn page_facade_has_one_error_constructor() {
+        assert_eq!(PAGE_FACADE_SCRIPT.matches("new Error(").count(), 1);
     }
 
     /// GH-1095 criterion 12 (model): a request remembers the document nonce
