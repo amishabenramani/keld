@@ -123,9 +123,6 @@ function checkAptStepTimeout(step: Mapping, job: Mapping, label: string): void {
 export const webkitgtkAptJobs = ["check", "linux-gui-smoke"] as const;
 export const webkitgtkDebCachePath = "~/.cache/keld-webkitgtk-debs";
 const webkitgtkKeyOutput = "${{ steps.webkitgtk-apt-key.outputs.key }}";
-// Restrict prefix restores to the current ImageOS; install still verifies each
-// .deb's SHA256 and size against current apt-signed indexes before staging.
-const webkitgtkImageRestorePrefix = "${{ steps.webkitgtk-apt-key.outputs.restore-prefix }}";
 const webkitgtkCacheHitGuard = "steps.webkitgtk-apt-cache.outputs.cache-hit != 'true'";
 /** Hard bound on each cache step; a stuck restore download gives up sooner and proceeds as a miss. */
 export const webkitgtkCacheStepTimeoutMinutes = 5;
@@ -178,10 +175,7 @@ function checkWebkitgtkAptCache(jobs: Mapping, stepsByJob: Map<string, Mapping[]
       if (actionName(actionRef(step.uses, String(step.name))) !== action || (id !== undefined && step.id !== id)) {
         fail(`jobs.${jobName} ${String(step.name)} must use ${action}${id ? ` with id ${id}` : ""}.`);
       }
-      const expectedInputs = id !== undefined
-        ? { path: webkitgtkDebCachePath, key: webkitgtkKeyOutput, "restore-keys": webkitgtkImageRestorePrefix }
-        : { path: webkitgtkDebCachePath, key: webkitgtkKeyOutput };
-      inputsMatch(mapping(step.with, `${String(step.name)}.with`), expectedInputs, `jobs.${jobName} ${String(step.name)}`);
+      inputsMatch(mapping(step.with, `${String(step.name)}.with`), { path: webkitgtkDebCachePath, key: webkitgtkKeyOutput }, `jobs.${jobName} ${String(step.name)}`);
     }
     exactKeys(save, ["name", "if", "timeout-minutes", "uses", "with"], `jobs.${jobName} Save WebKitGTK .deb cache`);
     for (const step of [restore, save]) {

@@ -233,9 +233,7 @@ jobs:
           rustc --edition=2024 -D warnings --test tools/worktree_cache.rs -o target/worktree-cache/worktree-cache-test
           target/worktree-cache/worktree-cache-test
       # The .deb set comes from a first-party cache keyed by the exact package
-      # list and runner image (#645). When the image version changes, an older
-      # same-ImageOS archive may be restored as UNTRUSTED candidate bytes.
-      # tools/ci_webkitgtk_apt.sh still runs
+      # list and runner image (#645). tools/ci_webkitgtk_apt.sh still runs
       # apt-get update and stages a cached file only after its SHA256 matches
       # apt's signed index; everything else downloads as before. A miss takes
       # the old path and then saves the cache. A stuck cache download aborts
@@ -257,7 +255,6 @@ jobs:
         with:
           path: ~/.cache/keld-webkitgtk-debs
           key: ${{ steps.webkitgtk-apt-key.outputs.key }}
-          restore-keys: ${{ steps.webkitgtk-apt-key.outputs.restore-prefix }}
       - name: Install WebKitGTK build deps (KEL-28, see keld-wv/Cargo.toml)
         if: matrix.os == 'ubuntu-latest' && needs.changes.outputs.webkitgtk == 'true'
         timeout-minutes: 15
@@ -658,9 +655,7 @@ jobs:
         with:
           cache-on-failure: true
       # The .deb set comes from a first-party cache keyed by the exact package
-      # list and runner image (#645). Same-ImageOS prefix restore is safe only
-      # because the current signed apt index is checked before every install.
-      # tools/ci_webkitgtk_apt.sh still runs
+      # list and runner image (#645). tools/ci_webkitgtk_apt.sh still runs
       # apt-get update and stages a cached file only after its SHA256 matches
       # apt's signed index; everything else downloads as before. A miss takes
       # the old path and then saves the cache. A stuck cache download aborts
@@ -679,7 +674,6 @@ jobs:
         with:
           path: ~/.cache/keld-webkitgtk-debs
           key: ${{ steps.webkitgtk-apt-key.outputs.key }}
-          restore-keys: ${{ steps.webkitgtk-apt-key.outputs.restore-prefix }}
       - name: Install WebKitGTK build deps + X11 control tools (KEL-28)
         timeout-minutes: 15
         run: tools/ci_webkitgtk_apt.sh install ~/.cache/keld-webkitgtk-debs

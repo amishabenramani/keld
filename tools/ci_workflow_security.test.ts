@@ -445,19 +445,10 @@ test("apt timeout reads the parsed run script, not names or layout", () => {
 });
 
 for (const job of webkitgtkAptJobs) {
-  test(`${job} can reuse same-OS older image cache only behind signed-index rehash`, () => {
-    const current = fixture();
-    const restore = step(current, job, "Restore WebKitGTK .deb cache");
-    expect((restore.with as Step)["restore-keys"]).toBe("${{ steps.webkitgtk-apt-key.outputs.restore-prefix }}");
-    expect(() => check(current)).not.toThrow();
-  });
   test(`${job} WebKitGTK .deb cache keeps its key, verified install and miss-only save`, () => {
     const mutations: [string, (f: Fixture) => void, string][] = [
       ["key without the image and package binding", f => { step(f, job, "Resolve WebKitGTK apt cache key").run = 'echo "key=webkitgtk" >> "$GITHUB_OUTPUT"\n'; }, "resolve the cache key"],
       ["restore under another key", f => { (step(f, job, "Restore WebKitGTK .deb cache").with as Step).key = "webkitgtk-${{ runner.os }}"; }, "Restore WebKitGTK .deb cache"],
-      ["restore a different image OS", f => { (step(f, job, "Restore WebKitGTK .deb cache").with as Step)["restore-keys"] = "keld-webkitgtk-debs-v1-"; }, "restore-keys"],
-      ["restore any cache without a trusted prefix", f => { delete (step(f, job, "Restore WebKitGTK .deb cache").with as Step)["restore-keys"]; }, "restore-keys"],
-      ["save under an unsafe broad prefix", f => { (step(f, job, "Save WebKitGTK .deb cache").with as Step)["restore-keys"] = "keld-webkitgtk-debs-v1-"; }, "Save WebKitGTK .deb cache"],
       ["cache the apt index lists", f => { (step(f, job, "Restore WebKitGTK .deb cache").with as Step).path = "/var/lib/apt/lists"; }, "Restore WebKitGTK .deb cache"],
       ["save on a hit", f => { step(f, job, "Save WebKitGTK .deb cache").if = String(step(f, job, "Restore WebKitGTK .deb cache").if ?? "always()"); }, "only on a miss"],
       ["save under another key", f => { (step(f, job, "Save WebKitGTK .deb cache").with as Step).key = "other"; }, "Save WebKitGTK .deb cache"],
