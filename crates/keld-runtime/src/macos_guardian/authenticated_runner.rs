@@ -1,6 +1,8 @@
 //! Legacy one-group Guardian execution with crash-closed authenticated custody.
 //! No Bun image executes before the host has accepted and retained its group.
-use super::process_group::{GroupIdentity, LocalGroupWitness, terminate_attested_group};
+use super::process_group::{
+    GroupIdentity, LocalGroupWitness, retire_own_child_group, terminate_attested_group,
+};
 use super::{
     AwaitHostGroupRetention, Command, CommandExt, GUARDIAN_SHUTDOWN_DEADLINE, GuardianReport,
     Instant, Read, RuntimeError, SpawnAdmission, Stdio, await_host_death, collapse_failures,
@@ -123,15 +125,30 @@ fn reject_spawn(
             source,
         ));
     }
-    if let Some(group) = group
-        && let Err(error) = terminate_attested_group(group)
-    {
-        failures.push(error);
-    }
-    if let Some(child) = child.as_mut()
-        && let Err(source) = child.wait()
-    {
-        failures.push(lifecycle_error("macOS guardian direct-child wait", source));
+    match (group, child.as_mut()) {
+        // This Guardian is the leader's OS parent: decide the group only
+        // after reaping its exact unreaped Child.
+        (Some(group), Some(own)) => {
+            let (retired, reaped) = retire_own_child_group(group, |_| {
+                own.wait()
+                    .map(|_| ())
+                    .map_err(|source| lifecycle_error("macOS guardian direct-child wait", source))
+            });
+            failures.extend(retired.err());
+            failures.extend(reaped.err());
+        }
+        (group, own) => {
+            if let Some(group) = group
+                && let Err(error) = terminate_attested_group(group)
+            {
+                failures.push(error);
+            }
+            if let Some(own) = own
+                && let Err(source) = own.wait()
+            {
+                failures.push(lifecycle_error("macOS guardian direct-child wait", source));
+            }
+        }
     }
     collapse_failures(failures)
 }
@@ -156,40 +173,32 @@ fn run_live_group<R: Read + AsFd>(
             source,
         ));
     }
-    let group_signal_failed = match terminate_attested_group(group) {
-        Ok(()) => false,
-        Err(error) => {
-            failures.push(error);
-            true
-        }
-    };
-    // A failed birth-attested group signal cannot guarantee the direct Bun
-    // Child has stopped. An unconditional Child::wait on that OS error could
-    // block forever, while immediately dropping a still-live Child would
-    // abandon its only Guardian-owned direct-process witness after host EOF.
-    // Use only this exact retained Child's native kill fallback and bounded
-    // reap, preserving the original group-signal failure (never claim whole
-    // group absence or signal a stale numeric PGID). Normal success is intact.
-    let leader_status = match if group_signal_failed {
-        reap_owned_child_after_group_refusal(&mut child, original_cleanup_deadline).map(Some)
-    } else {
-        child.wait().map(Some)
-    } {
-        Ok(Some(status)) => status,
-        Ok(None) => {
-            failures.push(lifecycle_error(
-                "macOS guardian direct-child wait after refused native group signal",
-                io::Error::new(
-                    io::ErrorKind::WouldBlock,
-                    "original direct child remains live after denied group cleanup",
-                ),
-            ));
-            return Err(collapse_failures(failures));
-        }
-        Err(source) => {
-            failures.push(lifecycle_error("macOS guardian direct-child wait", source));
-            return Err(collapse_failures(failures));
-        }
+    // This Guardian is the leader's OS parent, so the group is decided (at
+    // most one signal, no in-call wait) before it reaps its exact Child, and
+    // proven absent only after that reap. The reap never blocks without
+    // bound (#952): when no signal was delivered (denied, refused, changed
+    // birth) the Child may still execute, so only this exact retained Child
+    // is killed and reaped, inside the ORIGINAL host-death budget. A direct
+    // Child kill never claims group absence on its own.
+    let mut leader_status = None;
+    let (retired, reaped) = retire_own_child_group(group, |_| {
+        leader_status = Some(
+            reap_owned_child_after_group_refusal(&mut child, original_cleanup_deadline)
+                .map_err(|source| lifecycle_error("macOS guardian direct-child wait", source))?,
+        );
+        Ok(())
+    });
+    failures.extend(retired.err());
+    if let Err(error) = reaped {
+        failures.push(error);
+        return Err(collapse_failures(failures));
+    }
+    let Some(leader_status) = leader_status else {
+        failures.push(lifecycle_error(
+            "macOS guardian direct-child wait",
+            io::Error::other("direct child reap reported no status"),
+        ));
+        return Err(collapse_failures(failures));
     };
     if failures.is_empty() {
         Ok(GuardianReport {
@@ -201,11 +210,13 @@ fn run_live_group<R: Read + AsFd>(
     }
 }
 
-// On original group-signal refusal the direct Child is still our unreaped OS
-// child. try_wait() establishes that live ownership before Child::kill; it is
-// never a raw-PID fallback from the untrusted authenticated registration.
-// A direct-child kill cannot establish whole-group absence, so the caller
-// always returns the original typed GROUP cleanup failure even after reap.
+// The direct Child is still our unreaped OS child whatever the group
+// decision was (delivered, denied, refused or changed birth). try_wait()
+// establishes that live ownership before Child::kill; it is never a raw-PID
+// fallback from the untrusted authenticated registration, and it is not a
+// second GROUP signal. A direct-child kill cannot establish whole-group
+// absence, so `retire_own_child_group` alone decides the group and its typed
+// failure is always kept even after this reap succeeds.
 fn reap_owned_child_after_group_refusal(
     child: &mut Child,
     deadline: Instant,
