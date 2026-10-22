@@ -9,11 +9,13 @@
 //! Each caller runs twice: once with the host's fail-safe signal landing
 //! before the call (no signal is authorized) and once with it landing between
 //! the call's birth check and its one signal (that signal is denied). The
-//! test hook counts every group signal the product prepares.
+//! test hook, which sits inside `terminate_registered_group`, counts every
+//! group `killpg` the product makes, and every denied signal it reconciles.
+use std::cell::Cell;
 use std::os::unix::net::UnixStream;
 use std::os::unix::process::ExitStatusExt as _;
 use std::process::{Child, ExitStatus};
-use std::sync::{Arc, Mutex};
+use std::rc::Rc;
 use std::time::Instant;
 
 use nix::errno::Errno;
@@ -27,7 +29,7 @@ use super::super::super::process_group::{
 };
 use super::super::super::supervised_lease::SupervisedGuardianLease;
 use super::super::super::{GUARDIAN_SHUTDOWN_DEADLINE, RuntimeError, io, lifecycle_error};
-use super::own_child_reap::{await_zombie_only, raw, sleeper_child};
+use super::own_child_reap::{await_zombie_only, raw, retire_test_child, sleeper_child};
 use super::{GenerationLease as _, RevocationCause, locally_enrolled_lease};
 
 /// Where the host's fail-safe `killpg` lands relative to the caller's call.
@@ -44,12 +46,31 @@ enum HostSignal {
 /// The caller's result and, when it exposes one, its reaped leader status.
 type CallerOutcome = (Result<(), RuntimeError>, Option<ExitStatus>);
 
+/// Holds a test-owned Child until a caller takes it; a test that panics first
+/// still kills and reaps it.
+struct Unhanded(Option<Child>);
+
+impl Unhanded {
+    fn hand_over(mut self) -> Child {
+        self.0.take().expect("the leader is handed over once")
+    }
+}
+
+impl Drop for Unhanded {
+    fn drop(&mut self) {
+        if let Some(child) = self.0.as_mut() {
+            retire_test_child(child);
+        }
+    }
+}
+
 fn assert_caller_decides_only_after_its_own_reap(
     host: HostSignal,
     caller: impl FnOnce(Child, GroupIdentity, LocalGroupWitness) -> CallerOutcome,
 ) {
-    let leader = sleeper_child(0);
-    let pid = leader.id();
+    let child = sleeper_child(0);
+    let pid = child.id();
+    let leader = Unhanded(Some(child));
     let group = raw(pid);
     let identity = validate_guardian_child_group(pid, std::process::id())
         .expect("kernel birth of the owned leader");
@@ -57,19 +78,20 @@ fn assert_caller_decides_only_after_its_own_reap(
     witness
         .register_child(pid)
         .expect("kernel proves the owned direct leader");
-    let signals: Arc<Mutex<u32>> = Arc::default();
-    let count = Arc::clone(&signals);
+    let signals = Rc::new(Cell::new(0_u32));
+    let denials = Rc::new(Cell::new(0_u32));
+    let (signal_count, denial_count) = (Rc::clone(&signals), Rc::clone(&denials));
     let _hook = install_test_group_signal_hook(
         pid,
-        Box::new(move |point| {
-            if point == TestGroupSignalPoint::BeforeSignal {
-                let mut prepared = count.lock().expect("signal count");
-                *prepared += 1;
-                if host == HostSignal::BeforeCallerSignal && *prepared == 1 {
+        Box::new(move |point| match point {
+            TestGroupSignalPoint::BeforeSignal => {
+                signal_count.set(signal_count.get() + 1);
+                if host == HostSignal::BeforeCallerSignal && signal_count.get() == 1 {
                     killpg(Pid::from_raw(group), Signal::SIGKILL).expect("host fail-safe signal");
                     await_zombie_only(group);
                 }
             }
+            TestGroupSignalPoint::AfterDeniedSignal => denial_count.set(denial_count.get() + 1),
         }),
     );
     if host == HostSignal::BeforeCall {
@@ -78,7 +100,7 @@ fn assert_caller_decides_only_after_its_own_reap(
     }
 
     let started = Instant::now();
-    let (result, status) = caller(leader, identity, witness);
+    let (result, status) = caller(leader.hand_over(), identity, witness);
     let elapsed = started.elapsed();
 
     result.expect("the caller's own reap retires the group it parents");
@@ -86,10 +108,16 @@ fn assert_caller_decides_only_after_its_own_reap(
         elapsed < GUARDIAN_SHUTDOWN_DEADLINE / 4,
         "no in-call absence wait before the caller's own reap: {elapsed:?}"
     );
+    // Exactly the decision's signals, at most one per call: none when the
+    // host already left only the caller's own zombie, else the one
+    // birth-checked signal, whose denial is reconciled after the reap. A
+    // stray direct signal before the decision would be the one the host
+    // pre-empts instead, and the decision would then send none to reconcile.
+    let decided = u32::from(host == HostSignal::BeforeCallerSignal);
     assert_eq!(
-        *signals.lock().expect("signal count"),
-        u32::from(host == HostSignal::BeforeCallerSignal),
-        "exactly the decision's signals, at most one per call"
+        (signals.get(), denials.get()),
+        (decided, decided),
+        "(group signals, reconciled denials)"
     );
     assert_eq!(
         kill(Pid::from_raw(group), None),
@@ -103,22 +131,26 @@ fn assert_caller_decides_only_after_its_own_reap(
 }
 
 fn guarded_lease(
-    mut child: Child,
+    child: Child,
     _identity: GroupIdentity,
     witness: LocalGroupWitness,
 ) -> CallerOutcome {
+    let mut leader = Unhanded(Some(child));
+    let child = leader.0.as_mut().expect("held leader");
     let result = locally_enrolled_lease(child.id(), witness)
-        .revoke_with_child(RevocationCause::Shutdown, &mut child);
+        .revoke_with_child(RevocationCause::Shutdown, child);
     (result, child.try_wait().expect("cached reap status"))
 }
 
 fn supervised_lease(
-    mut child: Child,
+    child: Child,
     _identity: GroupIdentity,
     witness: LocalGroupWitness,
 ) -> CallerOutcome {
+    let mut leader = Unhanded(Some(child));
+    let child = leader.0.as_mut().expect("held leader");
     let result = SupervisedGuardianLease::locally_enrolled_for_test(child.id(), witness)
-        .revoke_with_child(RevocationCause::Shutdown, &mut child);
+        .revoke_with_child(RevocationCause::Shutdown, child);
     (result, child.try_wait().expect("cached reap status"))
 }
 

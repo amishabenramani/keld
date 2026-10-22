@@ -28,11 +28,17 @@ struct OwnedLeader(Child);
 
 impl Drop for OwnedLeader {
     fn drop(&mut self) {
-        if matches!(self.0.try_wait(), Ok(None)) {
-            let _ = self.0.kill();
-        }
-        let _ = self.0.wait();
+        retire_test_child(&mut self.0);
     }
+}
+
+/// Kill a still-running test-owned Child through its own handle (never a raw
+/// PID), then reap it, so a failing test leaks no `sleep 30`.
+pub(super) fn retire_test_child(child: &mut Child) {
+    if matches!(child.try_wait(), Ok(None)) {
+        let _ = child.kill();
+    }
+    let _ = child.wait();
 }
 
 fn sleeper(group: i32) -> OwnedLeader {
@@ -40,7 +46,8 @@ fn sleeper(group: i32) -> OwnedLeader {
 }
 
 /// A bare test-owned `/bin/sleep 30` Child, for a caller that takes the
-/// Child by value; prefer [`sleeper`], which kills it on drop.
+/// Child by value. Hold it in a guard that calls [`retire_test_child`] until
+/// then; prefer [`sleeper`], which does so on drop.
 pub(super) fn sleeper_child(group: i32) -> Child {
     Command::new("/bin/sleep")
         .arg("30")
