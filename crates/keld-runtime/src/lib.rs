@@ -1570,7 +1570,11 @@ fn supervise<P>(
         attempt += 1;
         match preparer.prepare(attempt) {
             Ok(next_prepared_child) if stop_was_requested(shutdown, accepted_shutdown) => {
-                let PreparedChild { lease, .. } = next_prepared_child;
+                // Drop the never-spawned command before revoking, as
+                // spawn_prepared does on spawn failure: its pre-exec closure
+                // can hold the lease's only child-side admission descriptor.
+                let PreparedChild { command, lease } = next_prepared_child;
+                drop(command);
                 if let Err(error) = lease.revoke(RevocationCause::Shutdown) {
                     *terminal_error
                         .lock()
