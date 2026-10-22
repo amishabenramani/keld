@@ -17,11 +17,11 @@ use nix::errno::Errno;
 use nix::sys::signal::{Signal, kill};
 use nix::unistd::Pid;
 
-use super::super::super::GUARDIAN_SHUTDOWN_DEADLINE;
 use super::super::super::process_group::{
     GroupIdentity, TestGroupSignalPoint, install_test_ambiguous_probe_receipt,
     install_test_group_signal_hook, observe_group_identity, terminate_attested_group,
 };
+use super::super::super::{GUARDIAN_SHUTDOWN_DEADLINE, RuntimeError};
 use super::{TestOwnedGroupChild, await_zombie_only_group};
 
 fn sleeper(group: i32) -> TestOwnedGroupChild {
@@ -64,6 +64,22 @@ fn reaped_leader_with_live_member() -> (GroupIdentity, i32, TestOwnedGroupChild)
         "live member keeps the group signallable"
     );
     (original, raw, member)
+}
+
+/// The shared contract with the Guardian's post-reap reconciliation (and the
+/// #945/#947 stack): an unproven group after a denied signal returns the
+/// one signal's typed signal-phase EPERM, never a collapsed or other error.
+fn assert_typed_signal_phase_eperm(error: &RuntimeError, context: &str) {
+    assert!(
+        matches!(
+            error,
+            RuntimeError::Lifecycle {
+                phase: "macOS guardian process-group signal",
+                source,
+            } if source.raw_os_error() == Some(nix::libc::EPERM)
+        ),
+        "{context}: {error:?}"
+    );
 }
 
 /// Fault point body for [`TestGroupSignalPoint::BeforeSignal`]: kill the
@@ -121,11 +137,9 @@ fn member_exit_between_probe_and_group_signal_never_clears_an_unreaped_group() {
         .expect_err("EPERM alone is never proof that the group is gone");
     let elapsed = started.elapsed();
 
-    assert!(
-        error
-            .to_string()
-            .contains("registered group identity unavailable"),
-        "a persistent zombie-only group must end in the bounded absence probe: {error}"
+    assert_typed_signal_phase_eperm(
+        &error,
+        "a persistent zombie-only group keeps the one signal's typed EPERM",
     );
     assert!(
         elapsed < GUARDIAN_SHUTDOWN_DEADLINE,
@@ -199,11 +213,9 @@ fn assert_denial_is_the_calls_only_signal(
     );
     assert!(joiner_alive, "the owner signalled the group a second time");
     let error = result.expect_err("a group that turned live after a denial is not ours to clear");
-    assert!(
-        error
-            .to_string()
-            .contains("registered group identity unavailable"),
-        "fail closed through the unproven-identity arm: {error}"
+    assert_typed_signal_phase_eperm(
+        &error,
+        "a group that turned live after the denial fails closed with the denial",
     );
 }
 
