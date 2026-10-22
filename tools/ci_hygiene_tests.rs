@@ -706,9 +706,11 @@ fn public_audit_gate_is_mandatory_locally_and_in_docs_ci() {
         let local = command.replacen("python3 ", "{{python_command}} ", 1);
         temp.write(
             JUSTFILE,
-            &read(temp.path(), JUSTFILE)
-                .expect("just fixture")
-                .replacen(&format!("    {local}\n"), "", 1),
+            &read(temp.path(), JUSTFILE).expect("just fixture").replacen(
+                &format!("    {local}\n"),
+                "",
+                1,
+            ),
         );
         let error = check(temp.path()).expect_err("closeout ledger must run in audit-docs");
         assert!(error.contains("audit-docs"), "{error}");
