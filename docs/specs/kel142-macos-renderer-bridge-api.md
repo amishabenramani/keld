@@ -355,16 +355,16 @@ code ran) and "handler failed" (it may have run).
 
 Until GH-1095 is approved and implemented:
 
-- callers MUST treat `KELD-WV-011` with the "unavailable or already pending",
-  "link ended" or "navigated" detail, and every `KELD-API-001`, as outcome
-  unknown;
+- callers MUST treat every `KELD-WV-011` and every `KELD-API-001` as outcome
+  unknown, without branching on the detail string;
 - callers MUST NOT resend those calls automatically.
 
 The draft contract revision
 [`gh1095-request-error-codes.md`](gh1095-request-error-codes.md) narrows
 `KELD-WV-011` back to pre-write refusals and adds `KELD-WV-012` (definitely not
 dispatched), `KELD-WV-013` (outcome unknown) and `KELD-API-002` (no handler
-registered). It supersedes this section only once approved.
+registered), and it keeps `KELD-WV-011` as "never resend automatically". It
+supersedes this section only once approved.
 
 ## 8. Fuzzing and deterministic hostile tests
 
