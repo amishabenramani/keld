@@ -110,6 +110,44 @@ fn report_test_ambiguous_probe(group: u32) {
     });
 }
 
+// Exact native fault point for the GH-824 CLEAR race: runs on the calling
+// test thread after the real kernel reported (leader ESRCH, group live) and
+// before the single group signal, so a test can let the last live member
+// finish exiting in that window instead of hoping the scheduler does.
+#[cfg(test)]
+type TestGroupSignalHook = (u32, Box<dyn FnOnce()>);
+
+#[cfg(test)]
+thread_local! {
+    static BEFORE_GROUP_SIGNAL: RefCell<Option<TestGroupSignalHook>> = const { RefCell::new(None) };
+}
+
+#[cfg(test)]
+pub(super) fn install_test_before_group_signal(group: u32, hook: Box<dyn FnOnce()>) {
+    BEFORE_GROUP_SIGNAL.with(|slot| {
+        assert!(slot.borrow().is_none(), "only one native signal hook owner");
+        *slot.borrow_mut() = Some((group, hook));
+    });
+}
+
+#[cfg(test)]
+fn run_test_before_group_signal(group: u32) {
+    let hook = BEFORE_GROUP_SIGNAL.with(|slot| {
+        let mut slot = slot.borrow_mut();
+        if slot
+            .as_ref()
+            .is_some_and(|(expected, _)| *expected == group)
+        {
+            slot.take().map(|(_, hook)| hook)
+        } else {
+            None
+        }
+    });
+    if let Some(hook) = hook {
+        hook();
+    }
+}
+
 #[cfg(test)]
 impl GroupIdentity {
     pub(super) fn altered_birth_for_test(mut self) -> Self {
@@ -234,8 +272,9 @@ pub(super) fn validate_guardian_child_group(
 /// while that group has members. This is not a kernel-held group handle, so an
 /// empty/recycled group between inspections remains a documented race.
 pub(super) fn terminate_attested_group(group: GroupIdentity) -> Result<(), RuntimeError> {
+    let reap_deadline = Instant::now() + GUARDIAN_SHUTDOWN_DEADLINE / 4;
     match observe_group_identity(group.pid) {
-        Ok(current) if current == group => terminate_registered_group(group.pid),
+        Ok(current) if current == group => signal_attested_group_once(group, reap_deadline),
         Ok(_) => Err(lifecycle_error(
             "macOS guardian registered group identity changed",
             io::Error::new(
@@ -252,9 +291,8 @@ pub(super) fn terminate_attested_group(group: GroupIdentity) -> Result<(), Runti
             // absence owner, which never signals and accepts only dual ESRCH
             // within a quarter of the existing shutdown deadline.
             if probe_group_absence(raw) == (Err(Errno::ESRCH), Ok(())) {
-                return terminate_registered_group(group.pid);
+                return signal_attested_group_once(group, reap_deadline);
             }
-            let reap_deadline = Instant::now() + GUARDIAN_SHUTDOWN_DEADLINE / 4;
             // Keep this fallback's existing typed failure: callers and
             // their native oracles distinguish it from a later probe-only
             // absence timeout of a retained generation.
@@ -272,6 +310,24 @@ pub(super) fn terminate_attested_group(group: GroupIdentity) -> Result<(), Runti
             })
         }
     }
+}
+
+// The one group SIGKILL of an attested cleanup call, from either the
+// birth-matched arm or the first-probe arm. XNU `killpg1` counts an exiting
+// member as found but skips SZOMB members, and returns EPERM when it found
+// none, so the last member finishing its exit just before this signal leaves
+// a zombie-only group: ambiguous, neither a refused signal nor absence. The
+// denied signal is never repeated in this call; the one signal-phase EPERM
+// classifier hands it to the read-only absence owner inside this call's
+// budget, and an unproven group keeps the typed signal-phase EPERM.
+fn signal_attested_group_once(
+    group: GroupIdentity,
+    reap_deadline: Instant,
+) -> Result<(), RuntimeError> {
+    #[cfg(test)]
+    run_test_before_group_signal(group.pid);
+    terminate_registered_group(group.pid)
+        .or_else(|denied| reconcile_denied_signal_after_reap(group, denied, reap_deadline))
 }
 
 // One read-only kernel observation of the original leader PID and its whole
@@ -421,13 +477,16 @@ pub(super) fn finish_group_termination(
     }
 }
 
-// The Guardian may receive EPERM for a group signal while a killed direct
-// child or same-group descendant is still a zombie. Its original direct
-// Child is reaped *after* the signal; only then can a failed signal be
-// reconsidered. Neither a stale PID nor EPERM grants new kill authority.
-// This function only classifies the exact signal-phase EPERM; the absence
-// decision belongs to `require_attested_group_absence`, inside the original
-// revocation budget. Any other failure, or unproven absence, keeps `denied`.
+// The ONE classifier of a denied group signal. A group signal gets EPERM
+// while every remaining member is a zombie, e.g. a killed direct child or
+// same-group descendant not yet reaped, or the last member finishing its exit
+// just before the signal. Two callers reconsider it: the attested cleanup
+// right after its one signal (`signal_attested_group_once`), and the Guardian
+// after it reaps its original direct Child. Neither a stale PID nor EPERM
+// grants new kill authority. This function only classifies the exact
+// signal-phase EPERM; the absence decision belongs to
+// `require_attested_group_absence`, inside the caller's original budget. Any
+// other failure, or unproven absence, keeps `denied`.
 pub(super) fn reconcile_denied_signal_after_reap(
     group: GroupIdentity,
     denied: RuntimeError,
