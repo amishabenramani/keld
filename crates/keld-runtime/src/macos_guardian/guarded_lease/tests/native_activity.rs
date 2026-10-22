@@ -76,6 +76,43 @@ fn native_einval_after_attested_sigkill_has_independent_group_census() {
 }
 
 #[test]
+fn native_enotconn_cannot_claim_stopped_while_original_group_executes() {
+    let root = tempfile::tempdir().expect("private native ENOTCONN refusal fixture");
+    let leader = Command::new("/bin/sleep")
+        .arg("30")
+        .process_group(0)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("owned original native group is executing");
+    let group = NativeGroup { leader, root };
+    let refusal = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        group.assert_stopped_with_probe_until(
+            |_| Err(std::io::Error::from_raw_os_error(nix::libc::ENOTCONN)),
+            Instant::now() + Duration::from_millis(80),
+        );
+    }));
+    assert!(
+        refusal.is_err(),
+        "ENOTCONN alone must not pass a live OS group"
+    );
+}
+
+#[test]
+fn native_enotconn_after_attested_sigkill_has_independent_group_census() {
+    // Darwin reports ENOTCONN (not only ECONNREFUSED/ECONNRESET/EINVAL) when
+    // a listener vanishes between connect and the first read or write.
+    let group = NativeGroup::start();
+    let original = observe_group_identity(group.leader.id()).expect("original native group birth");
+    terminate_attested_group(original).expect("kill exactly the original native group");
+    group.assert_stopped_with_probe_until(
+        |_| Err(std::io::Error::from_raw_os_error(nix::libc::ENOTCONN)),
+        Instant::now() + Duration::from_secs(3),
+    );
+}
+
+#[test]
 fn failed_native_census_cannot_certify_group_absence() {
     // A killed or otherwise failed ps can emit no bytes. The original test
     // runner retains its own leader Child, so absence of ps output is never
