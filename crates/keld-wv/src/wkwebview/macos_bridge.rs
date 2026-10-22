@@ -935,9 +935,145 @@ pub(super) fn service_main_tail_before(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::{Value, json};
 
     /// The echo id `keld-core` passes today; any host-chosen id works the same.
     const ADMITTED: u16 = 1;
+    const NONCE_A: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    const NONCE_B: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+
+    /// Runs the shipped scripts, rendered exactly as `install` renders them,
+    /// in the GH-1095 document model under Bun's `JavaScriptCore`.
+    fn run_script_harness(input: &Value) -> Value {
+        let program = format!(
+            "const PAGE_SCRIPT = {};\nconst ISOLATED_SCRIPT = {};\nconst INPUT = {input};\n{}",
+            serde_json::to_string(&render_bridge_script(PAGE_FACADE_SCRIPT, ADMITTED))
+                .expect("encode page script"),
+            serde_json::to_string(&render_bridge_script(ISOLATED_BRIDGE_SCRIPT, ADMITTED))
+                .expect("encode isolated script"),
+            include_str!("../../tests/fixtures/renderer_bridge_harness.js"),
+        );
+        let output = std::process::Command::new("bun")
+            .args(["-e", &program])
+            .output()
+            .expect("bun must be on PATH (same contract as the KEL-142 host tests)");
+        assert!(
+            output.status.success(),
+            "script harness failed: stdout={} stderr={}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        serde_json::from_slice(&output.stdout).expect("harness JSON")
+    }
+
+    /// GH-1095 T1 characterisation (criteria 4, 13): today every facade
+    /// rejection is a plain `Error` whose code is only in its message, and
+    /// `pagehide` rejects a pending call with `KELD-WV-011`.
+    #[test]
+    fn facade_rejections_today_carry_the_code_only_in_the_message() {
+        let out = run_script_harness(&json!({
+            "scenario": "errors",
+            "nonce": NONCE_A,
+            "channel": ADMITTED,
+            "results": [
+                {"ok": false, "code": "KELD-WV-011", "detail": "renderer document is stale or forged"},
+                {"ok": false, "code": "KELD-API-001", "detail": "KELD-API-001: application channel call failed"},
+                {"ok": false},
+            ],
+        }));
+        for (local, message) in [
+            ("opts", "KELD-WV-011: opts is not supported by this bridge"),
+            ("channel", "KELD-WV-011: channel must be a nonzero u16"),
+            ("payload", "KELD-WV-011: payload must be a Uint8Array"),
+            (
+                "busy",
+                "KELD-WV-011: another renderer invoke is already pending",
+            ),
+        ] {
+            assert_eq!(out[local]["message"], message, "{local}");
+            assert_eq!(out[local]["code"], Value::Null, "{local}");
+            assert_eq!(out[local]["own"], false, "{local}");
+        }
+        let messages: Vec<&Value> = out["results"]
+            .as_array()
+            .expect("results")
+            .iter()
+            .map(|settled| {
+                assert_eq!(settled.as_array().expect("one call").len(), 1);
+                assert_eq!(settled[0]["code"], Value::Null);
+                &settled[0]["message"]
+            })
+            .collect();
+        assert_eq!(
+            messages,
+            [
+                "KELD-WV-011: renderer document is stale or forged",
+                "KELD-API-001: application channel call failed",
+                "KELD-WV-011: renderer bridge request failed",
+            ]
+        );
+        assert_eq!(
+            out["pagehide"],
+            json!([out["pagehide"][0]]),
+            "pagehide settles once"
+        );
+        assert_eq!(
+            out["pagehide"][0]["message"],
+            "KELD-WV-011: renderer document navigated before reply"
+        );
+        assert_eq!(out["pagehide"][0]["code"], Value::Null);
+        assert_eq!(out["control"]["code"], Value::Null);
+        assert_eq!(out["control"]["own"], false);
+    }
+
+    /// GH-1095 T1 characterisation (AT-S arm c, criterion 12): today the
+    /// isolated world settles whatever result arrives. A stale refusal of the
+    /// predecessor's invoke settles the successor's call, and a result for
+    /// another request clears `inflight`, so a relayed invoke reaches native.
+    #[test]
+    fn isolated_results_today_cross_documents_and_clear_inflight() {
+        let out = run_script_harness(&json!({
+            "scenario": "settlement",
+            "predecessor": NONCE_A,
+            "successor": NONCE_B,
+            "channel": ADMITTED,
+            "staleRefusal": {
+                "request": 1,
+                "ok": false,
+                "code": "KELD-WV-011",
+                "detail": "renderer document is stale or forged",
+            },
+            "ownReply": {"ok": true, "payload": [7]},
+        }));
+        assert_eq!(out["sent"]["document"], NONCE_B);
+        assert_eq!(out["sent"]["request"], 1);
+        assert_eq!(
+            out["afterStale"][0]["message"], "KELD-WV-011: renderer document is stale or forged",
+            "the successor's call settled from the predecessor's refusal"
+        );
+        assert_eq!(out["nativeInvokes"], 2, "a relayed invoke reached native");
+        assert_eq!(out["successor"].as_array().expect("settlements").len(), 1);
+        assert_eq!(out["relays"].as_array().expect("relays").len(), 4);
+    }
+
+    /// GH-1095 T1 characterisation (AT-S arm d, model): today a host
+    /// `navigate()` reset clears the pending request silently, so the later
+    /// host outcome finds nothing to settle and the call gets no terminal.
+    #[test]
+    fn navigation_reset_today_drops_the_pending_call_without_a_terminal() {
+        let mut state = BridgeState::new(WebviewId(8), ADMITTED);
+        state.bind_webview(0x8000).expect("bind WebView");
+        let nonce = state.bind().expect("bind");
+        let call = state
+            .admit_invoke(&nonce, 4, ADMITTED, vec![1])
+            .expect("admit");
+        state.navigation_started();
+        assert!(state.pending.is_none());
+        assert!(
+            !state.settle(call.navigation(), call.request()),
+            "the reset call cannot settle from its host outcome"
+        );
+    }
 
     #[test]
     fn navigation_invalidates_document_and_pending_renderer_call() {
