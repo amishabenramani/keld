@@ -33,8 +33,15 @@ This revision splits the codes by what Keld can prove:
 | `KELD-API-001` (narrowed) | Outcome unknown | the call reached the application stage and failed: decode, handler throw, encode, or oversize reply |
 
 Observable outcome: each renderer invoke settles exactly once with one of these
-codes or a reply. No layer of Keld ever replays a request. Only a WV-012 or
-API-002 result permits one resend, and the app makes it.
+codes or a reply. No layer of Keld ever replays a request. The rules for an
+app resend are in §4.4:
+
+- only WV-012 or API-002 permits one *automatic* resend of an action that is
+  not idempotent;
+- a WV-011 busy refusal may be invoked again after your own call settles;
+- WV-013 and API-001 may be resent only under §4.4 (a) or (b).
+
+The app makes every resend; Keld makes none.
 
 Non-goals:
 
@@ -92,18 +99,24 @@ The design deviates from no architecture section.
    emitter returns before `begin_echo_call` invokes `write_frame`. These are:
    - page facade validation;
    - the isolated-world busy check;
-   - native admission;
+   - native admission (S3b);
    - the undeclared channel check;
    - quiescing;
    - lock poisoning;
    - the session-wide busy slot.
-7. **Exactly one terminal, no replay.** Each invoke whose document is alive
-   when the outcome is decided gets exactly one terminal. A later reply or
+
+   Hostile envelopes rejected at S3a get no terminal and are never dispatched.
+7. **Exactly one terminal, no replay.** Each facade-formed invoke whose
+   document is alive when the outcome is decided gets exactly one terminal.
+   A hostile envelope that skips the facade can get none (§4.2, S3a). A later reply or
    retirement for the same call is discarded. No Keld layer re-sends a CALL
    frame.
-8. **One resend after WV-012 or API-002 runs once.** After the successor
-   generation is ready, the page resends once, as a new invoke. The handler
-   census for the logical action is exactly 1.
+8. **One resend after WV-012 or API-002 runs once.** The page resends once,
+   as a new invoke, and the handler census for the logical action is exactly 1.
+   The trigger depends on the code:
+   - after WV-012, the trigger is the successor generation becoming ready;
+   - after API-002, the trigger is the handler being registered, which may
+     happen in the same generation (late registration).
 9. **Bun outbound codes are unchanged and documented as Unknown.**
    - `WorkerLink.call` returns `KELD-IPC-022` both when the link had already
      ended and when the call was still pending at close. Neither case claims
@@ -163,8 +176,9 @@ Facts (each one is an atom from the GH-1095 claim, verified at `516644b0`):
   (`packages/@keld/api/src/channels.ts:95-97`). `resolveEchoCall` then maps
   every throw to one `KELD-API-001` ERR (`packages/@keld/api/src/echo-call.ts:30-37`).
 - **F6. The link opens lazily.** It opens only on the first `app.whenReady()`,
-  `app.quit()`, `fs` or `auth` call (`packages/@keld/api/src/app.ts:74-97`,
-  `120-121`, `162-171`). `channels.handle` is synchronous and never touches the
+  `app.quit()`, `fs` or `auth` call. `ensureLink` is at
+  `packages/@keld/api/src/app.ts:74-97`, and its only callers are at `108`
+  (quit), `122` (whenReady), `164` (fs) and `171` (auth). `channels.handle` is synchronous and never touches the
   link. A handler registered before the first `whenReady()` therefore exists
   before any CALL can arrive.
 - **F7. The page facade cannot see dispatch.**
@@ -220,7 +234,8 @@ The stages run in request order. "DP" is the dispatch point (F1).
 |---|---|---|---|---|
 | S1 | Page facade validation: `opts`, channel, payload type, size > 4096, page `pending` | `macos_bridge.rs:70-79` | WV-011 | **WV-011** (unchanged) |
 | S2 | Isolated-world busy (`queued` / `inflight`) | `macos_bridge.rs:157-166` | WV-011 | **WV-011** |
-| S3 | Native admission: envelope decode, stale or forged nonce, wrong frame/view/world, destroyed bridge, busy | `macos_bridge.rs:393-431`, `reply_immediate_error` `:801-820` | WV-011 | **WV-011** |
+| S3a | Native: wrong content controller/world, subframe, no or wrong WebView, envelope decode failure (only a hostile envelope that skips the facade reaches these) | `macos_bridge.rs:699-745` (`report_detail_rejection`, then `return`) | no terminal | unchanged: **no terminal**, zero dispatch |
+| S3b | Native admission: stale or forged nonce, busy; host dispatch queue unavailable | `admit_invoke` `macos_bridge.rs:393-431`; `:776-795`; `reply_immediate_error` `:801-822` | WV-011 | **WV-011** |
 | S4 | Host dispatch: undeclared channel | `app_session.rs:4213-4226` | WV-011 | **WV-011** |
 | S5 | `begin_echo_call`: session quiescing | `app_session.rs:5813-5819` | WV-011 "unavailable or already pending" | **WV-011**, detail "application is quitting" |
 | S6 | `begin_echo_call`: a lock is poisoned | `:5820-5823`, `:5831-5834` | WV-011 (same text) | **WV-011**, detail "host call state is unavailable" |
@@ -228,7 +243,7 @@ The stages run in request order. "DP" is the dispatch point (F1).
 | S8 | `begin_echo_call`: no admitted generation (`current` is `None`) | `:5824-5829` | WV-011 (same text) | **WV-012** |
 | S9 | `write_frame` returns `Err` (any byte count, k ≥ 0) | `:5853-5876` | WV-011 (same text) | **WV-013** |
 | DP | `write_frame` returns `Ok` | `:5878` | (none) | (none) |
-| S10 | After DP: link EOF/reset, reader error, `Revoke` retirement, failed lifecycle write, reply channel disconnected | retirement details at `:5869`, `:6436`, `:7002`, `:7044`, `:7718`; mapped at `:4278-4285` | WV-011 "application link ended before the renderer reply" | **WV-013** |
+| S10 | After DP: link EOF/reset, reader error, `Revoke` retirement, failed lifecycle or filesystem write, accepted Quit, profile handover or lease loss, router shutdown, reply channel disconnected | every retirement that answers the pending slot, e.g. `:6343`, `:6436`, `:6558`, `:6719`, `:7002`, `:7044`, `:7396`, `:7718`; all mapped generically at `:4278-4285` | WV-011 "application link ended before the renderer reply" | **WV-013** |
 | S11 | Bun: no handler registered at dispatch time (never registered, unsubscribed, or registered after this call arrived) | `channels.ts:95-97` | API-001 | **API-002** |
 | S12 | Bun: `decodeRequest` throws | `channels.ts:99` | API-001 | **API-001** (Open question 2) |
 | S13 | Bun: handler throws or rejects | `channels.ts:100` | API-001 | **API-001** |
@@ -246,7 +261,7 @@ How each crash point maps to a code:
 | Crash after the write | S10 → WV-013 |
 | Connection loss | S9 or S10 → WV-013 |
 | Restart window | S8 → WV-012 |
-| Navigation | S3 (stale nonce, before dispatch) → WV-011; S16 → WV-013 |
+| Navigation | S3b (stale nonce, before dispatch) → WV-011; S16 → WV-013 |
 | Timeouts | none on the renderer path; S17 is out of scope |
 
 The S5–S9 split requires one implementation change. `begin_echo_call` must
@@ -271,9 +286,14 @@ trust as its handler.
 
 ### 4.3 Backward compatibility
 
-- **Still `KELD-WV-011`:** S1–S7. Every one of these returns before the host
-  attempts a write. The registry meaning "rejected before application dispatch"
-  becomes true of every emitter again.
+- **Still `KELD-WV-011`:** S1, S2, S3b and S4–S7. Every one of these returns
+  before the host attempts a write. The registry meaning "rejected before
+  application dispatch" becomes true again of every outcome the renderer can
+  see.
+  - `WvError::RendererBridge` (Rust side) also uses `KELD-WV-011` for
+    bridge-install and reply-encode failures (`macos_bridge.rs:511-618`, `:843`).
+    Those are construction or host faults, not call outcomes, and this
+    revision leaves them unchanged.
 - **No longer `KELD-WV-011`:**
   - S8 moves to WV-012;
   - S9, S10 and S16 move to WV-013.
@@ -306,7 +326,12 @@ trust as its handler.
   - the `macos_bridge.rs` unit tests.
 
   The `KELD-WV-011` registry `fix` and the `WvError::RendererBridge` `Display`
-  text stop recommending a document reload.
+  text stop recommending a document reload. The `Display` pin at
+  `crates/keld-wv/src/error.rs:196` changes with it.
+- **Interim mismatch (blocker owned by T3).** T0 already removes the reload
+  advice from the registry `fix`. `error.rs:109-110` still says "Reload the
+  current main-frame document" until T3 lands, because changing it is
+  production code.
 
 ### 4.4 Retry rules (normative for apps; Keld itself never resends)
 
@@ -393,13 +418,17 @@ Unknown until test AT-B3 decides it (Open question 3).
 
 ### 4.7 Exactly-once settlement and no replay
 
-- Each layer holds at most one pending entry and empties it **before** it
-  delivers a terminal. A second terminal finds the slot empty and is dropped.
-  The layers are:
-  - page facade `pending`;
-  - isolated-world `inflight`;
-  - native `BridgeState.pending`, matched on `(navigation, request)`;
+- Three layers hold at most one pending entry and empty it **before** they
+  deliver a terminal. A second terminal finds the slot empty and is dropped.
+  The three layers are:
+  - page facade `pending`, matched on request id (`macos_bridge.rs:49-53`);
+  - native `BridgeState.pending`, matched on `(navigation, request)`
+    (`:425-436`);
   - host `pending_echo`, matched on `(attempt, correlation)`.
+- The isolated world's `inflight` flag is not a settlement guard.
+  `__keldBridgeNativeResult` (`:137-147`) clears it and relays every result
+  without checking the request id. Duplicates are dropped by the native layer
+  and the facade.
 - The dispatch thread sends exactly one outcome per renderer request.
 - A reply that arrives after a retirement is refused by the correlation and
   attempt check, and the reader that would deliver it is already inert.
@@ -496,11 +525,11 @@ Every hosted arm prints its raw census with `--success-output immediate`.
 | AT-13d | 7 | S15 | hosted macOS | 50 | kill Bun on the `returning` POST; outcome ∈ {reply, WV-013}; never WV-012; 1 terminal | none beyond AT-13b; the success:Unknown ratio is reported, not asserted |
 | AT-API2a | 5 | S11–S14 | `bun test` in `@keld/api`, macOS + Linux + Windows CI | deterministic | missing → API-002, census 0; late (call, then register, then call) → API-002 then reply, census 1; unsubscribed → API-002; handler throws after effect → API-001, census 1; decode failure → API-001, census 0; oversize → API-001, census 1 | mutation: move the no-handler check after `handler(request)` → the census for the API-002 case becomes 1 and the test fails; a throwing handler never yields API-002 |
 | AT-API2b | 5, 8 | S11 across restart | hosted macOS | 10 × arms {inside `whenReady`, before `whenReady`} | inside: at least one post-restart API-002 with G2 census 0, then one resend → census 1; before: 0 API-002 across all N | the inside arm reproduces the window (round-1 E8 hit it 10/10 under API-001) |
-| AT-11 | 6 | S1–S7 | macOS unit (keld-wv + keld-core) | deterministic | each S1–S7 reason → WV-011 and 0 write calls | mutation: emit WV-011 from S9 → fails |
+| AT-11 | 6 | S1, S2, S3b, S4–S7 (and S3a: no terminal) | macOS unit (keld-wv + keld-core) | deterministic | each reason → WV-011 and 0 write calls; each S3a reason → no terminal and no dispatch | mutation: emit WV-011 from S9 → fails |
 | AT-B1 | 9 | `#throwIfTerminal` | `@keld/kipc` unit, 3 OSes | deterministic | link already ended → `call()` rejects IPC-022; host fixture read 0 frames | remove `#throwIfTerminal` → frame posted (the check is the proof, but the code stays Unknown) |
 | AT-B2 | 9 | pending at close | `@keld/kipc` unit, 3 OSes | deterministic | pending, then host close → IPC-022; host read 1 frame; same code as AT-B1 | none: the code identity *is* the assertion |
 | AT-B3 | 9 | written before Quit, pending at close | keld-core unit | deterministic | host census for that CALL recorded; decides Open question 3 | written after Quit → IPC-024, census 0 (existing `guarded_router_and_quit.rs`) |
-| AT-S | 7 | settlement | macOS unit (keld-wv, keld-core) | deterministic | late reply after retirement refused; facade result after `pagehide` ignored; native result for a stale `(navigation, request)` dropped | remove the corr/attempt check → a second settlement is observed |
+| AT-S | 7 | settlement | macOS unit (keld-wv, keld-core) + hosted macOS | deterministic (unit); 10 (hosted) | late reply after retirement refused; facade result after `pagehide` ignored; native result for a stale `(navigation, request)` dropped; **a stale-document WV-011 (S3b) handled after the successor commits never settles the successor's pending request** (Open question 6) | remove the corr/attempt check → a second settlement is observed |
 
 Anti-flake:
 
@@ -546,3 +575,12 @@ architecture 01 §5 can move.
 5. **Hung Bun (S17).** Recommend a separate liveness issue: no reply deadline,
    and a session-wide slot that makes every other view "busy". It is not part
    of this split.
+6. **Cross-document settlement of a stale refusal (unproven).**
+   `reply_immediate_error` answers into whichever document
+   `message.webView()` currently holds, and each document starts request ids
+   at 1. So a stale invoke from the old document, handled after the successor
+   commits, might settle the successor's pending request with WV-011 while
+   that call may already have been dispatched. The AT-S hosted arm decides
+   this. If it reproduces, the fix (for example, a document-scoped result)
+   belongs to the navigation work, not to this split. Until then, S3b's "not
+   sent" holds only for the document that issued the call.
