@@ -30,8 +30,14 @@ match the crate that already emits the code. Do not invent a third spelling.
 ## KELD-API-001
 
 - crate: @keld/api
-- message: Application channel call failed or the declared channel configuration is invalid
-- fix: Check the declared application channel, handler registration, request/reply codecs and kipc frame-size bounds; diagnose handler failures in the application code.
+- message: Application channel call failed after it reached the application stage (decode, handler, encode or reply size), so application code may have run; or the declared channel configuration is invalid
+- fix: Do not resend a failed call automatically: its handler may have run. Check the declared application channel, handler registration, request/reply codecs and kipc frame-size bounds; diagnose handler failures in the application code.
+
+## KELD-API-002
+
+- crate: @keld/api
+- message: Application channel has no registered handler; the call reached Bun and no application code ran
+- fix: Register every channels.handle handler synchronously at module top level, before the first app.whenReady() and before any fs or auth call; then the page may resend the call once.
 
 ## KELD-IPC-001
 

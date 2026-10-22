@@ -29,6 +29,19 @@ function apiError(detail: string): Error {
   return new Error(`KELD-API-001: ${detail}`);
 }
 
+/**
+ * No Echo handler was registered when a host CALL arrived (GH-1095 §4.2,
+ * S11). `dispatchApplicationCall` throws it before it decodes the request or
+ * runs any app code, so `resolveEchoCall` answers it as `KELD-API-002`. Only
+ * this stage throws it; every other failure stays `KELD-API-001`.
+ */
+export class NoApplicationHandlerError extends Error {
+  constructor() {
+    super("KELD-API-002: Echo channel has no registered handler");
+    this.name = "NoApplicationHandlerError";
+  }
+}
+
 function decodeEchoRequest(payload: Uint8Array): EchoRequest {
   const [message, afterMessage] = decodePostcardStringAt(payload, 0);
   const [count, end] = decodeVarint(payload, afterMessage);
@@ -94,7 +107,7 @@ export async function dispatchApplicationCall(
   }
   const handler = echoHandler;
   if (handler === undefined) {
-    throw apiError("Echo channel has no registered handler");
+    throw new NoApplicationHandlerError();
   }
   const request = echoChannel.decodeRequest(payload);
   const response = await handler(request);
