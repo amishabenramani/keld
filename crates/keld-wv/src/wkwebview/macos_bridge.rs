@@ -43,7 +43,14 @@ const PAGE_FACADE_SCRIPT: &str = r#"
   let nextRequest = 1;
   let pending = null;
 
-  const fail = (detail) => Promise.reject(new Error("KELD-WV-011: " + detail));
+  // The one rejection constructor (GH-1095 §4.9): the message is built by its
+  // caller exactly as before, and an own enumerable code equals its prefix.
+  const coded = (code, message) => {
+    const error = new Error(message);
+    define(error, "code", { value: code, enumerable: true, writable: true, configurable: true });
+    return error;
+  };
+  const fail = (detail) => Promise.reject(coded("KELD-WV-011", "KELD-WV-011: " + detail));
 
   const onResult = (event) => {
     if (event.source !== window || pending === null) return;
@@ -56,7 +63,7 @@ const PAGE_FACADE_SCRIPT: &str = r#"
     } else {
       const code = typeof msg.code === "string" ? msg.code : "KELD-WV-011";
       const detail = typeof msg.detail === "string" ? msg.detail : "renderer bridge request failed";
-      waiter.reject(new Error(detail.startsWith(code) ? detail : code + ": " + detail));
+      waiter.reject(coded(code, detail.startsWith(code) ? detail : code + ": " + detail));
     }
   };
   window.addEventListener("message", onResult, false);
@@ -64,7 +71,8 @@ const PAGE_FACADE_SCRIPT: &str = r#"
     if (pending === null) return;
     const waiter = pending;
     pending = null;
-    waiter.reject(new Error("KELD-WV-011: renderer document navigated before reply"));
+    // The call may already have been dispatched: outcome unknown.
+    waiter.reject(coded("KELD-WV-013", "KELD-WV-013: renderer document navigated before reply"));
   }, false);
 
   const invoke = function invoke(channel, payload, opts) {
@@ -109,11 +117,12 @@ const ISOLATED_BRIDGE_SCRIPT: &str = r#"
   const handler = window.webkit.messageHandlers.__keld_wv_link_v1;
   let documentNonce = null;
   let queued = null;
-  let inflight = false;
+  // The request id of the call in flight to native, or null.
+  let inflight = null;
 
   const sendNative = (call) => {
-    if (documentNonce === null || inflight) return;
-    inflight = true;
+    if (documentNonce === null || inflight !== null) return;
+    inflight = call.request;
     handler.postMessage(JSON.stringify({
       v: 1,
       kind: "invoke",
@@ -134,9 +143,11 @@ const ISOLATED_BRIDGE_SCRIPT: &str = r#"
     }
   };
 
+  // Settles only a result for this document's in-flight request; any other
+  // result is dropped and leaves inflight unchanged (GH-1095 §4.7).
   globalThis.__keldBridgeNativeResult = (result) => {
-    if (!result || !Number.isInteger(result.request)) return;
-    inflight = false;
+    if (!result || result.document !== documentNonce || result.request !== inflight) return;
+    inflight = null;
     post({
       __keldRelay: "result-v1",
       request: result.request,
@@ -155,7 +166,7 @@ const ISOLATED_BRIDGE_SCRIPT: &str = r#"
     if (!Number.isInteger(call.channel) || call.channel <= 0 || call.channel > 0xffff) return;
     if (call.channel !== __KELD_ADMITTED_CHANNEL__ || !Array.isArray(call.payload) || call.payload.length > 4096) return;
     if (!call.payload.every((byte) => Number.isInteger(byte) && byte >= 0 && byte <= 255)) return;
-    if (queued !== null || inflight) {
+    if (queued !== null || inflight !== null) {
       post({
         __keldRelay: "result-v1",
         request: call.request,
@@ -449,8 +460,12 @@ impl BridgeState {
 pub(super) struct BridgeNavigationHandle(Arc<Mutex<BridgeState>>);
 
 impl BridgeNavigationHandle {
+    /// The committed-navigation reset (wry `PageLoadEvent::Started`). The old
+    /// document is gone and its `pagehide` already settled its call, so the
+    /// request this clears needs no delivery; its later host outcome finds no
+    /// entry and is dropped.
     pub(super) fn navigation_started(&self) {
-        let _cleared = lock_state(&self.0).navigation_started();
+        let _committed = lock_state(&self.0).navigation_started();
     }
 }
 
@@ -639,6 +654,26 @@ impl MacRendererBridge {
         lock_state(&self.state).destroy();
     }
 
+    /// A host `navigate()` resets the bridge before `WebKit` loads anything.
+    /// If that load never commits, the current document stays live, so the
+    /// call this reset clears settles here once, as outcome unknown (GH-1095
+    /// §4.7). If it commits, the old document already settled the call on
+    /// `pagehide`, and the successor drops this result by its document.
+    pub(super) fn navigation_started(
+        &self,
+        webview: Option<&wry::WryWebView>,
+    ) -> Result<(), WvError> {
+        let Some(cleared) = lock_state(&self.state).navigation_started() else {
+            return Ok(());
+        };
+        let Some(webview) = webview else {
+            return Ok(());
+        };
+        let script = page_result_script(&PageOutcome::navigation_reset(cleared))?;
+        evaluate_in_world(webview, &self.world, &script);
+        Ok(())
+    }
+
     pub(super) fn deliver(
         &self,
         webview: &wry::WryWebView,
@@ -699,6 +734,19 @@ impl PageOutcome {
                 code: Some(code),
                 detail: Some(detail),
             },
+        }
+    }
+
+    /// The terminal for a call a host `navigate()` reset cleared before its
+    /// outcome arrived. The call may already have been dispatched.
+    fn navigation_reset(cleared: PendingRequest) -> Self {
+        Self {
+            request: cleared.request,
+            document: cleared.document,
+            ok: false,
+            payload: None,
+            code: Some(String::from("KELD-WV-013")),
+            detail: Some(String::from("renderer navigation started before reply")),
         }
     }
 
@@ -1238,18 +1286,30 @@ mod tests {
         );
     }
 
-    /// GH-1095 T1 characterisation (AT-S arm d, model): today a host
-    /// `navigate()` reset clears the pending request silently, so the later
-    /// host outcome finds nothing to settle and the call gets no terminal.
+    /// GH-1095 criterion 7 (AT-S arm d, model): a host `navigate()` reset
+    /// hands its cleared call to the bridge wrapper, which delivers its one
+    /// terminal; the later host outcome finds no entry and is dropped.
     #[test]
-    fn navigation_reset_today_drops_the_pending_call_without_a_terminal() {
+    fn navigation_reset_leaves_no_entry_for_the_later_host_outcome() {
         let mut state = BridgeState::new(WebviewId(8), ADMITTED);
         state.bind_webview(0x8000).expect("bind WebView");
         let nonce = state.bind().expect("bind");
         let call = state
             .admit_invoke(&nonce, 4, ADMITTED, vec![1])
             .expect("admit");
-        let _cleared = state.navigation_started();
+        let cleared = state
+            .navigation_started()
+            .expect("the reset clears the call");
+        assert_eq!(
+            serde_json::to_value(PageOutcome::navigation_reset(cleared)).expect("encode"),
+            json!({
+                "request": 4,
+                "document": nonce,
+                "ok": false,
+                "code": "KELD-WV-013",
+                "detail": "renderer navigation started before reply",
+            })
+        );
         assert!(state.pending.is_none());
         assert_eq!(
             state.settle(call.navigation(), call.request()),
@@ -1406,6 +1466,6 @@ mod tests {
             render_bridge_script(ISOLATED_BRIDGE_SCRIPT, 7)
                 .contains("if (call.channel !== 7 || !Array.isArray(call.payload)")
         );
-        assert!(PAGE_FACADE_SCRIPT.contains("new Error(\"KELD-WV-011: \" + detail)"));
+        assert!(PAGE_FACADE_SCRIPT.contains("coded(\"KELD-WV-011\", \"KELD-WV-011: \" + detail)"));
     }
 }

@@ -686,7 +686,8 @@ impl WebEngine for WkWebViewEngine {
 
     fn navigate(&mut self, id: WebviewId, target: NavTarget) -> Result<(), WvError> {
         if let Some(bridge) = self.renderer_bridges.get(&id.0) {
-            bridge.navigation_handle().navigation_started();
+            let native = self.views.get(&id.0).map(|view| view.webview.webview());
+            bridge.navigation_started(native.as_deref())?;
         }
         let view = self.view(id)?;
         match target {
