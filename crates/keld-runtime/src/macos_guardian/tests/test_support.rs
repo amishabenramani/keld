@@ -12,6 +12,39 @@ use nix::fcntl::{FcntlArg, FdFlag, fcntl};
 use nix::sys::signal::kill;
 use nix::unistd::{Pid, pipe};
 
+/// Await the real kernel state in which every remaining member of `group` is
+/// a killed but unreaped zombie (`kill(-PGID, 0) == EPERM`). SIGKILL delivery
+/// does not mean the member has already exited, so fixtures must observe this
+/// state rather than assert it immediately. The three-second bound is only a
+/// kill switch; the loop ends on the observed condition.
+pub(super) fn await_held_zombie_group(group: Pid) {
+    let signal_deadline = Instant::now() + Duration::from_secs(3);
+    loop {
+        match kill(Pid::from_raw(-group.as_raw()), None) {
+            Err(Errno::EPERM) => break, // zombie-only process group, not absent
+            Err(Errno::ESRCH) => panic!("whole group disappeared before direct Child reap"),
+            Ok(()) if Instant::now() < signal_deadline => std::thread::yield_now(),
+            probe => panic!("host did not create a held zombie group: {probe:?}"),
+        }
+    }
+}
+
+/// Join a test worker, failing with the fixed `expectation` instead of
+/// hanging when it is still running at `deadline`. The loop ends on the
+/// observed `is_finished`; the deadline is only a kill switch, so a mutation
+/// that leaves the worker blocked turns the test red rather than stalling it.
+pub(super) fn join_before<T>(
+    worker: thread::JoinHandle<T>,
+    deadline: Instant,
+    expectation: &'static str,
+) -> thread::Result<T> {
+    while !worker.is_finished() {
+        assert!(Instant::now() < deadline, "{expectation}");
+        thread::yield_now();
+    }
+    worker.join()
+}
+
 /// Tests construct a real owned native group before installing a host owner.
 pub(super) fn test_group_identity(pid: u32) -> GroupIdentity {
     observe_group_identity(pid).expect("live native group leader has a kernel birth identity")
