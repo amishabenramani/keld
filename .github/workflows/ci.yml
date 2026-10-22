@@ -298,7 +298,15 @@ jobs:
           New-Item -ItemType Directory -Force -Path (Join-Path $cargoHome 'bin') | Out-Null
       - uses: taiki-e/install-action@ab6895351a88b908e96a4697860d4ffea5e57dbe # v2.87.27
         with:
-          tool: nextest
+          tool: nextest,just@1.58.0
+      # The rest of the `cache-check-test` ci-policy recipe, hosted on all three
+      # runners: "Worktree cache tool native tests" above runs the
+      # worktree_cache.rs unit tests, and this runs
+      # tools/cache_tool_provenance_test.sh, which drives `just cache-check`
+      # through the `just` installed above (#935).
+      - name: Worktree cache tool provenance test
+        shell: bash
+        run: bash tools/cache_tool_provenance_test.sh
       # GH-1081 [DO NOT MERGE]: round-2 XTEST input for the Linux reload/typing rows.
       - name: GH-1081 install xdotool (research only)
         if: matrix.os == 'ubuntu-latest'
