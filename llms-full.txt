@@ -5591,8 +5591,8 @@ match the crate that already emits the code. Do not invent a third spelling.
 ## KELD-WV-011
 
 - crate: keld-wv
-- message: Renderer bridge request rejected before application dispatch
-- fix: Reload the current main-frame document and invoke only the declared Keld renderer API; do not supply stale document state, undeclared channels, oversized payloads, or page-selected authority.
+- message: Renderer bridge request rejected, or ended without a reply; until GH-1095 lands this code is also returned after application dispatch
+- fix: If the detail is "application call is unavailable or already pending", "application link ended before the renderer reply" or "renderer document navigated before reply", the call may have run: do not resend it automatically. Otherwise invoke only the declared Keld renderer API with a valid payload, wait for your own pending call to settle, and never supply stale document state, undeclared channels, oversized payloads, or page-selected authority. Do not reload the document to recover.
 
 ## KELD-CLI-010
 
