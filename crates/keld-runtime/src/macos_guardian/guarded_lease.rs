@@ -1,5 +1,5 @@
 //! Fresh-generation child preparation and the exact revocation lease.
-use super::process_group::{LocalGroupWitness, terminate_attested_group};
+use super::process_group::{LocalGroupWitness, retire_own_child_group, terminate_attested_group};
 #[cfg(test)]
 use super::validate_group_leader;
 use super::{
@@ -216,8 +216,10 @@ pub(super) struct GuardedPrimaryLease {
 // turn into an unverified host CLEAR. Reap this exact Child before asking the
 // host to independently prove the group gone. Do not wait before revoking
 // role/IPC authority or issuing the original birth-attested group signal.
-fn reap_guarded_child_before_clear(child: &mut Child) -> Result<(), RuntimeError> {
-    let deadline = Instant::now() + GUARDIAN_SHUTDOWN_DEADLINE;
+pub(super) fn reap_guarded_child_before_clear(
+    child: &mut Child,
+    deadline: Instant,
+) -> Result<(), RuntimeError> {
     loop {
         match child.try_wait() {
             Ok(Some(_)) => return Ok(()),
@@ -354,10 +356,20 @@ impl GuardedPrimaryLease {
                     source,
                 ));
             }
-        } else if let Some(identity) = verified_group
-            && let Err(error) = terminate_attested_group(identity)
-        {
-            failures.push(error);
+        } else if let Some(identity) = verified_group {
+            match child.take() {
+                // The Guardian is this leader's OS parent: its unreaped zombie
+                // keeps the group zombie-only until this exact reap, so a
+                // denied or ambiguous group is decided only after it.
+                Some(own) => {
+                    let (retired, reaped) = retire_own_child_group(identity, |deadline| {
+                        reap_guarded_child_before_clear(own, deadline)
+                    });
+                    failures.extend(retired.err());
+                    failures.extend(reaped.err());
+                }
+                None => failures.extend(terminate_attested_group(identity).err()),
+            }
         }
         #[cfg(not(test))]
         if verified_group.is_none() && group_pid.is_some() {
@@ -384,7 +396,8 @@ impl GuardedPrimaryLease {
             }
         }
         if let Some(child) = child
-            && let Err(error) = reap_guarded_child_before_clear(child)
+            && let Err(error) =
+                reap_guarded_child_before_clear(child, Instant::now() + GUARDIAN_SHUTDOWN_DEADLINE)
         {
             // The retained supervisor Child has not proved retirement. Do
             // not send CLEAR and let the host forget a potentially live group.

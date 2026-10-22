@@ -28,6 +28,8 @@ const BOUND: Duration = Duration::from_secs(5);
 
 #[path = "tests/native_activity.rs"]
 mod native_activity;
+#[path = "tests/own_child_reap.rs"]
+mod own_child_reap;
 
 #[test]
 fn native_role() {

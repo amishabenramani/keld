@@ -392,33 +392,50 @@ fn signal_attested_group_once(
 /// Reconcile exactly one denied group signal: the typed signal-phase EPERM
 /// that [`finish_group_termination`] returns when its own follow-up probe was
 /// not `ESRCH`. Any other error is returned unchanged. The group is never
-/// signalled again; only a read-only observation of BOTH the original leader
-/// PID and the whole group as `ESRCH` before `deadline` proves retirement.
-/// A persistent zombie-only group, a live or reused leader, or a group that
-/// turns signallable again returns the original typed signal-phase EPERM.
+/// signalled again; only [`require_attested_group_absence`] (a read-only
+/// observation of BOTH the original leader PID and the whole group as `ESRCH`
+/// before `deadline`) proves retirement. A persistent zombie-only group, a
+/// live or reused leader, or a group that turns signallable again returns the
+/// original typed signal-phase EPERM.
 ///
-/// Name, signature and error contract match the #933/#945/#947 stack's
-/// owner of the same rule, whose wait delegates to
-/// `require_attested_group_absence`; whichever lands second keeps one copy.
+/// The host calls this inside the signalling call. A caller that is the
+/// leader's own OS parent calls it only after reaping that exact Child (see
+/// [`retire_own_child_group`]). Name, signature and error contract match the
+/// #933/#945/#947 stack's owner of the same rule; whichever lands second
+/// keeps one copy.
 pub(super) fn reconcile_denied_signal_after_reap(
     group: GroupIdentity,
     denied: RuntimeError,
     deadline: Instant,
 ) -> Result<(), RuntimeError> {
-    if !matches!(
-        &denied,
-        RuntimeError::Lifecycle {
-            phase: GROUP_SIGNAL_PHASE,
-            source,
-        } if source.raw_os_error() == Some(libc::EPERM)
-    ) {
+    if !is_denied_group_signal(&denied) {
         return Err(denied);
     }
     #[cfg(test)]
     run_test_group_signal_hook(group.pid, TestGroupSignalPoint::AfterDeniedSignal);
-    let Ok(raw) = validate_group_pid(group.pid) else {
-        return Err(denied);
-    };
+    require_attested_group_absence(group, deadline).map_err(|_| denied)
+}
+
+fn is_denied_group_signal(error: &RuntimeError) -> bool {
+    matches!(
+        error,
+        RuntimeError::Lifecycle {
+            phase: GROUP_SIGNAL_PHASE,
+            source,
+        } if source.raw_os_error() == Some(libc::EPERM)
+    )
+}
+
+/// Read-only proof that the original group is gone: BOTH the original leader
+/// PID and the whole group report `ESRCH`, decided before `deadline`. A
+/// zombie-only group (EPERM) is polled; anything else fails at once. This
+/// never signals and never treats EPERM as absence. (Same name and signature
+/// as the stack's owner, which additionally re-checks a live leader's birth.)
+pub(super) fn require_attested_group_absence(
+    group: GroupIdentity,
+    deadline: Instant,
+) -> Result<(), RuntimeError> {
+    let raw = validate_group_pid(group.pid)?;
     loop {
         let leader = getpgid(Some(Pid::from_raw(raw)));
         let whole_group = kill(Pid::from_raw(-raw), None);
@@ -434,9 +451,103 @@ pub(super) fn reconcile_denied_signal_after_reap(
             (Err(Errno::ESRCH), Err(Errno::EPERM)) if Instant::now() < deadline => {
                 std::thread::sleep(GENERATION_CONTROL_POLL);
             }
-            _ => return Err(denied),
+            observed => {
+                return Err(lifecycle_error(
+                    "macOS guardian group absence",
+                    io::Error::new(
+                        io::ErrorKind::PermissionDenied,
+                        format!("original group absence is unproven: {observed:?}"),
+                    ),
+                ));
+            }
         }
     }
+}
+
+/// Group retirement for a caller that is the attested leader's own OS parent
+/// and still holds its unreaped `Child` (the Guardian's supervisor paths).
+///
+/// While that Child is unreaped its zombie keeps the group zombie-only
+/// (`getpgid` ESRCH, `kill(-g, 0)` EPERM), so an in-call absence wait could
+/// never succeed: it would only burn its budget and fail. Here the call makes
+/// at most ONE group signal decision without any in-call wait, then runs
+/// `reap_own_child` with the shared post-signal budget, and only after a
+/// successful reap proves absence read-only within the rest of that budget:
+/// - a denied signal is reconciled by [`reconcile_denied_signal_after_reap`]
+///   and fails with the typed signal-phase EPERM;
+/// - a zombie-only group found before any signal fails with the existing
+///   "registered group identity unavailable" error.
+///
+/// Returns `(group result, reap result)` so callers keep their own reap
+/// error. The group is never signalled after a denial or an ambiguity.
+pub(super) fn retire_own_child_group(
+    group: GroupIdentity,
+    reap_own_child: impl FnOnce(Instant) -> Result<(), RuntimeError>,
+) -> (Result<(), RuntimeError>, Result<(), RuntimeError>) {
+    enum Decision {
+        Done(Result<(), RuntimeError>),
+        Denied(RuntimeError),
+        Ambiguous(RuntimeError),
+    }
+    let identity_unavailable = |observation: RuntimeError| {
+        collapse_failures(vec![
+            observation,
+            lifecycle_error(
+                "macOS guardian registered group identity unavailable",
+                io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    "live process-group leader identity is unproven",
+                ),
+            ),
+        ])
+    };
+    let signal_once = || {
+        #[cfg(test)]
+        run_test_group_signal_hook(group.pid, TestGroupSignalPoint::BeforeSignal);
+        match terminate_registered_group(group.pid) {
+            Err(denied) if is_denied_group_signal(&denied) => Decision::Denied(denied),
+            result => Decision::Done(result),
+        }
+    };
+    let decision = match observe_group_identity(group.pid) {
+        Ok(current) if current == group => signal_once(),
+        Ok(_) => Decision::Done(Err(lifecycle_error(
+            "macOS guardian registered group identity changed",
+            io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "process-group leader PID was reused; refusing unowned group signal",
+            ),
+        ))),
+        Err(observation) => match validate_group_pid(group.pid) {
+            Err(error) => Decision::Done(Err(error)),
+            Ok(raw) => match (
+                getpgid(Some(Pid::from_raw(raw))),
+                kill(Pid::from_raw(-raw), None),
+            ) {
+                (_, Err(Errno::ESRCH)) => Decision::Done(Ok(())),
+                (Err(Errno::ESRCH), Ok(())) => signal_once(),
+                // Our own unreaped leader (or another member) is a zombie:
+                // decided only after this caller's reap.
+                (Err(Errno::ESRCH), Err(Errno::EPERM)) => {
+                    Decision::Ambiguous(identity_unavailable(observation))
+                }
+                _ => Decision::Done(Err(identity_unavailable(observation))),
+            },
+        },
+    };
+    let reap_deadline = Instant::now() + GUARDIAN_SHUTDOWN_DEADLINE;
+    let reap = reap_own_child(reap_deadline);
+    let retired = match decision {
+        Decision::Done(result) => result,
+        Decision::Denied(denied) if reap.is_ok() => {
+            reconcile_denied_signal_after_reap(group, denied, reap_deadline)
+        }
+        Decision::Ambiguous(unavailable) if reap.is_ok() => {
+            require_attested_group_absence(group, reap_deadline).map_err(|_| unavailable)
+        }
+        Decision::Denied(error) | Decision::Ambiguous(error) => Err(error),
+    };
+    (retired, reap)
 }
 
 const GROUP_SIGNAL_PHASE: &str = "macOS guardian process-group signal";
