@@ -9,10 +9,11 @@
 //! `APP_LINK_IO_DEADLINE` ends the write. Waits are blocking reads and
 //! receives on those observables; every timeout is a kill switch only.
 
+use super::super::{EchoCallRefusal, RendererEchoTerminal, dispatched_echo_terminal};
 use super::{
     AppWindowCommand, CallError, CorrelationId, Duration, ECHO_CHANNEL, FrameKind,
     GuardianOwnerCommand, PlatformPrimaryOwnerHandle, PrimaryEchoCall, PrimaryEchoReply,
-    PrimaryRouter, PrimaryRouterHandle, Receiver, SessionShutdownState, encode, mpsc,
+    PrimaryRouter, PrimaryRouterHandle, Receiver, SessionShutdownState, app_detail, encode, mpsc,
     primary_echo_test_router, write_frame,
 };
 use keld_ipc::echo::EchoRequest;
@@ -122,12 +123,7 @@ fn s8_call_without_an_admitted_generation_reaches_no_stream() {
     let error = handle
         .begin_echo_call(&refused)
         .expect_err("no admitted generation");
-    assert!(
-        error
-            .to_string()
-            .contains("no admitted primary generation is available"),
-        "{error}"
-    );
+    assert!(matches!(error, EchoCallRefusal::NoGeneration), "{error:?}");
     assert_slot_empty(&handle);
     assert_eq!(
         bytes_until_eof(&mut g1_peer),
@@ -170,7 +166,7 @@ fn s5_s6_s7_refusals_return_before_any_write() {
     let busy = handle
         .begin_echo_call(&request("s7-refused"))
         .expect_err("slot busy");
-    assert!(busy.to_string().contains("already pending"), "{busy}");
+    assert!(matches!(busy, EchoCallRefusal::Busy), "{busy:?}");
     answer_next_call(&mut peer, &call, &first);
     router.shutdown().expect("S7 router shutdown");
     assert!(
@@ -184,7 +180,10 @@ fn s5_s6_s7_refusals_return_before_any_write() {
     let quitting = handle
         .begin_echo_call(&request("s5-refused"))
         .expect_err("quiescing");
-    assert!(quitting.to_string().contains("quiescing"), "{quitting}");
+    assert!(
+        matches!(quitting, EchoCallRefusal::Quitting),
+        "{quitting:?}"
+    );
     assert_slot_empty(&handle);
     drop(router.shutdown());
     assert!(
@@ -211,8 +210,8 @@ fn s5_s6_s7_refusals_return_before_any_write() {
             .begin_echo_call(&request("s6-refused"))
             .expect_err("poisoned call state");
         assert!(
-            unavailable.to_string().contains("lock poisoned"),
-            "{unavailable}"
+            matches!(unavailable, EchoCallRefusal::StateUnavailable),
+            "{unavailable:?}"
         );
         drop(router.shutdown());
         assert!(
@@ -300,7 +299,7 @@ struct PartialWrite {
     /// Owner `FailGeneration` notifications.
     failed: Vec<u32>,
     /// What a second call returned after the failure.
-    next_call: Result<(), String>,
+    next_call: Result<(), EchoCallRefusal>,
 }
 
 /// One S9 arm: write the maximum CALL with `free` bytes of space.
@@ -312,8 +311,9 @@ fn partial_write(free: usize) -> PartialWrite {
         .begin_echo_call(&payload)
         .expect_err("the stopped write fails");
     assert!(
-        error.to_string().contains("renderer Echo call write"),
-        "free={free}: {error}"
+        matches!(&error, EchoCallRefusal::WriteFailed(source)
+            if source.to_string().contains("renderer Echo call write")),
+        "free={free}: {error:?}"
     );
     assert_slot_empty(&fixture.handle);
     let retired = fixture
@@ -322,11 +322,7 @@ fn partial_write(free: usize) -> PartialWrite {
         .lock()
         .expect("generation lock")
         .is_none();
-    let next_call = fixture
-        .handle
-        .begin_echo_call(&payload)
-        .map(|_| ())
-        .map_err(|error| error.to_string());
+    let next_call = fixture.handle.begin_echo_call(&payload).map(|_| ());
     let received = bytes_until_eof(&mut fixture.peer);
     let filler_left = fixture.filler - free;
     assert!(received.len() >= filler_left, "free={free}: lost filler");
@@ -377,12 +373,10 @@ fn assert_failed_write_retires(free: usize, accepted: usize) {
         "free={free}: generation survived the failure"
     );
     assert_eq!(observed.failed, [1], "free={free}: one owner failure");
-    let next = observed
-        .next_call
-        .expect_err("no generation after the failure");
     assert!(
-        next.contains("no admitted primary generation is available"),
-        "free={free}: {next}"
+        matches!(observed.next_call, Err(EchoCallRefusal::NoGeneration)),
+        "free={free}: {:?}",
+        observed.next_call
     );
 }
 
@@ -551,5 +545,63 @@ fn s10b_bun_err_codes_reach_the_reply_channel_verbatim() {
             PrimaryEchoReply::Reply(bytes) => panic!("{code}: ERR became a Reply {bytes:?}"),
         }
         router.shutdown().expect("S10b router shutdown");
+    }
+}
+
+/// The renderer terminal each refusal stage maps to (§4.2 S5–S9). The code
+/// comes from the variant alone; the write error's text never reaches it.
+#[test]
+fn refusal_stages_map_to_their_renderer_terminal() {
+    let refused = RendererEchoTerminal::error(
+        "KELD-WV-011",
+        "application call is unavailable or already pending",
+    );
+    for refusal in [
+        EchoCallRefusal::Quitting,
+        EchoCallRefusal::StateUnavailable,
+        EchoCallRefusal::Busy,
+        EchoCallRefusal::NoGeneration,
+        EchoCallRefusal::WriteFailed(app_detail("renderer Echo call write", "test write")),
+    ] {
+        assert_eq!(refusal.renderer_terminal(), refused, "{refusal:?}");
+    }
+}
+
+/// The renderer terminal for a dispatched call (§4.2 S10, S10b, S15): a
+/// reply passes through, every retirement maps to one code, and a Bun ERR
+/// keeps its own code.
+#[test]
+fn dispatched_calls_map_to_their_renderer_terminal() {
+    assert_eq!(
+        dispatched_echo_terminal(Some(Ok(PrimaryEchoReply::Reply(vec![1, 2])))),
+        RendererEchoTerminal::Reply(vec![1, 2])
+    );
+    let ended = RendererEchoTerminal::error(
+        "KELD-WV-011",
+        "application link ended before the renderer reply",
+    );
+    assert_eq!(
+        dispatched_echo_terminal(Some(Err(app_detail("renderer Echo call", "retired")))),
+        ended,
+        "a retirement"
+    );
+    assert_eq!(
+        dispatched_echo_terminal(None),
+        ended,
+        "a dropped reply channel"
+    );
+    for code in ["KELD-WV-011", "KELD-API-001"] {
+        let message = format!("{code}: claimed by the peer");
+        assert_eq!(
+            dispatched_echo_terminal(Some(Ok(PrimaryEchoReply::Err(CallError {
+                code: code.to_owned(),
+                message: message.clone(),
+            })))),
+            RendererEchoTerminal::Error {
+                code: code.to_owned(),
+                detail: message,
+            },
+            "a Bun ERR {code}"
+        );
     }
 }

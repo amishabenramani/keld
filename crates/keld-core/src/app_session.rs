@@ -4211,14 +4211,12 @@ fn start_renderer_dispatch(
                 let navigation = request.navigation();
                 let local_request = request.request();
                 if request.channel() != keld_ipc::channel_table::ECHO.wire_id() {
+                    let refused = RendererEchoTerminal::error(
+                        RENDERER_REFUSED,
+                        "renderer channel is not declared by this build",
+                    );
                     if outcomes
-                        .send(RendererBridgeOutcome::Error {
-                            webview,
-                            navigation,
-                            request: local_request,
-                            code: String::from("KELD-WV-011"),
-                            detail: String::from("renderer channel is not declared by this build"),
-                        })
+                        .send(refused.addressed(webview, navigation, local_request))
                         .is_err()
                     {
                         return Ok(());
@@ -4226,22 +4224,18 @@ fn start_renderer_dispatch(
                     continue;
                 }
 
-                let Ok(call) = router.begin_echo_call(request.payload()) else {
-                    if outcomes
-                        .send(RendererBridgeOutcome::Error {
-                            webview,
-                            navigation,
-                            request: local_request,
-                            code: String::from("KELD-WV-011"),
-                            detail: String::from(
-                                "application call is unavailable or already pending",
-                            ),
-                        })
-                        .is_err()
-                    {
-                        return Ok(());
+                let call = match router.begin_echo_call(request.payload()) {
+                    Ok(call) => call,
+                    Err(refusal) => {
+                        let refused = refusal.renderer_terminal();
+                        if outcomes
+                            .send(refused.addressed(webview, navigation, local_request))
+                            .is_err()
+                        {
+                            return Ok(());
+                        }
+                        continue;
                     }
-                    continue;
                 };
                 if std::env::var_os("KELD_KEL142_ACCEPTANCE_REPORT").is_some() {
                     eprintln!(
@@ -4262,28 +4256,8 @@ fn start_renderer_dispatch(
                         Err(RecvTimeoutError::Disconnected) => break None,
                     }
                 };
-                let outcome = match reply {
-                    Some(Ok(PrimaryEchoReply::Reply(payload))) => RendererBridgeOutcome::Reply {
-                        webview,
-                        navigation,
-                        request: local_request,
-                        payload,
-                    },
-                    Some(Ok(PrimaryEchoReply::Err(error))) => RendererBridgeOutcome::Error {
-                        webview,
-                        navigation,
-                        request: local_request,
-                        code: error.code,
-                        detail: error.message,
-                    },
-                    Some(Err(_)) | None => RendererBridgeOutcome::Error {
-                        webview,
-                        navigation,
-                        request: local_request,
-                        code: String::from("KELD-WV-011"),
-                        detail: String::from("application link ended before the renderer reply"),
-                    },
-                };
+                let outcome =
+                    dispatched_echo_terminal(reply).addressed(webview, navigation, local_request);
                 if outcomes.send(outcome).is_err() {
                     return Ok(());
                 }
@@ -5677,6 +5651,116 @@ struct PrimaryEchoCall {
     reply: Receiver<Result<PrimaryEchoReply, HostAppError>>,
 }
 
+/// The renderer code for a call refused before the host attempted a write.
+#[cfg(target_os = "macos")]
+const RENDERER_REFUSED: &str = "KELD-WV-011";
+
+/// Why `begin_echo_call` refused a renderer Echo call (GH-1095 §4.2, S5–S9).
+///
+/// The renderer code is chosen from the variant alone, never from a detail
+/// string.
+#[cfg(target_os = "macos")]
+#[derive(Debug)]
+enum EchoCallRefusal {
+    /// S5: the session is quiescing.
+    Quitting,
+    /// S6: a host call-state lock is poisoned.
+    StateUnavailable,
+    /// S7: another renderer call already holds the session-wide slot.
+    Busy,
+    /// S8: no admitted generation exists, so no write was attempted.
+    NoGeneration,
+    /// S9: the CALL write was attempted and failed, so some of its bytes may
+    /// have reached Bun. Carries the write error and its retirement cleanup.
+    WriteFailed(
+        #[cfg_attr(
+            not(test),
+            expect(
+                dead_code,
+                reason = "the renderer code comes from the variant alone; tests read the write error and its cleanup"
+            )
+        )]
+        HostAppError,
+    ),
+}
+
+/// One renderer Echo call's terminal, before it is addressed to its `WebView`.
+#[cfg(target_os = "macos")]
+#[derive(Debug, PartialEq, Eq)]
+enum RendererEchoTerminal {
+    Reply(Vec<u8>),
+    Error { code: String, detail: String },
+}
+
+#[cfg(target_os = "macos")]
+impl RendererEchoTerminal {
+    fn error(code: &str, detail: &str) -> Self {
+        Self::Error {
+            code: code.to_owned(),
+            detail: detail.to_owned(),
+        }
+    }
+
+    fn addressed(
+        self,
+        webview: keld_wv::WebviewId,
+        navigation: u64,
+        request: u32,
+    ) -> RendererBridgeOutcome {
+        match self {
+            Self::Reply(payload) => RendererBridgeOutcome::Reply {
+                webview,
+                navigation,
+                request,
+                payload,
+            },
+            Self::Error { code, detail } => RendererBridgeOutcome::Error {
+                webview,
+                navigation,
+                request,
+                code,
+                detail,
+            },
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+impl EchoCallRefusal {
+    /// The renderer terminal for a call refused at this stage.
+    fn renderer_terminal(&self) -> RendererEchoTerminal {
+        match self {
+            Self::Quitting
+            | Self::StateUnavailable
+            | Self::Busy
+            | Self::NoGeneration
+            | Self::WriteFailed(_) => RendererEchoTerminal::error(
+                RENDERER_REFUSED,
+                "application call is unavailable or already pending",
+            ),
+        }
+    }
+}
+
+/// The renderer terminal for a call whose CALL frame the host wrote: the
+/// reply channel's answer, or its retirement (GH-1095 §4.2, S10, S10b, S15).
+#[cfg(target_os = "macos")]
+fn dispatched_echo_terminal(
+    reply: Option<Result<PrimaryEchoReply, HostAppError>>,
+) -> RendererEchoTerminal {
+    match reply {
+        Some(Ok(PrimaryEchoReply::Reply(payload))) => RendererEchoTerminal::Reply(payload),
+        Some(Ok(PrimaryEchoReply::Err(error))) => RendererEchoTerminal::Error {
+            code: error.code,
+            detail: error.message,
+        },
+        Some(Err(_)) | None => RendererEchoTerminal::error(
+            RENDERER_REFUSED,
+            "application link ended before the renderer reply",
+        ),
+    }
+}
+
 #[cfg(any(target_os = "macos", target_os = "linux", windows))]
 impl PrimaryRouterHandle {
     fn signal_ready(&self) -> Result<(), HostAppError> {
@@ -5808,35 +5892,28 @@ impl PrimaryRouterHandle {
         }
     }
 
+    /// Arms the session-wide renderer slot and writes one Echo CALL to the
+    /// admitted generation. Every refusal before the write leaves the slot
+    /// empty and writes nothing (GH-1095 §4.2, S5–S8); a failed write retires
+    /// the generation (S9).
     #[cfg(target_os = "macos")]
-    fn begin_echo_call(&self, payload: &[u8]) -> Result<PrimaryEchoCall, HostAppError> {
+    fn begin_echo_call(&self, payload: &[u8]) -> Result<PrimaryEchoCall, EchoCallRefusal> {
         let transition = self.shutdown.transition_guard();
         if !self.shutdown.is_running() {
-            return Err(app_detail(
-                "renderer Echo call",
-                "application session is quiescing",
-            ));
+            return Err(EchoCallRefusal::Quitting);
         }
         let mut current = self
             .current
             .lock()
-            .map_err(|_| app_detail("renderer Echo call", "generation lock poisoned"))?;
-        let active = current.as_mut().ok_or_else(|| {
-            app_detail(
-                "renderer Echo call",
-                "no admitted primary generation is available",
-            )
-        })?;
+            .map_err(|_| EchoCallRefusal::StateUnavailable)?;
+        let active = current.as_mut().ok_or(EchoCallRefusal::NoGeneration)?;
         let attempt = active.attempt;
         let mut pending = self
             .pending_echo
             .lock()
-            .map_err(|_| app_detail("renderer Echo call", "pending-call lock poisoned"))?;
+            .map_err(|_| EchoCallRefusal::StateUnavailable)?;
         if pending.is_some() {
-            return Err(app_detail(
-                "renderer Echo call",
-                "another application call is already pending",
-            ));
+            return Err(EchoCallRefusal::Busy);
         }
 
         let correlation = self.mint_host_correlation();
@@ -5872,7 +5949,10 @@ impl PrimaryRouterHandle {
             drop(current);
             drop(transition);
             let owner = self.link_failed(attempt);
-            return Err(append_app_cleanup(primary, [retirement, owner]));
+            return Err(EchoCallRefusal::WriteFailed(append_app_cleanup(
+                primary,
+                [retirement, owner],
+            )));
         }
 
         Ok(PrimaryEchoCall {
