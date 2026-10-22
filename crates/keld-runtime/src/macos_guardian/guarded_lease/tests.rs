@@ -205,10 +205,15 @@ impl NativeGroup {
                                 | io::ErrorKind::ConnectionReset
                                 | io::ErrorKind::UnexpectedEof
                                 | io::ErrorKind::BrokenPipe
+                                | io::ErrorKind::NotConnected
                         ) || error.raw_os_error() == Some(nix::libc::EINVAL) =>
                     {
                         // A Darwin peer disappearing during a connect/read
-                        // can return EINVAL (not solely ConnectionRefused).
+                        // can return EINVAL, not solely ConnectionRefused.
+                        // ENOTCONN (NotConnected) comes only from the nonce
+                        // WRITE after the listener dies mid-send: XNU
+                        // uipc_send checks SS_ISCONNECTED before
+                        // SS_CANTSENDMORE. A read after peer death is EOF.
                         // Accept it ONLY after the independent kernel group
                         // census proves that no original-group member runs.
                         if !self
