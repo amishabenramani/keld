@@ -16,7 +16,7 @@ use super::super::super::process_group::{
     GroupIdentity, observe_group_identity, require_attested_group_absence, terminate_attested_group,
 };
 use super::super::super::{GUARDIAN_SHUTDOWN_DEADLINE, handshake_client, parse_app_link};
-use super::super::test_support::{NativeChildOwner, verified_real_bun};
+use super::super::test_support::{NativeChildOwner, await_held_zombie_group, verified_real_bun};
 use super::{
     CONTROL_CLEAR, CONTROL_CLEARED, CONTROL_PREPARE, CONTROL_PREPARED, CONTROL_REGISTERED,
     CONTROL_REVOKE, CONTROL_REVOKED, CONTROL_SPAWNED, GenerationControlRecord,
@@ -44,6 +44,7 @@ impl Drop for NativeBunGroup {
 }
 
 mod cleanup_authority;
+mod failed_clear_authority;
 
 fn await_bun_descendant(marker: &std::path::Path) -> i32 {
     let deadline = Instant::now() + Duration::from_secs(5);
@@ -120,18 +121,6 @@ fn descendant_gone(pid: i32) {
             "Bun descendant escaped the host's CLEAR fail-safe"
         );
         std::thread::yield_now();
-    }
-}
-
-fn await_held_zombie_group(group: Pid) {
-    let signal_deadline = Instant::now() + Duration::from_secs(3);
-    loop {
-        match kill(Pid::from_raw(-group.as_raw()), None) {
-            Err(Errno::EPERM) => break, // zombie-only process group, not absent
-            Err(Errno::ESRCH) => panic!("whole group disappeared before direct Child reap"),
-            Ok(()) if Instant::now() < signal_deadline => std::thread::yield_now(),
-            probe => panic!("host did not create a held zombie group: {probe:?}"),
-        }
     }
 }
 
