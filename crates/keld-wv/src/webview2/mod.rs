@@ -3113,7 +3113,15 @@ impl WebView2Engine {
         let release = Rc::new(release.with_loop_wake(event_loop.create_proxy())?);
         let release_in_loop = Rc::clone(&release);
         let mut exit_requested = false;
+        let mut first_loop_turn = true;
         let code = event_loop.run_return(move |event, _, control_flow| {
+            if first_loop_turn {
+                first_loop_turn = false;
+                navigation_diagnostic
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .first_loop_turn();
+            }
             release_in_loop.poll();
             if release_in_loop.fault().is_some() {
                 exit_requested = true;
@@ -4399,7 +4407,15 @@ mod tests {
         );
         let deadline = Instant::now() + Duration::from_secs(2);
         let mut woke = false;
+        let mut first_loop_turn = true;
         loop_.run_return(|event, _, flow| {
+            if first_loop_turn {
+                first_loop_turn = false;
+                diagnostic
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .first_loop_turn();
+            }
             if matches!(
                 event,
                 Event::UserEvent(super::WindowsLoopEvent::ProfileReleaseWake)
@@ -4415,6 +4431,14 @@ mod tests {
         assert!(
             woke,
             "production adapter must deliver real Tao wake before 2s"
+        );
+        assert!(
+            diagnostic
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .snapshot()
+                .contains("first_loop_turn_at_ms=Some("),
+            "the actual Tao callback must record its first message-pump turn"
         );
         assert!(failed.load(Ordering::Acquire));
         assert!(!ready.load(Ordering::Acquire));

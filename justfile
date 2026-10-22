@@ -12,14 +12,14 @@ set positional-arguments
 # Windows installs expose python; Unix hosts need not provide that alias.
 python_command := if os() == "windows" { "python" } else { "python3" }
 
-# Open the current platform hello backend (Phase 1 slice).
+# Diagnostic test: open the platform hello backend window (not the keld create/dev app demo).
 hello:
     cargo run -p keld-host --bin keld-host -- --hello
 
-# Run every applicable CI gate locally (deny requires `cargo install cargo-deny --locked`).
 # Independent policy gates run together. TypeScript then Rust run one at a time:
 # measured compiler and host-test deadlines cannot share the policy batch's load.
 # gitleaks stays GitHub-only (pinned OSS CLI in .github/workflows/ci.yml).
+# Run all applicable local CI gates (deny requires `cargo install cargo-deny --locked`).
 ci:
     {{python_command}} -B tools/ci_local.py ci-inventory
 
@@ -117,27 +117,31 @@ agent-context-test:
     {{python_command}} -B tools/test_session_closeout_hook.py
     {{python_command}} -B tools/test_workspace.py
 
-# KEL-245: local-only allocation and execution; all roots derive from Git identity.
+# Allocate an isolated task worktree below .keld-work/ (usage: just work-start <issue-id> <slug> [--session <id>]).
 work-start *args:
     #!/usr/bin/env bash
     set -euo pipefail
     {{python_command}} -B tools/workspace.py start "$@"
 
+# Inspect status of managed worktrees and task branches (read-only; pass --sizes for disk usage).
 work-status *args:
     #!/usr/bin/env bash
     set -euo pipefail
     {{python_command}} -B tools/workspace.py status "$@"
 
+# Execute a command inside a task worktree (usage: just work-run <task-name> --session <id> -- <cmd>).
 work-run *args:
     #!/usr/bin/env bash
     set -euo pipefail
     {{python_command}} -B tools/workspace.py run "$@"
 
+# Conclude an active task record with a closeout receipt (requires task, --session, and --receipt).
 work-finish *args:
     #!/usr/bin/env bash
     set -euo pipefail
     {{python_command}} -B tools/workspace.py finish "$@"
 
+# Inspect or delete released-session scratch (dry run by default; pass task, session, --receipt and --apply to delete scratch).
 work-clean *args:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -299,21 +303,26 @@ ci-router-test:
 hooks-test:
     tools/hooks_test.sh
 
-# Format the workspace in place.
+# Format the workspace in place. `cargo fmt` never visits `include!`d files or
+# `#[path]` mods declared inside macro bodies, so tools/fmt_included.sh formats
+# those (and the `mod` files under them) too.
 fmt:
     cargo fmt --all
+    tools/fmt_included.sh
 
-# CI gate: formatting.
+# CI gate: formatting, including `include!`d and macro-body `#[path]` files (#834, #1055).
 fmt-check:
     cargo fmt --all --check
+    tools/fmt_included.sh test
+    tools/fmt_included.sh --check
 
 # CI gate: lints (warnings are errors, matching CI).
 clippy:
     cargo clippy --workspace --all-targets -- -D warnings
 
-# CI gate: tests (unit + integration + doctests). Matches CI nextest profile.
 # The Linux host suite owns real GTK windows, so preserve its virtual-display
 # contract for the full root gate as well as the routed Ubuntu package lane.
+# Run workspace tests (matches CI nextest profile: unit + integration tests; nextest does not run doctests).
 test:
     #!/usr/bin/env bash
     set -euo pipefail
