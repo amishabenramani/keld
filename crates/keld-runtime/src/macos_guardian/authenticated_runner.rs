@@ -181,10 +181,16 @@ fn run_live_group<R: Read + AsFd>(
     // is killed and reaped, inside the ORIGINAL host-death budget. A direct
     // Child kill never claims group absence on its own.
     let mut leader_status = None;
-    let (retired, reaped) = retire_own_child_group(group, |_| {
+    // `original_cleanup_deadline` is taken before revocation and the owner's
+    // post-decision deadline after it, so `min` keeps the original bound; it
+    // only makes that ordering explicit.
+    let (retired, reaped) = retire_own_child_group(group, |reap_deadline| {
         leader_status = Some(
-            reap_owned_child_after_group_refusal(&mut child, original_cleanup_deadline)
-                .map_err(|source| lifecycle_error("macOS guardian direct-child wait", source))?,
+            reap_owned_child_within_deadline(
+                &mut child,
+                reap_deadline.min(original_cleanup_deadline),
+            )
+            .map_err(|source| lifecycle_error("macOS guardian direct-child wait", source))?,
         );
         Ok(())
     });
@@ -217,7 +223,13 @@ fn run_live_group<R: Read + AsFd>(
 // second GROUP signal. A direct-child kill cannot establish whole-group
 // absence, so `retire_own_child_group` alone decides the group and its typed
 // failure is always kept even after this reap succeeds.
-fn reap_owned_child_after_group_refusal(
+//
+// Cost: the bounded reap polls `try_wait` with `yield_now`. After a delivered
+// or host SIGKILL the Child is already exiting, so this lasts milliseconds;
+// only a Child that never reaps keeps one core spinning until `deadline`
+// (at most the rest of the 5 s Guardian shutdown budget) before `TimedOut`,
+// the same shape as `reap_pending_guardian`.
+fn reap_owned_child_within_deadline(
     child: &mut Child,
     deadline: Instant,
 ) -> Result<ExitStatus, io::Error> {
