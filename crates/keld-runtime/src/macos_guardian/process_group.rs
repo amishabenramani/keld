@@ -110,41 +110,68 @@ fn report_test_ambiguous_probe(group: u32) {
     });
 }
 
-// Exact native fault point for the GH-824 CLEAR race: runs on the calling
-// test thread after the real kernel reported (leader ESRCH, group live) and
-// before the single group signal, so a test can let the last live member
-// finish exiting in that window instead of hoping the scheduler does.
+// Exact native fault points for the GH-824 group-signal race. They run on
+// the calling test thread around the ONE group signal of a call, so a test
+// can let the last live member finish exiting just before it, or make the
+// group signallable again just after a denial, instead of hoping the
+// scheduler does. Shipping builds have no seam.
 #[cfg(test)]
-type TestGroupSignalHook = (u32, Box<dyn FnOnce()>);
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum TestGroupSignalPoint {
+    /// After the kernel authorized the one signal, before `killpg`.
+    BeforeSignal,
+    /// After that one signal was denied (zombie-only EPERM), before the next
+    /// read-only probe.
+    AfterDeniedSignal,
+}
+
+#[cfg(test)]
+type TestGroupSignalHook = (u32, Box<dyn FnMut(TestGroupSignalPoint)>);
 
 #[cfg(test)]
 thread_local! {
-    static BEFORE_GROUP_SIGNAL: RefCell<Option<TestGroupSignalHook>> = const { RefCell::new(None) };
+    static GROUP_SIGNAL_HOOK: RefCell<Option<TestGroupSignalHook>> = const { RefCell::new(None) };
 }
 
 #[cfg(test)]
-pub(super) fn install_test_before_group_signal(group: u32, hook: Box<dyn FnOnce()>) {
-    BEFORE_GROUP_SIGNAL.with(|slot| {
+pub(super) struct TestGroupSignalHookOwner;
+
+#[cfg(test)]
+impl Drop for TestGroupSignalHookOwner {
+    fn drop(&mut self) {
+        GROUP_SIGNAL_HOOK.with(|slot| *slot.borrow_mut() = None);
+    }
+}
+
+#[cfg(test)]
+pub(super) fn install_test_group_signal_hook(
+    group: u32,
+    hook: Box<dyn FnMut(TestGroupSignalPoint)>,
+) -> TestGroupSignalHookOwner {
+    GROUP_SIGNAL_HOOK.with(|slot| {
         assert!(slot.borrow().is_none(), "only one native signal hook owner");
         *slot.borrow_mut() = Some((group, hook));
     });
+    TestGroupSignalHookOwner
 }
 
 #[cfg(test)]
-fn run_test_before_group_signal(group: u32) {
-    let hook = BEFORE_GROUP_SIGNAL.with(|slot| {
+fn run_test_group_signal_hook(group: u32, point: TestGroupSignalPoint) {
+    // Take the hook out while it runs so it may block or spawn freely.
+    let taken = GROUP_SIGNAL_HOOK.with(|slot| {
         let mut slot = slot.borrow_mut();
         if slot
             .as_ref()
             .is_some_and(|(expected, _)| *expected == group)
         {
-            slot.take().map(|(_, hook)| hook)
+            slot.take()
         } else {
             None
         }
     });
-    if let Some(hook) = hook {
-        hook();
+    if let Some((owner, mut hook)) = taken {
+        hook(point);
+        GROUP_SIGNAL_HOOK.with(|slot| *slot.borrow_mut() = Some((owner, hook)));
     }
 }
 
@@ -271,84 +298,112 @@ pub(super) fn validate_guardian_child_group(
 /// the existing group cleanup: on Darwin the PID allocator reserves a PGID
 /// while that group has members. This is not a kernel-held group handle, so an
 /// empty/recycled group between inspections remains a documented race.
+///
+/// One call sends at most ONE group signal. If the kernel denies it as
+/// zombie-only (see [`is_denied_group_signal`]), the call never signals again
+/// and only a read-only `ESRCH` inside its one budget certifies retirement.
+/// This is per call: a later call on the same retained birth (after a failed
+/// CLEAR, at shutdown/Drop or `fail_current_generation`) starts its own
+/// decision, exactly as before; one signal per *generation* is not enforced
+/// here.
 pub(super) fn terminate_attested_group(group: GroupIdentity) -> Result<(), RuntimeError> {
-    match observe_group_identity(group.pid) {
-        Ok(current) if current == group => terminate_registered_group(group.pid),
-        Ok(_) => Err(lifecycle_error(
-            "macOS guardian registered group identity changed",
-            io::Error::new(
-                io::ErrorKind::PermissionDenied,
-                "process-group leader PID was reused; refusing unowned group signal",
-            ),
-        )),
-        Err(observation) => {
-            let raw = validate_group_pid(group.pid)?;
-            // Darwin may report EPERM for kill(-PGID, 0) when the enrolled
-            // leader has been reaped but another already-killed group member
-            // is still a zombie awaiting its *own* parent's wait(). A single
-            // such observation does not prove either that a live member is
-            // authorized to signal or that an empty group can be forgotten.
-            // Retain the original fail-closed rule and retry ONLY the safe
-            // absence probe, within a fraction of the existing shutdown
-            // deadline. Never signal on an ambiguous EPERM or an extant PID.
-            let reap_deadline = Instant::now() + GUARDIAN_SHUTDOWN_DEADLINE / 4;
-            let mut saw_ambiguous_group = false;
-            loop {
-                let leader = getpgid(Some(Pid::from_raw(raw)));
-                let group_live = kill(Pid::from_raw(-raw), None);
+    let (observation, mut saw_ambiguous_group) = match observe_group_identity(group.pid) {
+        Ok(current) if current == group => {
+            #[cfg(test)]
+            run_test_group_signal_hook(group.pid, TestGroupSignalPoint::BeforeSignal);
+            match terminate_registered_group(group.pid) {
+                // The birth-matched leader (and any other member) finished
+                // exiting between the identity read and this one signal: a
+                // zombie-only group. Same ambiguity as below; never signal
+                // again, only a read-only ESRCH may succeed.
+                Err(denied) if is_denied_group_signal(&denied) => (denied, true),
+                result => return result,
+            }
+        }
+        Ok(_) => {
+            return Err(lifecycle_error(
+                "macOS guardian registered group identity changed",
+                io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    "process-group leader PID was reused; refusing unowned group signal",
+                ),
+            ));
+        }
+        Err(observation) => (observation, false),
+    };
+    #[cfg(test)]
+    if saw_ambiguous_group {
+        run_test_group_signal_hook(group.pid, TestGroupSignalPoint::AfterDeniedSignal);
+    }
+    let raw = validate_group_pid(group.pid)?;
+    // Darwin may report EPERM for kill(-PGID, 0) when the enrolled
+    // leader has been reaped but another already-killed group member
+    // is still a zombie awaiting its *own* parent's wait(). A single
+    // such observation does not prove either that a live member is
+    // authorized to signal or that an empty group can be forgotten.
+    // Retain the original fail-closed rule and retry ONLY the safe
+    // absence probe, within a fraction of the existing shutdown
+    // deadline. Never signal on an ambiguous EPERM or an extant PID.
+    let reap_deadline = Instant::now() + GUARDIAN_SHUTDOWN_DEADLINE / 4;
+    loop {
+        let leader = getpgid(Some(Pid::from_raw(raw)));
+        let group_live = kill(Pid::from_raw(-raw), None);
+        #[cfg(test)]
+        if matches!(
+            (&leader, &group_live),
+            (Err(Errno::ESRCH), Err(Errno::EPERM))
+        ) {
+            report_test_ambiguous_probe(group.pid);
+        }
+        match (leader, group_live) {
+            (_, Err(Errno::ESRCH)) => break Ok(()),
+            // A reaped leader can still have a live same-group
+            // descendant; retain the original group-wide cleanup.
+            (Err(Errno::ESRCH), Ok(())) if !saw_ambiguous_group => {
                 #[cfg(test)]
-                if matches!(
-                    (&leader, &group_live),
-                    (Err(Errno::ESRCH), Err(Errno::EPERM))
-                ) {
-                    report_test_ambiguous_probe(group.pid);
-                }
-                match (leader, group_live) {
-                    (_, Err(Errno::ESRCH)) => break Ok(()),
-                    // A reaped leader can still have a live same-group
-                    // descendant; retain the original group-wide cleanup.
-                    (Err(Errno::ESRCH), Ok(())) if !saw_ambiguous_group => {
-                        #[cfg(test)]
-                        run_test_before_group_signal(group.pid);
-                        match terminate_registered_group(group.pid) {
-                            // XNU killpg1 counts an *exiting* member as found
-                            // (the zero-signal probe above succeeds) but skips
-                            // SZOMB members, and returns EPERM when it found
-                            // none. So the last member finishing its exit
-                            // between that probe and this one signal turns the
-                            // group zombie-only: EPERM. That is the same
-                            // ambiguous state as above, not a failed signal
-                            // and not proof of absence. Never signal again;
-                            // only a later read-only ESRCH within this one
-                            // budget may succeed (GH-824 host CLEAR hang).
-                            Err(denied) if is_denied_group_signal(&denied) => {
-                                saw_ambiguous_group = true;
-                            }
-                            result => break result,
-                        }
-                    }
-                    (Err(Errno::ESRCH), Err(Errno::EPERM)) if Instant::now() < reap_deadline => {
-                        // EPERM may also denote an inaccessible group. If
-                        // that numeric PGID is later recycled and becomes
-                        // signallable, its new members are NOT ours. After
-                        // one ambiguous observation only ESRCH may succeed;
-                        // never start a new killpg from a delayed probe.
+                run_test_group_signal_hook(group.pid, TestGroupSignalPoint::BeforeSignal);
+                match terminate_registered_group(group.pid) {
+                    // XNU killpg1 counts an *exiting* member as found
+                    // (the zero-signal probe above succeeds) but skips
+                    // SZOMB members, and returns EPERM when it found
+                    // none. So the last member finishing its exit
+                    // between that probe and this one signal turns the
+                    // group zombie-only: EPERM. That is the same
+                    // ambiguous state as below, not a failed signal
+                    // and not proof of absence. Never signal again in
+                    // this call; only a later read-only ESRCH within
+                    // this one budget may succeed (GH-824 Host hang).
+                    Err(denied) if is_denied_group_signal(&denied) => {
                         saw_ambiguous_group = true;
-                        std::thread::sleep(GENERATION_CONTROL_POLL);
+                        #[cfg(test)]
+                        run_test_group_signal_hook(
+                            group.pid,
+                            TestGroupSignalPoint::AfterDeniedSignal,
+                        );
                     }
-                    _ => {
-                        break Err(collapse_failures(vec![
-                            observation,
-                            lifecycle_error(
-                                "macOS guardian registered group identity unavailable",
-                                io::Error::new(
-                                    io::ErrorKind::PermissionDenied,
-                                    "live process-group leader identity is unproven",
-                                ),
-                            ),
-                        ]));
-                    }
+                    result => break result,
                 }
+            }
+            (Err(Errno::ESRCH), Err(Errno::EPERM)) if Instant::now() < reap_deadline => {
+                // EPERM may also denote an inaccessible group. If
+                // that numeric PGID is later recycled and becomes
+                // signallable, its new members are NOT ours. After
+                // one ambiguous observation only ESRCH may succeed;
+                // never start a new killpg from a delayed probe.
+                saw_ambiguous_group = true;
+                std::thread::sleep(GENERATION_CONTROL_POLL);
+            }
+            _ => {
+                break Err(collapse_failures(vec![
+                    observation,
+                    lifecycle_error(
+                        "macOS guardian registered group identity unavailable",
+                        io::Error::new(
+                            io::ErrorKind::PermissionDenied,
+                            "live process-group leader identity is unproven",
+                        ),
+                    ),
+                ]));
             }
         }
     }
