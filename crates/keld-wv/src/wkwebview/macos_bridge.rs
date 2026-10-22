@@ -313,6 +313,10 @@ impl RendererBridgeEndpoint {
 struct PendingRequest {
     navigation: u64,
     request: u32,
+    /// Document nonce the request was admitted under. Every native result
+    /// for it carries this nonce, so only that document can settle it
+    /// (GH-1095 §4.7). It never leaves keld-wv.
+    document: String,
 }
 
 #[derive(Debug)]
@@ -354,10 +358,12 @@ impl BridgeState {
         self.expected_webview == Some(address)
     }
 
-    fn navigation_started(&mut self) {
+    /// Starts a new navigation generation and hands back the pending request
+    /// it clears, if any.
+    fn navigation_started(&mut self) -> Option<PendingRequest> {
         self.navigation_generation = self.navigation_generation.wrapping_add(1).max(1);
         self.document_nonce = None;
-        self.pending = None;
+        self.pending.take()
     }
 
     fn destroy(&mut self) {
@@ -412,6 +418,7 @@ impl BridgeState {
         self.pending = Some(PendingRequest {
             navigation: self.navigation_generation,
             request,
+            document: document.to_owned(),
         });
         Ok(RendererBridgeRequest {
             webview: self.webview,
@@ -422,16 +429,18 @@ impl BridgeState {
         })
     }
 
-    fn settle(&mut self, navigation: u64, request: u32) -> bool {
+    /// Removes the pending request matching `(navigation, request)` and
+    /// returns the document nonce it was admitted under; `None` when nothing
+    /// matches, so a late or duplicate outcome settles nothing.
+    fn settle(&mut self, navigation: u64, request: u32) -> Option<String> {
         if self
             .pending
             .as_ref()
             .is_some_and(|pending| pending.navigation == navigation && pending.request == request)
         {
-            self.pending = None;
-            true
+            self.pending.take().map(|pending| pending.document)
         } else {
-            false
+            None
         }
     }
 }
@@ -441,7 +450,7 @@ pub(super) struct BridgeNavigationHandle(Arc<Mutex<BridgeState>>);
 
 impl BridgeNavigationHandle {
     pub(super) fn navigation_started(&self) {
-        lock_state(&self.0).navigation_started();
+        let _cleared = lock_state(&self.0).navigation_started();
     }
 }
 
@@ -637,21 +646,22 @@ impl MacRendererBridge {
     ) -> Result<(), WvError> {
         let request = outcome.request();
         let navigation = outcome.navigation();
-        if !lock_state(&self.state).settle(navigation, request) {
+        let Some(document) = lock_state(&self.state).settle(navigation, request) else {
             return Ok(());
-        }
-        let payload = PageOutcome::from(outcome);
-        let json = serde_json::to_string(&payload)
-            .map_err(|error| bridge_error(format!("failed to encode renderer reply: {error}")))?;
-        let script = format!("globalThis.__keldBridgeNativeResult({json});");
+        };
+        let script = page_result_script(&PageOutcome::settled(outcome, document))?;
         evaluate_in_world(webview, &self.world, &script);
         Ok(())
     }
 }
 
-#[derive(Serialize)]
+/// One native→isolated result (`keld.wv-link/v1`). `document` names the
+/// document nonce of the request it answers; the isolated world never relays
+/// it to the page (GH-1095 §4.7).
+#[derive(Debug, Serialize)]
 struct PageOutcome {
     request: u32,
+    document: String,
     ok: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     payload: Option<Vec<u8>>,
@@ -661,13 +671,16 @@ struct PageOutcome {
     detail: Option<String>,
 }
 
-impl From<RendererBridgeOutcome> for PageOutcome {
-    fn from(outcome: RendererBridgeOutcome) -> Self {
+impl PageOutcome {
+    /// The host outcome for a request, addressed to the document it was
+    /// admitted under.
+    fn settled(outcome: RendererBridgeOutcome, document: String) -> Self {
         match outcome {
             RendererBridgeOutcome::Reply {
                 request, payload, ..
             } => Self {
                 request,
+                document,
                 ok: true,
                 payload: Some(payload),
                 code: None,
@@ -680,6 +693,7 @@ impl From<RendererBridgeOutcome> for PageOutcome {
                 ..
             } => Self {
                 request,
+                document,
                 ok: false,
                 payload: None,
                 code: Some(code),
@@ -687,6 +701,27 @@ impl From<RendererBridgeOutcome> for PageOutcome {
             },
         }
     }
+
+    /// A native refusal of an envelope, addressed to the document the
+    /// envelope named (S3b): a stale document's refusal names the stale
+    /// nonce, so a successor document drops it.
+    fn refused(request: u32, document: &str, detail: &str) -> Self {
+        Self {
+            request,
+            document: document.to_owned(),
+            ok: false,
+            payload: None,
+            code: Some(String::from("KELD-WV-011")),
+            detail: Some(detail.to_owned()),
+        }
+    }
+}
+
+/// The isolated-world script that delivers one native result.
+fn page_result_script(outcome: &PageOutcome) -> Result<String, WvError> {
+    let json = serde_json::to_string(outcome)
+        .map_err(|error| bridge_error(format!("failed to encode renderer reply: {error}")))?;
+    Ok(format!("globalThis.__keldBridgeNativeResult({json});"))
 }
 
 fn handle_message(
@@ -777,7 +812,8 @@ fn handle_message(
             let call = match admitted {
                 Ok(call) => call,
                 Err(detail) => {
-                    reply_immediate_error(message, &ivars.world, request_id, detail);
+                    let refused = PageOutcome::refused(request_id, &document, detail);
+                    reply_immediate_error(message, &ivars.world, &refused);
                     return;
                 }
             };
@@ -786,39 +822,26 @@ fn handle_message(
                 Ok(()) => {}
                 Err(TrySendError::Full(call) | TrySendError::Disconnected(call)) => {
                     let _ = lock_state(&ivars.state).settle(call.navigation, call.request);
-                    reply_immediate_error(
-                        message,
-                        &ivars.world,
+                    let refused = PageOutcome::refused(
                         call.request,
+                        &document,
                         "host renderer dispatch queue is unavailable",
                     );
+                    reply_immediate_error(message, &ivars.world, &refused);
                 }
             }
         }
     }
 }
 
-fn reply_immediate_error(
-    message: &WKScriptMessage,
-    world: &WKContentWorld,
-    request: u32,
-    detail: &str,
-) {
+fn reply_immediate_error(message: &WKScriptMessage, world: &WKContentWorld, refused: &PageOutcome) {
     // SAFETY: callback WebView is live on the main thread.
     let Some(webview) = (unsafe { message.webView() }) else {
         return;
     };
-    let outcome = PageOutcome {
-        request,
-        ok: false,
-        payload: None,
-        code: Some(String::from("KELD-WV-011")),
-        detail: Some(detail.to_owned()),
-    };
-    let Ok(json) = serde_json::to_string(&outcome) else {
+    let Ok(script) = page_result_script(refused) else {
         return;
     };
-    let script = format!("globalThis.__keldBridgeNativeResult({json});");
     evaluate_in_world(&webview, world, &script);
 }
 
@@ -1056,6 +1079,70 @@ mod tests {
         assert_eq!(out["relays"].as_array().expect("relays").len(), 4);
     }
 
+    /// GH-1095 criterion 12 (model): a request remembers the document nonce
+    /// it was admitted under; settling it returns that nonce once, and a
+    /// navigation reset hands the cleared request back with it.
+    #[test]
+    fn requests_carry_their_admitted_document_nonce() {
+        let mut state = BridgeState::new(WebviewId(6), ADMITTED);
+        state.bind_webview(0x6000).expect("bind WebView");
+        let nonce = state.bind().expect("bind");
+        let call = state
+            .admit_invoke(&nonce, 3, ADMITTED, vec![1])
+            .expect("admit");
+        assert_eq!(
+            state.settle(call.navigation(), call.request()),
+            Some(nonce.clone())
+        );
+        assert_eq!(state.settle(call.navigation(), call.request()), None);
+
+        let reset = state
+            .admit_invoke(&nonce, 4, ADMITTED, vec![2])
+            .expect("admit the call a reset clears");
+        let cleared = state.navigation_started().expect("the reset clears it");
+        assert_eq!(
+            (
+                cleared.navigation,
+                cleared.request,
+                cleared.document.as_str()
+            ),
+            (reset.navigation(), 4, nonce.as_str())
+        );
+        assert!(state.navigation_started().is_none(), "cleared only once");
+    }
+
+    /// GH-1095 criterion 12 (model): a native refusal names the document of
+    /// the envelope it refuses, and a host outcome names the document its
+    /// request was admitted under, in the JSON the isolated world receives.
+    #[test]
+    fn native_results_name_their_document() {
+        let refused = page_result_script(&PageOutcome::refused(
+            9,
+            NONCE_A,
+            "renderer document is stale or forged",
+        ))
+        .expect("refusal script");
+        assert_eq!(
+            refused,
+            format!(
+                "globalThis.__keldBridgeNativeResult({{\"request\":9,\"document\":\"{NONCE_A}\",\"ok\":false,\"code\":\"KELD-WV-011\",\"detail\":\"renderer document is stale or forged\"}});"
+            )
+        );
+        let settled = PageOutcome::settled(
+            RendererBridgeOutcome::Reply {
+                webview: WebviewId(1),
+                navigation: 2,
+                request: 5,
+                payload: vec![7],
+            },
+            NONCE_B.to_owned(),
+        );
+        assert_eq!(
+            serde_json::to_value(&settled).expect("encode"),
+            json!({"request": 5, "document": NONCE_B, "ok": true, "payload": [7]})
+        );
+    }
+
     /// GH-1095 T1 characterisation (AT-S arm d, model): today a host
     /// `navigate()` reset clears the pending request silently, so the later
     /// host outcome finds nothing to settle and the call gets no terminal.
@@ -1067,10 +1154,11 @@ mod tests {
         let call = state
             .admit_invoke(&nonce, 4, ADMITTED, vec![1])
             .expect("admit");
-        state.navigation_started();
+        let _cleared = state.navigation_started();
         assert!(state.pending.is_none());
-        assert!(
-            !state.settle(call.navigation(), call.request()),
+        assert_eq!(
+            state.settle(call.navigation(), call.request()),
+            None,
             "the reset call cannot settle from its host outcome"
         );
     }
@@ -1109,9 +1197,10 @@ mod tests {
             Err("another renderer invoke is already pending")
         ));
         let navigation = state.navigation_generation;
-        assert!(state.settle(navigation, 2));
-        assert!(
-            !state.settle(navigation, 2),
+        assert_eq!(state.settle(navigation, 2), Some(nonce));
+        assert_eq!(
+            state.settle(navigation, 2),
+            None,
             "one app reply can settle only once"
         );
     }
@@ -1154,13 +1243,15 @@ mod tests {
             .admit_invoke(&new_nonce, 1, ADMITTED, vec![2])
             .expect("new call reuses local request id");
         assert_ne!(old.navigation(), new.navigation());
-        assert!(
-            !state.settle(old.navigation(), old.request()),
+        assert_eq!(
+            state.settle(old.navigation(), old.request()),
+            None,
             "late old outcome must not consume the new document's waiter"
         );
-        assert!(
+        assert_eq!(
             state.settle(new.navigation(), new.request()),
-            "current document still settles exactly once"
+            Some(new_nonce),
+            "current document still settles exactly once, under its own nonce"
         );
     }
 
