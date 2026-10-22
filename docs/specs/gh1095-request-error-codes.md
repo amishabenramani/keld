@@ -111,9 +111,12 @@ The design deviates from no architecture section.
    Hostile envelopes rejected at S3a get no terminal and are never dispatched.
 7. **Exactly one terminal, no replay.** Each facade-formed invoke whose
    document is alive when the outcome is decided gets exactly one terminal.
-   A hostile envelope that skips the facade can get none (§4.2, S3a). A later reply or
-   retirement for the same call is discarded. No Keld layer re-sends a CALL
-   frame.
+   A hostile envelope that skips the facade can get none (§4.2, S3a). A later
+   reply or retirement for the same call is discarded. No Keld layer re-sends a
+   CALL frame.
+   - This includes a document whose navigation started and was then cancelled.
+     It stays live, and its admitted call settles once with `KELD-WV-013`
+     (§4.7).
 8. **One resend after WV-012 or API-002 runs once.** The page resends once,
    as a new invoke, and the handler census for the logical action is exactly 1.
    The trigger depends on the code:
@@ -141,8 +144,10 @@ The design deviates from no architecture section.
     - Only the host can mint `KELD-WV-011` and `KELD-WV-012` for a renderer
       call.
 12. **A result settles only the document and request that sent it.**
-    - Each native→isolated result echoes the document nonce from the envelope
-      it answers.
+    - Each native→isolated result carries the document nonce of the request it
+      answers. The nonce stays inside keld-wv end to end (§4.7). The structs
+      that cross into keld-core (`RendererBridgeRequest`,
+      `RendererBridgeOutcome`) carry no nonce.
     - The isolated world settles a result only if both of these hold:
       `document` equals its current nonce, and `request` equals its in-flight
       request id. It drops any other result without changing `inflight`.
@@ -479,9 +484,22 @@ Unknown until test AT-B3 decides it (Open question 3).
   by the native layer and the facade, but a result can cross documents (F10).
 - **Settlement fix (T3), document-scoped results:**
   - The isolated world records the in-flight request id, not a boolean.
-  - Every native→isolated result (`reply_immediate_error` and the dispatch
-    outcome) carries `document`, which is the nonce from the envelope it
-    answers.
+  - Every native→isolated result carries `document`. The field is a new
+    `document: Option<String>` on the private `PageOutcome` struct
+    (`macos_bridge.rs:653`), serialized into the JSON passed to
+    `__keldBridgeNativeResult`. It is filled in one of three ways:
+    - **Immediate refusals** (`reply_immediate_error`, `:801-822`) copy it from
+      the `document` field of the envelope being refused. An S3b stale nonce
+      therefore carries the old nonce, and the successor drops it.
+    - **Dispatch outcomes.** `PendingRequest` (keld-wv `BridgeState`) gains
+      `document: String`, set by `admit_invoke` (`:393-431`) to the nonce the
+      request was admitted under. `BridgeState::settle` (`:425`) returns that
+      nonce (`Option<String>`, not `bool`) when it removes the matching
+      `(navigation, request)` entry. `deliver` (`:633`) writes it into
+      `PageOutcome.document`.
+    - The host round trip is unchanged. `RendererBridgeRequest` and
+      `RendererBridgeOutcome` still identify the call by `(webview,
+      navigation, request)`, and keld-core never sees the nonce.
   - `__keldBridgeNativeResult` settles only when `document` equals the current
     `documentNonce` and `request` equals the in-flight id. Otherwise it drops
     the result and leaves `inflight` unchanged.
@@ -491,10 +509,27 @@ Unknown until test AT-B3 decides it (Open question 3).
 - **The resulting gap:** a stale invoke whose document is gone gets no
   terminal. That is correct, because its own `pagehide` already settled it
   with WV-013 (S16).
-- **Open characterisation:** a document whose navigation was cancelled after
-  the native nonce reset is still live but holds a stale nonce. T1 pins what
-  that document sees today. A fix belongs to the navigation work, which is out
-  of scope here.
+- **Navigation started, then cancelled:**
+  - **Today:** `BridgeState::navigation_started` (`:357-361`) clears the
+    native `pending` entry. The host outcome that arrives later is then dropped
+    by `settle`. A document whose navigation is cancelled stays live, and its
+    call never settles, which breaks criterion 7.
+  - **Fix (T3):** `navigation_started` returns the `PendingRequest` it clears.
+    The bridge wrapper (`:443`) then delivers one `PageOutcome { request,
+    document, ok: false, code: "KELD-WV-013", detail: "renderer navigation
+    started before reply" }` into the WebView's isolated world. The code is
+    WV-013 because the call may already have been dispatched.
+  - **If the navigation commits,** the result reaches either the old document,
+    which settles once (its later `pagehide` finds `pending` empty), or the
+    successor, which drops it on the `document` check.
+  - **If it is cancelled,** the old document settles once with WV-013. The
+    later host outcome finds no native entry and is dropped, as today.
+  - `destroy()` needs nothing, because the document dies with the view.
+  - **Not covered:** the cancelled document keeps a stale nonce, so its later
+    invokes settle once with WV-011 (S3b) until a new navigation binds. Making
+    it rebind is a usability matter for the navigation-boundary work, not a
+    settlement gap.
+  - T1 pins today's hang (AT-S arm d); T3 flips it.
 - The dispatch thread sends exactly one outcome per renderer request.
 - A reply that arrives after a retirement is refused by the correlation and
   attempt check, and the reader that would deliver it is already inert.
@@ -518,7 +553,13 @@ Unknown until test AT-B3 decides it (Open question 3).
   - a private `begin_echo_call` refusal enum in keld-core, with variants
     `Quitting`, `StateUnavailable`, `Busy`, `NoGeneration` and
     `WriteFailed(HostAppError)`;
-  - no public Rust type changes.
+  - in keld-wv (all private):
+    - `PendingRequest.document: String`;
+    - `PageOutcome.document: Option<String>`;
+    - `BridgeState::settle` returns `Option<String>`;
+    - `BridgeState::navigation_started` returns `Option<PendingRequest>`;
+  - no public Rust type changes. `RendererBridgeRequest` and
+    `RendererBridgeOutcome` are unchanged.
 - **TypeScript:** `dispatchApplicationCall` throws a typed no-handler error,
   and `resolveEchoCall` maps it to `KELD-API-002`. Every other throw still maps
   to `KELD-API-001`.
@@ -561,7 +602,7 @@ Unknown until test AT-B3 decides it (Open question 3).
 - [ ] T1: test-only characterisation. It pins today's codes at S8–S16 and
   S10b with negative controls, writing the AT-12a/12d/13a/13b/13c arms against
   today's strings. It also pins the cross-document settlement today (AT-S arm
-  c) and the cancelled-navigation case.
+  c) and the hang after a cancelled navigation (AT-S arm d).
 - [ ] T2: keld-core. It includes:
   - the typed refusal;
   - the S8 → WV-012, S9/S10 → WV-013 and S10b rewrite;
@@ -569,7 +610,8 @@ Unknown until test AT-B3 decides it (Open question 3).
   - T1's assertions flipped to the target codes.
 - [ ] T3: keld-wv. It includes:
   - `pagehide` → WV-013;
-  - the document-scoped result (§4.7), which flips T1's AT-S arm c;
+  - the document-scoped result and settlement on a cancelled navigation
+    (§4.7), which flip T1's AT-S arms c and d;
   - the `WvError::RendererBridge` fix text;
   - the narrowed WV-011 registry text.
 - [ ] T4: `@keld/api` and `@keld/kipc`. It includes:
@@ -612,7 +654,7 @@ Every hosted arm prints its raw census with `--success-output immediate`.
 | AT-B1 | 9 | `#throwIfTerminal` | `@keld/kipc` unit, 3 OSes | deterministic | link already ended → `call()` rejects IPC-022; host fixture read 0 frames | remove `#throwIfTerminal` → frame posted (the check is the proof, but the code stays Unknown) |
 | AT-B2 | 9 | pending at close | `@keld/kipc` unit, 3 OSes | deterministic | pending, then host close → IPC-022; host read 1 frame; same code as AT-B1 | host writes the REPLY before closing → the call resolves with the reply, not IPC-022 (the close produces 022, not the harness) |
 | AT-B3 | 9 | written before Quit, pending at close | keld-core unit | deterministic | host census for that CALL recorded; decides Open question 3 | written after Quit → IPC-024, census 0 (existing `guarded_router_and_quit.rs`) |
-| AT-S | 7, 12 | settlement | macOS unit (keld-wv, keld-core) + hosted macOS | deterministic (unit); 10 (hosted) | (a) late reply after retirement refused; (b) facade result after `pagehide` ignored, and native result for a stale `(navigation, request)` dropped; (c) a stale-document invoke refused after the successor binds, while the successor has a pending call with the same request id → the successor's call settles only from its own result. T1 pins today's behaviour; T3 flips it to the target | (a) remove the corr/attempt check → second settlement observed; (c) remove the `document` check in `__keldBridgeNativeResult` → the successor settles with the stale WV-011 |
+| AT-S | 7, 12 | settlement | macOS unit (keld-wv, keld-core) + hosted macOS | deterministic (unit); 10 (hosted) | (a) late reply after retirement refused; (b) facade result after `pagehide` ignored, and native result for a stale `(navigation, request)` dropped; (c) a stale-document invoke refused after the successor binds, while the successor has a pending call with the same request id → the successor's call settles only from its own result; (d) handler held at `entered`, then a main-frame navigation the test cancels in the navigation policy → the live document settles exactly once with `KELD-WV-013`, census 1, and the later host outcome is dropped. T1 pins today's behaviour (c may cross; d hangs); T3 flips both to the target | (a) remove the corr/attempt check → second settlement observed; (c) remove the `document` check in `__keldBridgeNativeResult` → the successor settles with the stale WV-011; (d) the same navigation allowed to commit → old-document `pagehide` WV-013 only, and no settlement in the successor (the delivered result is dropped by `document`) |
 | AT-SP | 11 | S10b | macOS unit (keld-core; fake Bun peer on `socketpair`) | deterministic | Bun ERR `code = "KELD-WV-012"` (and `"KELD-WV-011"`) → renderer outcome `KELD-WV-013`; the frame was written (`KIPC_CALL` emitted) | Bun ERR `code = "KELD-API-002"` → forwarded unchanged (the rewrite is scoped to `KELD-WV-*`); mutation: remove the rewrite → the page sees `KELD-WV-012` and the test fails |
 
 Anti-flake:
