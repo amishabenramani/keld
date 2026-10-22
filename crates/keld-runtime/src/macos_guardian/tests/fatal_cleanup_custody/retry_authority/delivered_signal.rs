@@ -11,11 +11,15 @@ use std::time::{Duration, Instant};
 use nix::sys::signal::{Signal, kill};
 use nix::unistd::Pid;
 
-use super::super::super::super::process_group::require_attested_group_absence;
+use super::super::super::super::process_group::{
+    install_test_before_group_signal, require_attested_group_absence,
+};
 use super::super::super::super::{
     GuardedPrimary, RecoveryState, RegisteredPrimaryGeneration, lock_generation,
 };
-use super::super::super::test_support::{NativeChildOwner, test_group_identity};
+use super::super::super::test_support::{
+    NativeChildOwner, await_held_zombie_group, test_group_identity,
+};
 use super::{REUSED_LEADER, owned_sleep, primary_with_dead_guardian};
 
 /// A process that joins the original group only AFTER the first signal.
@@ -59,6 +63,51 @@ fn failed_clear_absence_after_delivered_signal_never_resignals_the_group() {
     let later = generation.terminate();
     assert!(later.is_err(), "the group is not proven absent: {later:?}");
     assert_not_resignalled(joiner, "fail-safe after failed CLEAR");
+}
+
+// GH-824 trigger: the leader passes its birth check, then exits into a
+// zombie-only group before the one signal, so killpg is denied (EPERM). The
+// denied attempt is classified by the one absence owner and still SPENDS the
+// generation's authority: a later fail-safe only probes and never signals a
+// process that joined the group afterwards.
+#[test]
+fn denied_attested_signal_spends_the_generation_authority() {
+    use super::super::super::super::guarded_primary::NativeSignalAuthority;
+    let mut leader = owned_sleep(0);
+    let raw = i32::try_from(leader.id()).expect("group PID fits c_int");
+    let leader_pid = Pid::from_raw(raw);
+    let mut generation =
+        RegisteredPrimaryGeneration::authenticated(1, test_group_identity(leader.id()));
+    install_test_before_group_signal(
+        leader.id(),
+        Box::new(move || {
+            kill(leader_pid, Signal::SIGKILL).expect("kill the exact test-owned leader");
+            await_held_zombie_group(leader_pid);
+        }),
+    );
+    let denied = generation
+        .signal_if_armed()
+        .expect_err("a held zombie-only group is not proven absent");
+    assert!(
+        denied.to_string().contains("process-group signal"),
+        "the denied signal keeps its typed signal-phase failure: {denied}"
+    );
+    assert!(
+        matches!(
+            generation.native_signal,
+            NativeSignalAuthority::ProbeOnly { .. }
+        ),
+        "the denied attempt spent the authority: {:?}",
+        generation.native_signal
+    );
+    let joiner = late_joiner(raw);
+    leader.wait().expect("reap the killed leader");
+    let later = generation.terminate();
+    assert!(
+        later.is_err(),
+        "the joiner keeps the group present: {later:?}"
+    );
+    assert_not_resignalled(joiner, "fail-safe after a denied signal");
 }
 
 #[test]
