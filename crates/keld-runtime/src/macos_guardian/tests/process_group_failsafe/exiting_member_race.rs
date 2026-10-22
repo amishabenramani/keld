@@ -9,8 +9,10 @@
 //! and fault point follow #1077 (main); here the denied signal is classified
 //! by the one signal-phase EPERM classifier and decided by the one absence
 //! owner, never by a second signal.
+use std::cell::RefCell;
 use std::os::unix::process::{CommandExt as _, ExitStatusExt as _};
 use std::process::{Command, Stdio};
+use std::rc::Rc;
 use std::sync::mpsc;
 use std::thread;
 use std::time::Instant;
@@ -21,8 +23,9 @@ use nix::unistd::Pid;
 
 use super::super::super::GUARDIAN_SHUTDOWN_DEADLINE;
 use super::super::super::process_group::{
-    GroupIdentity, install_test_ambiguous_probe_receipt, install_test_before_group_signal,
-    observe_group_identity, terminate_attested_group,
+    GroupIdentity, TestGroupSignalPoint, install_test_ambiguous_probe_receipt,
+    install_test_group_signal_hook, observe_group_identity, reconcile_denied_signal_after_reap,
+    terminate_attested_group,
 };
 use super::super::test_support::await_held_zombie_group;
 use super::TestOwnedGroupChild;
@@ -74,10 +77,12 @@ fn reaped_leader_with_live_member() -> (GroupIdentity, i32, TestOwnedGroupChild)
 /// Fault point body: kill the still-unreaped (so never recycled) test-owned
 /// process and await the kernel's zombie-only group state through the shared
 /// fixture owner. The poll is the awaited condition; its bound is a kill switch.
-fn make_group_zombie_only(raw: i32, last_live: Pid) -> Box<dyn FnOnce()> {
-    Box::new(move || {
-        kill(last_live, Signal::SIGKILL).expect("kill exact test-owned process");
-        await_held_zombie_group(Pid::from_raw(raw));
+fn make_group_zombie_only(raw: i32, last_live: Pid) -> Box<dyn FnMut(TestGroupSignalPoint)> {
+    Box::new(move |point| {
+        if point == TestGroupSignalPoint::BeforeSignal {
+            kill(last_live, Signal::SIGKILL).expect("kill exact test-owned process");
+            await_held_zombie_group(Pid::from_raw(raw));
+        }
     })
 }
 
@@ -100,21 +105,36 @@ fn reap_after_owner_observes(
     (receipt, reaper)
 }
 
-fn assert_denied_signal(error: &super::super::super::RuntimeError) {
+/// An unproven group keeps the typed signal-phase EPERM as the primary error
+/// and the absence owner's own reason as context.
+fn assert_denied_signal(error: &super::super::super::RuntimeError, absence_reason: &str) {
     assert!(
         matches!(
             error,
             super::super::super::RuntimeError::Lifecycle { phase, source }
-                if *phase == DENIED_SIGNAL && source.raw_os_error() == Some(nix::libc::EPERM)
+                if *phase == DENIED_SIGNAL
+                    && source.kind() == std::io::ErrorKind::PermissionDenied
         ),
         "an unproven group keeps the typed signal-phase EPERM: {error}"
     );
+    let text = error.to_string();
+    assert!(
+        text.contains("Operation not permitted"),
+        "the kernel's denial stays visible: {text}"
+    );
+    assert!(
+        text.contains(absence_reason),
+        "the absence owner's reason is kept as context: {text}"
+    );
 }
+
+const BUDGET_SPENT: &str = "original group absence remains unproven after the shutdown budget";
 
 #[test]
 fn member_exit_between_probe_and_group_signal_retires_after_reap_without_host_fault() {
     let (original, raw, member) = reaped_leader_with_live_member();
-    install_test_before_group_signal(original.pid, make_group_zombie_only(raw, pid_of(&member)));
+    let _hook =
+        install_test_group_signal_hook(original.pid, make_group_zombie_only(raw, pid_of(&member)));
     let (_receipt, reaper) = reap_after_owner_observes(original.pid, member);
 
     let result = terminate_attested_group(original);
@@ -129,14 +149,15 @@ fn member_exit_between_probe_and_group_signal_retires_after_reap_without_host_fa
 #[test]
 fn member_exit_between_probe_and_group_signal_never_clears_an_unreaped_group() {
     let (original, raw, mut member) = reaped_leader_with_live_member();
-    install_test_before_group_signal(original.pid, make_group_zombie_only(raw, pid_of(&member)));
+    let _hook =
+        install_test_group_signal_hook(original.pid, make_group_zombie_only(raw, pid_of(&member)));
 
     let started = Instant::now();
     let error = terminate_attested_group(original)
         .expect_err("EPERM alone is never proof that the group is gone");
     let elapsed = started.elapsed();
 
-    assert_denied_signal(&error);
+    assert_denied_signal(&error, BUDGET_SPENT);
     assert!(
         elapsed < GUARDIAN_SHUTDOWN_DEADLINE,
         "the absence probe stays inside the existing shutdown budget: {elapsed:?}"
@@ -155,23 +176,29 @@ fn member_exit_between_probe_and_group_signal_never_clears_an_unreaped_group() {
 #[test]
 fn denied_group_signal_is_never_repeated_when_the_group_becomes_signallable() {
     let (original, raw, mut member) = reaped_leader_with_live_member();
-    install_test_before_group_signal(original.pid, make_group_zombie_only(raw, pid_of(&member)));
-    let (observed_tx, observed_rx) = mpsc::channel();
-    let _receipt = install_test_ambiguous_probe_receipt(original.pid, observed_tx);
-    let joiner = thread::spawn(move || {
-        observed_rx
-            .recv_timeout(GUARDIAN_SHUTDOWN_DEADLINE)
-            .expect("owner observed the zombie-only group after its denied signal");
-        let joiner = sleeper(raw);
-        assert_eq!(kill(Pid::from_raw(-raw), None), Ok(()));
-        joiner
-    });
+    let late_member = Rc::new(RefCell::new(None));
+    let slot = Rc::clone(&late_member);
+    let mut zombie_only = make_group_zombie_only(raw, pid_of(&member));
+    let _hook = install_test_group_signal_hook(
+        original.pid,
+        Box::new(move |point| {
+            zombie_only(point);
+            if point == TestGroupSignalPoint::AfterDeniedSignal {
+                let joiner = sleeper(raw);
+                assert_eq!(kill(Pid::from_raw(-raw), None), Ok(()));
+                *slot.borrow_mut() = Some(joiner);
+            }
+        }),
+    );
 
     let error = terminate_attested_group(original)
         .expect_err("a group signallable again after the denial is not absent");
-    let mut joiner = joiner.join().expect("joiner thread");
+    let mut joiner = late_member
+        .borrow_mut()
+        .take()
+        .expect("a process joined right after the denied signal");
 
-    assert_denied_signal(&error);
+    assert_denied_signal(&error, BUDGET_SPENT);
     assert!(
         joiner.0.try_wait().expect("inspect joiner").is_none(),
         "the call must not signal the group a second time"
@@ -200,7 +227,8 @@ fn attested_live_leader() -> (GroupIdentity, i32, TestOwnedGroupChild) {
 #[test]
 fn attested_leader_exit_before_group_signal_retires_after_reap_without_host_fault() {
     let (original, raw, leader) = attested_live_leader();
-    install_test_before_group_signal(original.pid, make_group_zombie_only(raw, pid_of(&leader)));
+    let _hook =
+        install_test_group_signal_hook(original.pid, make_group_zombie_only(raw, pid_of(&leader)));
     let (_receipt, reaper) = reap_after_owner_observes(original.pid, leader);
 
     let result = terminate_attested_group(original);
@@ -215,13 +243,60 @@ fn attested_leader_exit_before_group_signal_retires_after_reap_without_host_faul
 #[test]
 fn attested_leader_exit_before_group_signal_never_clears_an_unreaped_group() {
     let (original, raw, mut leader) = attested_live_leader();
-    install_test_before_group_signal(original.pid, make_group_zombie_only(raw, pid_of(&leader)));
+    let _hook =
+        install_test_group_signal_hook(original.pid, make_group_zombie_only(raw, pid_of(&leader)));
 
     let error = terminate_attested_group(original)
         .expect_err("a held zombie leader is never proof that the group is gone");
 
-    assert_denied_signal(&error);
+    assert_denied_signal(&error, BUDGET_SPENT);
     assert_eq!(kill(Pid::from_raw(-raw), None), Err(Errno::EPERM));
     assert_eq!(leader.0.wait().expect("reap leader").signal(), Some(9));
     assert_eq!(kill(Pid::from_raw(-raw), None), Err(Errno::ESRCH));
+}
+
+// The absence owner's own reason survives a denied signal: here the live
+// leader at the PID has another birth (PID reuse). The kernel's EPERM stays
+// the typed primary error, and the one classifier still recognises that
+// exact denial, so the Guardian's post-reap reconciliation can retire the
+// group once it is really gone.
+#[test]
+fn unproven_denied_signal_keeps_the_eperm_and_the_absence_reason() {
+    let (original, raw, mut leader) = attested_live_leader();
+    let denied = || {
+        super::super::super::lifecycle_error(
+            DENIED_SIGNAL,
+            std::io::Error::from_raw_os_error(nix::libc::EPERM),
+        )
+    };
+    let error = reconcile_denied_signal_after_reap(
+        original.altered_birth_for_test(),
+        denied(),
+        Instant::now() + GUARDIAN_SHUTDOWN_DEADLINE / 4,
+    )
+    .expect_err("a live leader with another birth is not absence");
+    assert_denied_signal(&error, "group leader birth changed");
+
+    leader.0.kill().expect("kill exact test-owned leader");
+    assert_eq!(leader.0.wait().expect("reap leader").signal(), Some(9));
+    assert_eq!(kill(Pid::from_raw(-raw), None), Err(Errno::ESRCH));
+    reconcile_denied_signal_after_reap(
+        original,
+        error,
+        Instant::now() + GUARDIAN_SHUTDOWN_DEADLINE,
+    )
+    .expect("the contexted denial is still the exact signal-phase EPERM");
+}
+
+// The fault point's owner clears its thread-local slot when dropped, also on
+// unwind, so a failing test can never leak its hook into later code on the
+// same thread.
+#[test]
+fn group_signal_hook_owner_clears_its_slot_on_unwind() {
+    let unwound = std::panic::catch_unwind(|| {
+        let _hook = install_test_group_signal_hook(1, Box::new(|_| {}));
+        panic!("deterministic test failure while the hook is installed");
+    });
+    assert!(unwound.is_err(), "the cut must unwind");
+    let _again = install_test_group_signal_hook(1, Box::new(|_| {}));
 }
