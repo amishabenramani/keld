@@ -400,9 +400,12 @@ fn signal_attested_group_once(
 ///
 /// The host calls this inside the signalling call. A caller that is the
 /// leader's own OS parent calls it only after reaping that exact Child (see
-/// [`retire_own_child_group`]). Name, signature and error contract match the
-/// #933/#945/#947 stack's owner of the same rule; whichever lands second
-/// keeps one copy.
+/// [`retire_own_child_group`]). Name and signature match the #933/#945/#947
+/// stack's owner of the same rule, but its error shape does NOT yet: this
+/// returns the original denial unchanged (`raw_os_error() == Some(EPERM)`),
+/// while the stack wraps an unproven denial (`raw_os_error()` is `None`,
+/// matched recursively). The dedupe picks one form and adjusts the other
+/// side's tests (#1077 merge plan, D3).
 pub(super) fn reconcile_denied_signal_after_reap(
     group: GroupIdentity,
     denied: RuntimeError,
