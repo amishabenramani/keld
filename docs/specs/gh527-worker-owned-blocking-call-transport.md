@@ -126,7 +126,8 @@ negative control: the one mutation that MUST make the test fail.
    (amended by #528 T3, coordinator decision on #636) The role's `Quit` is its last
    call. It never parks the caller (PANEL-P2, #419). The link closes the moment the
    Quit REPLY settles (`quitAndCloseLink`), so a call still pending then throws
-   `KELD-IPC-022`, which the caller treats as `KELD-IPC-024` (§4.4) (interim, GH-1095 §4.5: unproven for a call written before the Quit; callers treat it as outcome unknown until AT-B3 decides). The host's drain
+   `KELD-IPC-022`, whose outcome is unknown (§4.4, as corrected by GH-1095): the host may
+   have run a call the role wrote before its `Quit`. The host's drain
    ends at that EOF, not at a backstop.
    *Negative controls:* a host that closes without writing the Quit REPLY makes (a)
    throw `KELD-IPC-022`, so a client-synthesized Quit success fails (a); a drain that
@@ -519,15 +520,17 @@ and updates this table in the same PR.
 `KELD-IPC-024` for every CALL it receives behind an accepted `Quit` while the link can
 carry it. A role whose `Quit` closes the link on its REPLY (#528 T3, §4.9) reads none of
 those answers: its calls still pending then end as `KELD-IPC-022`, as does a call that a
-§4.9 liveness backstop overtakes. Behind an accepted `Quit` the two codes mean the same:
-the call is terminal and the host ran none of it. Callers MUST treat `KELD-IPC-024` and
-`KELD-IPC-022` alike there.
+§4.9 liveness backstop overtakes. The two codes do not mean the same (corrected by
+GH-1095 §4.5, owner decision 2026-10-23).
 
-*Interim note (GH-1095 §4.5, 2026-10-23).* For a call the role wrote **before** its
-`Quit` and that is still pending at the close, "the host ran none of it" is unproven.
-Until GH-1095's AT-B3 decides it, callers treat that `KELD-IPC-022` as outcome
-unknown and do not replay it. Calls the host reads behind the accepted `Quit` keep the
-rule above.
+- Only `KELD-IPC-024` proves non-execution. The host writes it for a CALL it read
+  behind the accepted `Quit`, and it ran none of it. That is a host-side proof.
+- A role-observed `KELD-IPC-022` at the close does not prove it. The call may have
+  been written before the `Quit` and run by the host, and the role cannot tell which.
+
+Callers MUST treat that `KELD-IPC-022` as outcome unknown and MUST NOT replay it.
+This holds unless GH-1095's AT-B3 proves that the host runs no call written before an
+accepted `Quit`.
 
 Reused codes: `KELD-IPC-005` for a second `WorkerLink.open`, invalid open bounds or
 an invalid `receive` table (§4.5), an outbound frame on channel 0, a listener or state
@@ -1020,9 +1023,8 @@ passed 3/3; the bound moved to the host producer, which deferred 9,976 EVENTs.
     the caller (PANEL-P2, #419: `app.quit` returns immediately). It resolves only on
     `LifecycleResponse::Quit`; any other REPLY rejects with `KELD-IPC-003`. A call
     answered by a record delivered before the close keeps that answer. A call still
-    pending at the close ends as `KELD-IPC-022`, which callers treat as `KELD-IPC-024`
-    (§4.4; both terminal, neither ran; interim, GH-1095 §4.5: unproven for a call
-    written before the Quit). The host reads EOF at once, so its drain ends there without waiting
+    pending at the close ends as `KELD-IPC-022`: terminal, with an unknown outcome (§4.4,
+    as corrected by GH-1095). The host reads EOF at once, so its drain ends there without waiting
     on a backstop (`QuitDrainEnd::PeerClosed`), and an answer it still writes to a
     CALL the role left behind the `Quit` fails (`EPIPE`, a reset or `NotConnected`)
     and ends the drain quietly as a lost link (`AnswerLost`): no error, no link-failure
