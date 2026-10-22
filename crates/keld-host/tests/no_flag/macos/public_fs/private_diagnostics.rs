@@ -130,6 +130,18 @@ pub(super) fn host_exit_summary(output: &Output, report_count: usize) -> String 
     )
 }
 
+/// Test-only: run a privacy assertion that must fail and return its
+/// formatted panic message, so a sentinel test can prove the message names
+/// only the fixed reason. One owner for every `public_fs` sentinel test.
+#[cfg(test)]
+pub(super) fn private_failure_message(check: impl FnOnce() + std::panic::UnwindSafe) -> String {
+    std::panic::catch_unwind(check)
+        .expect_err("the original predicate still fails")
+        .downcast_ref::<String>()
+        .expect("formatted assertion message")
+        .clone()
+}
+
 #[cfg(test)]
 #[path = "private_diagnostics/source_guard.rs"]
 mod source_guard;
@@ -234,13 +246,9 @@ mod tests {
             Phase::RecoveryBoot,
         );
         let leaked = serde_json::json!({ "phase": PRIVATE, "token": PRIVATE });
-        let failure = std::panic::catch_unwind(|| {
+        let message = private_failure_message(|| {
             assert_report_phase(&leaked, "app-ready", Phase::RecoveryBoot);
-        })
-        .expect_err("a wrong phase still fails the original predicate");
-        let message = failure
-            .downcast_ref::<String>()
-            .expect("formatted assertion message");
+        });
         assert!(message.contains("KELD_KEL140_RECOVERY_BOOT"), "{message}");
         assert!(message.contains("app-ready"), "{message}");
         assert!(!message.contains(PRIVATE));
@@ -252,18 +260,14 @@ mod tests {
         let report = serde_json::json!({ "nonce": PRIVATE });
         assert_private_eq(&report["nonce"], PRIVATE, "request nonce");
         assert_private_ne(&report["nonce"], "other", "fresh nonce");
-        for failure in [
-            std::panic::catch_unwind(|| {
+        for message in [
+            private_failure_message(|| {
                 assert_private_eq(&report["nonce"], "other", "request nonce");
             }),
-            std::panic::catch_unwind(|| {
+            private_failure_message(|| {
                 assert_private_ne(&report["nonce"], PRIVATE, "request nonce");
             }),
         ] {
-            let failure = failure.expect_err("the original predicate still fails");
-            let message = failure
-                .downcast_ref::<String>()
-                .expect("formatted assertion message");
             assert!(message.contains("request nonce"), "{message}");
             assert!(!message.contains(PRIVATE));
             assert!(!message.contains("other"));
