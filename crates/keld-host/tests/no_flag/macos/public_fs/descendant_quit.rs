@@ -148,12 +148,7 @@ impl DescendantQuit {
         self.child_exit = Some(ProcessExitObserver::arm(family.descendant));
         self.child_pid = Some(family.descendant);
         self.peer = Some(reader);
-        eprintln!(
-            "KEL118_PRODUCT_ARM bun={} descendant={} stdout_shared=true python={} ready=child-ready",
-            family.bun,
-            family.descendant,
-            self.python.display()
-        );
+        eprintln!("KEL118_PRODUCT_ARM stdout_shared=true ready=child-ready");
     }
 
     pub(super) fn observe_cooperative_exit_and_guardian_reap(&mut self) {
@@ -282,11 +277,13 @@ fn read_record(reader: &mut BufReader<UnixStream>) -> std::io::Result<Value> {
 
 #[cfg(test)]
 mod tests {
+    use super::super::private_diagnostics::private_failure_message;
     use super::*;
 
     // The former local phase-marker helper is folded into the #1009
-    // diagnostics owner: both log lines are fixed literals that take no
-    // record, and every record predicate goes through `assert_private_eq`.
+    // diagnostics owner: both receipts are fixed literals that take no
+    // record, PID or path (pinned below), and every record predicate goes
+    // through `assert_private_eq`.
     // The original sentinel is kept on that path: a mismatching private
     // descendant record still fails, naming only the fixed reason, never its
     // token, nonce, image path, PID, phase or the expected value.
@@ -309,16 +306,64 @@ mod tests {
                 "descendant must inherit exact Bun stdout endpoint",
             ),
         ] {
-            let failure = std::panic::catch_unwind(|| {
+            let message = private_failure_message(|| {
                 assert_private_eq(&record[field], EXPECTED, reason);
-            })
-            .expect_err("the original predicate still fails");
-            let message = failure
-                .downcast_ref::<String>()
-                .expect("formatted assertion message");
+            });
             assert!(message.contains(reason));
             assert!(!message.contains(PRIVATE));
             assert!(!message.contains(EXPECTED));
+        }
+    }
+
+    // The arm and post-exit receipts are fixed literals: the asserted-equal
+    // PIDs and Python image path of the private record never reach stderr.
+    #[test]
+    fn descendant_receipts_are_fixed_literals() {
+        let (implementation, _) = include_str!("descendant_quit.rs")
+            .split_once("#[cfg(test)]\nmod tests")
+            .expect("adjacent regression module owns the source boundary");
+        for receipt in [
+            "eprintln!(\"KEL118_PRODUCT_ARM stdout_shared=true ready=child-ready\");",
+            "eprintln!(\"KEL118_PRODUCT_AFTER_EXIT0 alive=true fresh_ack=child-alive\");",
+        ] {
+            assert!(
+                implementation.contains(receipt),
+                "descendant receipt is not fixed"
+            );
+        }
+    }
+
+    // The kernel parent, process group and Python image checks index no
+    // record, so neither the raw-record probe below nor the #1009 guard (for
+    // which PIDs and images are not private elsewhere in public_fs/) would
+    // notice one reverting to a value-rendering `assert_eq!`/`assert_ne!`.
+    // The stdout pipe identities are guarded by #1009 itself.
+    #[test]
+    fn descendant_kernel_identity_predicates_withhold_values() {
+        let (implementation, _) = include_str!("descendant_quit.rs")
+            .split_once("#[cfg(test)]\nmod tests")
+            .expect("adjacent regression module owns the source boundary");
+        let compact: String = implementation
+            .chars()
+            .filter(|char| !char.is_whitespace())
+            .collect();
+        for macro_name in ["assert_eq!(", "assert_ne!("] {
+            for operand in ["parent_process(", "process_group(", "fs::canonicalize("] {
+                assert!(
+                    !compact.contains(&format!("{macro_name}{operand}")),
+                    "a descendant kernel identity check renders its values on failure"
+                );
+            }
+        }
+        for withheld in [
+            "assert_private_eq(&parent_process(family.descendant),&family.bun,",
+            "assert_private_eq(&process_group(family.descendant),&family.bun,",
+            "assert_private_eq(&fs::canonicalize(ready[\"python\"]",
+        ] {
+            assert!(
+                compact.contains(withheld),
+                "a descendant kernel identity check left the private owner"
+            );
         }
     }
 
