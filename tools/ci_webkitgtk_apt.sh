@@ -228,6 +228,18 @@ EOF
     expect_downloads "a same-size tampered cache file is replaced from the mirror" "liba_1.0_amd64.deb"
     grep -q 'staged 1 verified from the cache, rejected 1' "$temp/out" || fail "self-test: the tampered file was not rejected"
 
+    # A matching SHA256 alone is not sufficient: the archive's size must also
+    # match the freshly signed plan. This negative control detects removing
+    # the size comparison even when every cached byte hashes correctly.
+    cp "$temp/mirror/liba_1.0_amd64.deb" "$cache/liba_1.0_amd64.deb"
+    write_plan
+    awk '$2 == "liba_1.0_amd64.deb" { $3 += 1 } { print }' "$temp/plan" >"$temp/plan.next"
+    mv "$temp/plan.next" "$temp/plan"
+    run_install || { cat "$temp/out" >&2; fail "self-test 'cache size mismatch' failed"; }
+    expect_downloads "a correct-hash cache entry with wrong planned size is rejected" "liba_1.0_amd64.deb"
+    grep -q 'staged 1 verified from the cache, rejected 1' "$temp/out" ||
+        fail "self-test: a wrong planned size was not rejected"
+
     # Negative control: a plan line without SHA256 (MD5 only) is never staged.
     cp "$temp/mirror/liba_1.0_amd64.deb" "$cache/liba_1.0_amd64.deb"
     sed -i.bak 's/SHA256:[0-9a-f]*/MD5Sum:0123456789abcdef0123456789abcdef/' "$temp/plan" && rm -f "$temp/plan.bak"
@@ -258,6 +270,19 @@ EOF
     [[ -f "$cache/liba_1.0_amd64.deb" && ! -L "$cache/liba_1.0_amd64.deb" ]] ||
         fail "self-test: the planted symlink was not replaced by the verified package"
     echo "ok: a planted cache symlink is replaced, never written through"
+
+    # The symlink target holds exact valid package bytes. Hash validation
+    # cannot reject this alone; the explicit -L guard must prevent staging
+    # an archive that is actually a link outside the cache directory.
+    rm -f "$cache/liba_1.0_amd64.deb"
+    ln -s "$temp/mirror/liba_1.0_amd64.deb" "$cache/liba_1.0_amd64.deb"
+    run_install || { cat "$temp/out" >&2; fail "self-test 'valid-package symlink' failed"; }
+    expect_downloads "a valid-hash symlink is never staged" "liba_1.0_amd64.deb"
+    grep -q 'staged 1 verified from the cache' "$temp/out" ||
+        fail "self-test: a valid-hash symlink was incorrectly staged"
+    [[ -f "$cache/liba_1.0_amd64.deb" && ! -L "$cache/liba_1.0_amd64.deb" ]] ||
+        fail "self-test: the valid-hash symlink was not replaced by an ordinary cache file"
+
     # A symlinked cache directory is refused outright.
     ln -s "$cache" "$temp/c/linked-cache"
     if PATH="$temp/bin:$PATH" KELD_WEBKITGTK_PACKAGES="liba libb" "$self" install "$temp/c/linked-cache" >"$temp/out" 2>&1; then
