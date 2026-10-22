@@ -19,6 +19,12 @@ export type AppChannelHandler<Request, Response> =
   (request: Request) => Response | Promise<Response>;
 
 export interface Channels {
+  /**
+   * Registers the one handler for `channel`. Register it synchronously at
+   * module top level, before the first `app.whenReady()` and before any `fs`
+   * or `auth` call: a host call that arrives with no handler registered is
+   * answered `KELD-API-002` (GH-1095 §4.4).
+   */
   handle<Request, Response>(
     channel: AppChannel<Request, Response>,
     handler: AppChannelHandler<Request, Response>,
