@@ -150,7 +150,11 @@
   absence check and never `killpg`. A repeated `fail_current_generation`
   after a delivered signal is a no-op. Later fail-safe probes wait only
   until the first attempt's reap deadline, plus at most one poll interval
-  once it has passed, and one shutdown makes at most one native call. KGC1
+  once it has passed, and one shutdown makes at most one native call.
+  KGC1 admits one `SPAWNED` per attempt: a duplicate is refused as an
+  invalid transition even after a host fail-safe has spent and released
+  that generation, so it can never re-arm the signal through the
+  denied-recovery custody path. KGC1
   CLEAR keeps its own absence window after an armed or delivered signal,
   because its own signal spends the authority just before the window is
   chosen and a shorter cap would fail a group that is still draining; after
