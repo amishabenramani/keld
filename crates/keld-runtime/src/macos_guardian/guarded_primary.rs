@@ -1,5 +1,7 @@
 //! Host-owned persistent guardian and exact registered-generation lifecycle.
-use super::generation_host::{GenerationHostAdmission, is_initial_recovery_denied};
+use super::generation_host::{
+    GenerationHostAdmission, is_initial_recovery_denied, is_post_shutdown_spawn_refused,
+};
 use super::process_group::{GroupIdentity, terminate_attested_group};
 #[cfg(test)]
 use super::terminate_registered_group;
@@ -485,23 +487,32 @@ impl GuardedPrimary {
         if !was_running {
             return worker_result;
         }
-        let (acknowledged, denied_before_initial_ready) = {
+        let (acknowledged, denied, denied_before_initial_ready) = {
             let recovery = lock_recovery(&self.recovery_decision);
             (
                 recovery.shutdown_acknowledged,
+                recovery.denied,
                 recovery.denied && !recovery.initial_ready && recovery.expected_attempt == 1,
             )
         };
-        // This is the ONE expected failed-first-PREPARE outcome if the host
-        // raced its own authenticated S after the Guardian's idle probe.
-        // Only an actual KSA, zero registered group and the private typed
-        // denial may reconcile it; never downgrade another worker failure.
-        let shutdown_won_before_first_spawn = self.shutdown_attributed
+        let shutdown_won = self.shutdown_attributed
             && acknowledged
-            && denied_before_initial_ready
             && lock_generation(&self.current_generation).is_none();
+        // These are the ONLY expected worker outcomes when the host's own
+        // acknowledged shutdown raced generation admission: a rejected first
+        // PREPARE after the Guardian's idle probe, or an in-flight SPAWNED
+        // refused after S. Each needs an actual KSA, zero registered group
+        // and its private typed result; the refusal type exists only after
+        // the attested group was signalled and the lease revoked. The
+        // Guardian's own exit status still proves its local retirement.
+        // Never downgrade another worker failure.
+        let reconciled = |error: &RuntimeError| {
+            shutdown_won
+                && ((denied_before_initial_ready && is_initial_recovery_denied(error))
+                    || (denied && is_post_shutdown_spawn_refused(error)))
+        };
         if let Err(error) = worker_result
-            && !(shutdown_won_before_first_spawn && is_initial_recovery_denied(&error))
+            && !reconciled(&error)
         {
             return Err(error);
         }

@@ -306,6 +306,9 @@ fn failed_exchange_keeps_cleanup(reply: Reply) {
         group_pid: None,
         group_witness: LocalGroupWitness::default(),
         admission: None,
+        exec_withheld: false,
+        host_closed_registration: false,
+        refused_registration_retired: Arc::new(AtomicBool::new(false)),
     };
     let admission = lease.child_spawned(pid, 1);
     peer.join().expect("fault peer joins");
@@ -357,6 +360,9 @@ fn locally_enrolled_lease(pid: u32, witness: LocalGroupWitness) -> GuardedPrimar
         group_pid: Some(pid),
         group_witness: witness,
         admission: None,
+        exec_withheld: false,
+        host_closed_registration: false,
+        refused_registration_retired: Arc::new(AtomicBool::new(false)),
     }
 }
 
