@@ -183,6 +183,7 @@ fn deadline_path_guardian_exit_reports_the_earlier_failure_without_a_second_call
         worker: None,
         shutdown_attributed: true,
         shutdown_failed: false,
+        orderly_acknowledged: false,
         shutdown_sent: None,
         shutdown_denial_fence: None,
     };
