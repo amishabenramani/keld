@@ -110,41 +110,68 @@ fn report_test_ambiguous_probe(group: u32) {
     });
 }
 
-// Exact native fault point for the GH-824 CLEAR race: runs on the calling
-// test thread after the real kernel reported (leader ESRCH, group live) and
-// before the single group signal, so a test can let the last live member
-// finish exiting in that window instead of hoping the scheduler does.
+// Exact native fault points for the GH-824 group-signal race. They run on
+// the calling test thread around the ONE group signal of a call, so a test
+// can let the last live member finish exiting just before it, or make the
+// group signallable again just after a denial, instead of hoping the
+// scheduler does. Shipping builds have no seam.
 #[cfg(test)]
-type TestGroupSignalHook = (u32, Box<dyn FnOnce()>);
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum TestGroupSignalPoint {
+    /// After the kernel authorized the one signal, before `killpg`.
+    BeforeSignal,
+    /// After that one signal was denied (zombie-only EPERM), before the next
+    /// read-only probe.
+    AfterDeniedSignal,
+}
+
+#[cfg(test)]
+type TestGroupSignalHook = (u32, Box<dyn FnMut(TestGroupSignalPoint)>);
 
 #[cfg(test)]
 thread_local! {
-    static BEFORE_GROUP_SIGNAL: RefCell<Option<TestGroupSignalHook>> = const { RefCell::new(None) };
+    static GROUP_SIGNAL_HOOK: RefCell<Option<TestGroupSignalHook>> = const { RefCell::new(None) };
 }
 
 #[cfg(test)]
-pub(super) fn install_test_before_group_signal(group: u32, hook: Box<dyn FnOnce()>) {
-    BEFORE_GROUP_SIGNAL.with(|slot| {
+pub(super) struct TestGroupSignalHookOwner;
+
+#[cfg(test)]
+impl Drop for TestGroupSignalHookOwner {
+    fn drop(&mut self) {
+        GROUP_SIGNAL_HOOK.with(|slot| *slot.borrow_mut() = None);
+    }
+}
+
+#[cfg(test)]
+pub(super) fn install_test_group_signal_hook(
+    group: u32,
+    hook: Box<dyn FnMut(TestGroupSignalPoint)>,
+) -> TestGroupSignalHookOwner {
+    GROUP_SIGNAL_HOOK.with(|slot| {
         assert!(slot.borrow().is_none(), "only one native signal hook owner");
         *slot.borrow_mut() = Some((group, hook));
     });
+    TestGroupSignalHookOwner
 }
 
 #[cfg(test)]
-fn run_test_before_group_signal(group: u32) {
-    let hook = BEFORE_GROUP_SIGNAL.with(|slot| {
+fn run_test_group_signal_hook(group: u32, point: TestGroupSignalPoint) {
+    // Take the hook out while it runs so it may block or spawn freely.
+    let taken = GROUP_SIGNAL_HOOK.with(|slot| {
         let mut slot = slot.borrow_mut();
         if slot
             .as_ref()
             .is_some_and(|(expected, _)| *expected == group)
         {
-            slot.take().map(|(_, hook)| hook)
+            slot.take()
         } else {
             None
         }
     });
-    if let Some(hook) = hook {
-        hook();
+    if let Some((owner, mut hook)) = taken {
+        hook(point);
+        GROUP_SIGNAL_HOOK.with(|slot| *slot.borrow_mut() = Some((owner, hook)));
     }
 }
 
@@ -334,9 +361,12 @@ fn signal_attested_group_once(
     reap_deadline: Instant,
 ) -> Result<(), RuntimeError> {
     #[cfg(test)]
-    run_test_before_group_signal(group.pid);
-    terminate_registered_group(group.pid)
-        .or_else(|denied| reconcile_denied_signal_after_reap(group, denied, reap_deadline))
+    run_test_group_signal_hook(group.pid, TestGroupSignalPoint::BeforeSignal);
+    terminate_registered_group(group.pid).or_else(|denied| {
+        #[cfg(test)]
+        run_test_group_signal_hook(group.pid, TestGroupSignalPoint::AfterDeniedSignal);
+        reconcile_denied_signal_after_reap(group, denied, reap_deadline)
+    })
 }
 
 // One read-only kernel observation of the original leader PID and its whole
@@ -495,7 +525,8 @@ pub(super) fn finish_group_termination(
 // grants new kill authority. This function only classifies the exact
 // signal-phase EPERM; the absence decision belongs to
 // `require_attested_group_absence`, inside the caller's original budget. Any
-// other failure, or unproven absence, keeps `denied`.
+// other failure is returned unchanged; an unproven absence keeps the typed
+// signal-phase EPERM and adds the absence owner's reason as context.
 pub(super) fn reconcile_denied_signal_after_reap(
     group: GroupIdentity,
     denied: RuntimeError,
@@ -517,16 +548,27 @@ fn reconcile_denied_signal_after_reap_with_observers(
     now: impl FnMut() -> Instant,
     probe: impl FnMut(i32) -> (Result<Pid, Errno>, Result<(), Errno>),
 ) -> Result<(), RuntimeError> {
-    if !matches!(
-        &denied,
+    match denied {
         RuntimeError::Lifecycle {
-            phase: "macOS guardian process-group signal",
+            phase: phase @ "macOS guardian process-group signal",
             source,
-        } if source.raw_os_error() == Some(libc::EPERM)
-    ) {
-        return Err(denied);
+        } if is_denied_signal_source(&source) => require_attested_group_absence_with_observers(
+            group, deadline, now, probe,
+        )
+        .map_err(|absence| {
+            lifecycle_error(
+                phase,
+                io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    UnprovenDeniedSignal {
+                        denied: source,
+                        absence: absence_reason(&absence),
+                    },
+                ),
+            )
+        }),
+        other => Err(other),
     }
-    require_attested_group_absence_with_observers(group, deadline, now, probe).map_err(|_| denied)
 }
 
 #[cfg(test)]
@@ -538,6 +580,50 @@ pub(super) fn reconcile_denied_signal_after_reap_for_test(
     probe: impl FnMut(i32) -> (Result<Pid, Errno>, Result<(), Errno>),
 ) -> Result<(), RuntimeError> {
     reconcile_denied_signal_after_reap_with_observers(group, denied, deadline, now, probe)
+}
+
+// A denied group signal whose read-only absence check did not prove the group
+// gone. Its source stays the kernel's raw signal-phase EPERM, so the one
+// classifier still recognises exactly that denial (also after the Guardian's
+// reap), and the absence owner's own reason, e.g. a changed leader birth or
+// the spent budget, is kept as context instead of being discarded.
+#[derive(Debug)]
+struct UnprovenDeniedSignal {
+    denied: io::Error,
+    absence: String,
+}
+
+impl std::fmt::Display for UnprovenDeniedSignal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{}; group absence after the denied signal is unproven: {}",
+            self.denied, self.absence
+        )
+    }
+}
+
+impl std::error::Error for UnprovenDeniedSignal {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&self.denied)
+    }
+}
+
+// The exact signal-phase EPERM: the kernel's raw error, or that same raw error
+// carried inside an unproven-absence context. Nothing else is a denial.
+fn is_denied_signal_source(source: &io::Error) -> bool {
+    source.raw_os_error() == Some(libc::EPERM)
+        || source
+            .get_ref()
+            .and_then(|inner| inner.downcast_ref::<UnprovenDeniedSignal>())
+            .is_some_and(|context| is_denied_signal_source(&context.denied))
+}
+
+fn absence_reason(absence: &RuntimeError) -> String {
+    match absence {
+        RuntimeError::Lifecycle { phase, source } => format!("{phase}: {source}"),
+        other => other.to_string(),
+    }
 }
 
 // Registration has not yet transferred ownership. A rejected or dropped
