@@ -329,6 +329,54 @@ test("new Rust test imports require explicit names in normal unprivileged CI", (
   expect(() => check(missing)).toThrow("Test module import ownership must occur exactly once");
 });
 
+// A changed Windows runner image can change the MSVC toolchain/SDK. The
+// rust-cache action already hashes the selected Rust compiler and Cargo files;
+// preserving those defaults AND hashing ImageVersion is the cache safety
+// boundary when unrelated runner-preinstalled Rust versions are pruned.
+function assertWindowsCacheBoundary(workflow: Fixture, jobName: string): void {
+  const steps = workflow.jobs[jobName]!.steps;
+  const rust = steps.findIndex(s => String(s.uses ?? "").startsWith("dtolnay/rust-toolchain@"));
+  const prepare = steps.findIndex(s => s.name === "Normalize hosted Windows Rust cache toolchains");
+  const cache = steps.findIndex(s => String(s.uses ?? "").startsWith("Swatinem/rust-cache@"));
+  if (!(rust >= 0 && rust < prepare && prepare < cache)) {
+    throw new Error(`${jobName}: pinned Rust must precede Windows normalization and cache restore`);
+  }
+  const prep = steps[prepare]!;
+  if (prep.shell !== "pwsh" || prep.run !== "pwsh -File tools/ci_windows_rust_cache.ps1") {
+    throw new Error(`${jobName}: Windows-only normalization script must execute and fail closed`);
+  }
+  if (jobName !== "windows-media" &&
+      !String(prep.if ?? "").includes("matrix.os == 'windows-latest'")) {
+    throw new Error(`${jobName}: toolchain removal must be Windows-only`);
+  }
+  const inputs = (steps[cache]!.with ?? {}) as Record<string, unknown>;
+  const hashInputs = String(inputs["env-vars"] ?? "");
+  for (const input of ["CARGO", "CC", "CFLAGS", "CXX", "CMAKE", "RUST", "ImageOS", "ImageVersion"]) {
+    if (!hashInputs.split(/[^A-Za-z0-9_]+/).includes(input)) {
+      throw new Error(`${jobName}: rust-cache must hash ${input}`);
+    }
+  }
+  if (inputs["add-rust-environment-hash-key"] === false ||
+      inputs["add-rust-environment-hash-key"] === "false") {
+    throw new Error(`${jobName}: Rust environment hashing must remain enabled`);
+  }
+}
+
+test("Windows cache key pilot retains compiler, flags, lockfile and hosted image safety", () => {
+  for (const job of ["check", "doctest", "windows-media"]) {
+    assertWindowsCacheBoundary(fixture(), job);
+    const noPrep = fixture();
+    noPrep.jobs[job]!.steps = noPrep.jobs[job]!.steps.filter(s =>
+      s.name !== "Normalize hosted Windows Rust cache toolchains");
+    expect(() => assertWindowsCacheBoundary(noPrep, job)).toThrow("normalization");
+    const noImage = fixture();
+    const cache = noImage.jobs[job]!.steps.find(s =>
+      String(s.uses ?? "").startsWith("Swatinem/rust-cache@"))!;
+    (cache.with as Record<string, unknown>)["env-vars"] = "CARGO CC CFLAGS CXX CMAKE RUST";
+    expect(() => assertWindowsCacheBoundary(noImage, job)).toThrow("ImageOS");
+  }
+});
+
 test("Windows media oracle matches its reviewed full-file digest", () => {
   expect(() => checkWindowsMediaOracle(windowsMediaOracle)).not.toThrow();
   const mutated = Buffer.concat([windowsMediaOracle, Buffer.from("\n# inert override\n")]);

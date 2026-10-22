@@ -196,9 +196,14 @@ jobs:
         with:
           toolchain: 1.99.1
           components: rustfmt, clippy
+      - name: Normalize hosted Windows Rust cache toolchains
+        if: matrix.os == 'windows-latest'
+        shell: pwsh
+        run: pwsh -File tools/ci_windows_rust_cache.ps1
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           cache-on-failure: true
+          env-vars: ${{ matrix.os == 'windows-latest' && 'CARGO CC CFLAGS CXX CMAKE RUST ImageOS ImageVersion' || 'CARGO CC CFLAGS CXX CMAKE RUST' }}
       - name: Check keld-ipc fuzz workspace
         if: matrix.os == 'ubuntu-latest' && needs.changes.outputs.rust == 'true'
         run: |
@@ -393,9 +398,13 @@ jobs:
         with:
           toolchain: 1.99.1
           components: rustfmt, clippy
+      - name: Normalize hosted Windows Rust cache toolchains
+        shell: pwsh
+        run: pwsh -File tools/ci_windows_rust_cache.ps1
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           cache-on-failure: true
+          env-vars: CARGO CC CFLAGS CXX CMAKE RUST ImageOS ImageVersion
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
           bun-version: "1.4.2"
@@ -574,7 +583,13 @@ jobs:
       - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master pinned commit
         with:
           toolchain: 1.99.1
+      - name: Normalize hosted Windows Rust cache toolchains
+        if: matrix.os == 'windows-latest'
+        shell: pwsh
+        run: pwsh -File tools/ci_windows_rust_cache.ps1
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          env-vars: ${{ matrix.os == 'windows-latest' && 'CARGO CC CFLAGS CXX CMAKE RUST ImageOS ImageVersion' || 'CARGO CC CFLAGS CXX CMAKE RUST' }}
       - name: cargo test --doc
         shell: bash
         env:
