@@ -143,15 +143,18 @@ fn member_exit_between_probe_and_group_signal_never_clears_an_unreaped_group() {
 /// The denial is the call's only signal. If the group becomes signallable
 /// again before the next probe (here: a fresh test-owned process joins the
 /// still-existing zombie-only group), the call must fail closed and leave
-/// that process untouched: it is not proven to be ours.
-#[test]
-fn denied_group_signal_is_never_followed_by_a_second_signal_in_the_same_call() {
-    let (original, raw, mut member) = reaped_leader_with_live_member();
+/// that process untouched: it is not proven to be ours. `first` is the
+/// group's last live process; it exits just before the one signal.
+fn assert_denial_is_the_calls_only_signal(
+    original: GroupIdentity,
+    raw: i32,
+    mut first: TestOwnedGroupChild,
+) {
     let joiner: Arc<Mutex<Option<TestOwnedGroupChild>>> = Arc::default();
     let joiner_slot = Arc::clone(&joiner);
     let signals: Arc<Mutex<u32>> = Arc::default();
     let signal_count = Arc::clone(&signals);
-    let mut exit_member = exit_last_member_before_signal(raw, pid_of(&member));
+    let mut exit_member = exit_last_member_before_signal(raw, pid_of(&first));
     let _hook = install_test_group_signal_hook(
         original.pid,
         Box::new(move |point| match point {
@@ -187,7 +190,7 @@ fn denied_group_signal_is_never_followed_by_a_second_signal_in_the_same_call() {
     let joiner_alive = joiner.0.try_wait().expect("inspect joiner").is_none();
     joiner.0.kill().expect("kill exact test-owned joiner");
     assert_eq!(joiner.0.wait().expect("reap joiner").signal(), Some(9));
-    assert_eq!(member.0.wait().expect("reap member").signal(), Some(9));
+    assert_eq!(first.0.wait().expect("reap first victim").signal(), Some(9));
 
     assert_eq!(
         *signals.lock().expect("signal count"),
@@ -202,6 +205,25 @@ fn denied_group_signal_is_never_followed_by_a_second_signal_in_the_same_call() {
             .contains("registered group identity unavailable"),
         "fail closed through the unproven-identity arm: {error}"
     );
+}
+
+/// Reaped-leader arm: the probe saw the group live, then its last member
+/// exited before the one signal.
+#[test]
+fn denied_group_signal_is_never_followed_by_a_second_signal_in_the_same_call() {
+    let (original, raw, member) = reaped_leader_with_live_member();
+    assert_denial_is_the_calls_only_signal(original, raw, member);
+}
+
+/// Birth-matched arm: the live, birth-matched leader is the group's only
+/// member and exits between the identity read and the one signal.
+#[test]
+fn denied_birth_matched_signal_is_never_followed_by_a_second_signal_in_the_same_call() {
+    let leader = sleeper(0);
+    let group = leader.0.id();
+    let original = observe_group_identity(group).expect("original kernel group birth");
+    let raw = i32::try_from(group).expect("positive native group PID");
+    assert_denial_is_the_calls_only_signal(original, raw, leader);
 }
 
 /// The identity-matched arm has the same window: the birth-matched live

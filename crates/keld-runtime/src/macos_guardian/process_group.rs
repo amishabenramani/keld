@@ -316,7 +316,13 @@ pub(super) fn terminate_attested_group(group: GroupIdentity) -> Result<(), Runti
                 // exiting between the identity read and this one signal: a
                 // zombie-only group. Same ambiguity as below; never signal
                 // again, only a read-only ESRCH may succeed.
-                Err(denied) if is_denied_group_signal(&denied) => (denied, true),
+                Err(denied) if is_denied_group_signal(&denied) => {
+                    // Fault point at the denial itself, independent of the
+                    // latch below, so a test pins the latch's effect.
+                    #[cfg(test)]
+                    run_test_group_signal_hook(group.pid, TestGroupSignalPoint::AfterDeniedSignal);
+                    (denied, true)
+                }
                 result => return result,
             }
         }
@@ -331,10 +337,6 @@ pub(super) fn terminate_attested_group(group: GroupIdentity) -> Result<(), Runti
         }
         Err(observation) => (observation, false),
     };
-    #[cfg(test)]
-    if saw_ambiguous_group {
-        run_test_group_signal_hook(group.pid, TestGroupSignalPoint::AfterDeniedSignal);
-    }
     let raw = validate_group_pid(group.pid)?;
     // Darwin may report EPERM for kill(-PGID, 0) when the enrolled
     // leader has been reaped but another already-killed group member
