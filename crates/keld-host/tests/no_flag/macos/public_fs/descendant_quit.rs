@@ -322,6 +322,8 @@ mod tests {
         }
     }
 
+    // A positional Debug placeholder anywhere in public_fs/ is rejected by the
+    // #1009 source guard, which would also flag that shape as a literal here.
     #[test]
     fn descendant_oracle_diagnostics_do_not_interpolate_raw_control_records() {
         let source = include_str!("descendant_quit.rs");
@@ -329,7 +331,6 @@ mod tests {
             for interpolation in [
                 format!("{{{name}}}"),
                 format!("{{{name}:?}}"),
-                format!("eprintln!(\"{{:?}}\", {name})"),
                 format!("eprintln!(\"{{}}\", {name})"),
                 format!("assert_eq!({name}["),
             ] {
