@@ -187,7 +187,7 @@ fn valid_workflow() -> String {
             "  msrv:",
             "    runs-on: macos-latest",
             "    steps:",
-            "      - run: cargo +1.97 check -p fixture --all-targets",
+            "      - run: cargo +1.99.1 check -p fixture --all-targets",
             "  deny:",
             "    if: needs.changes.outputs.deny == 'true'",
             "    steps:",
@@ -202,7 +202,7 @@ fn valid_workflow() -> String {
             "          persist-credentials: false",
             "      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master 2026-08-05",
             "        with:",
-            "          toolchain: 1.97.1",
+            "          toolchain: 1.99.1",
             "      - run: echo 551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb | sha256sum -c -",
             &gitleaks_scan_step(),
             "  hygiene:",
@@ -2147,10 +2147,10 @@ fn missing_pr_gate_fails() {
 #[test]
 fn missing_toolchain_pin_fails() {
     let temp = complete_fixture();
-    let workflow = valid_workflow().replace("toolchain: 1.97.1", "");
+    let workflow = valid_workflow().replace("toolchain: 1.99.1", "");
     temp.write(WORKFLOW, &workflow);
     let error = check(temp.path()).expect_err("workflow without toolchain pin must fail");
-    assert!(error.contains("toolchain: 1.97.1"), "{error}");
+    assert!(error.contains("toolchain: 1.99.1"), "{error}");
 }
 
 #[test]
@@ -3648,4 +3648,19 @@ fn deleting_codeowners_file_fails() {
     let error = check(temp.path()).expect_err("missing CODEOWNERS must fail");
     assert!(error.contains("CODEOWNERS"), "{error}");
     assert!(error.contains("Restore"), "{error}");
+}
+
+#[test]
+fn job_level_keys_after_steps_are_found_and_nested_if_is_ignored() {
+    let block = "  job:\n    runs-on: ubuntu-latest\n    steps:\n      - name: one\n        if: ${{ nested }}\n        run: echo\n    if: ${{ always() }}\n    continue-on-error: true\n";
+    assert_eq!(
+        workflow_job_level_if(block).as_deref(),
+        Some("${{ always() }}")
+    );
+    assert_eq!(
+        workflow_job_level_property(block, "continue-on-error").as_deref(),
+        Some("true")
+    );
+    let nested_only = "  job:\n    steps:\n      - name: one\n        if: ${{ nested }}\n";
+    assert_eq!(workflow_job_level_if(nested_only), None);
 }
