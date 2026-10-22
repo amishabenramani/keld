@@ -877,8 +877,11 @@ class ProductionConsumerTests(unittest.TestCase):
 # maintenance.auto is false. Its callers are am, commit, fetch, merge, rebase and
 # receive-pack. Git before 2.29 has no maintenance.auto and ran `gc --auto`
 # itself; ubuntu-latest has 2.55.0.
-QUOTED_GIT_INIT = re.compile(r"""["']init["']""")
-SHELL_GIT_INIT = re.compile(r"^\s*git\b.*\sinit(\s|$)")
+QUOTED_GIT_INIT = re.compile(r"""["'`]init["'`]""")
+# An unquoted shell `init` after `git` or a `$GIT*` variable anywhere on the line,
+# so `cd x && git init`, `(cd x; git init)`, `"$GIT" init` and `command git init`
+# are sites too. The pattern is unanchored and case-blind, so it fails closed.
+SHELL_GIT_INIT = re.compile(r"(?:\bgit\b|\$\{?git\w*\}?).*\sinit(?=[\s;&|)]|$)", re.IGNORECASE)
 # Fail closed: in a file that mentions git anywhere, in any case (`git`, `GIT`,
 # `GIT_EXE`, `gitPath`, `runGit`), every quoted "init" in code is a site,
 # whichever wrapper, argv variable, builder chain, `+=` or loop carries it to git.
@@ -1058,6 +1061,13 @@ class TempRepositoryMaintenanceTests(unittest.TestCase):
             # nothing, and a `'"'` char literal opens no string that hides a comment.
             "tools/raw_script.rs": 'let script = r#"\ngit {verb} -q\n# git config maintenance.auto false\n"#;\n',
             "tools/char_quote.rs": 'git_fixture(root, &["{verb}"]); let q = \'"\'; // git config maintenance.auto false\n',
+            # #672 re-review: a shell init that does not start the line, and a template literal.
+            "tools/after_cd.sh": 'cd "$d" && git {verb} -q\n',
+            "tools/subshell.sh": '(cd x; git {verb})\n',
+            "tools/git_var.sh": '"$GIT" {verb} -q\n',
+            "tools/braced_var.sh": '${{GIT_BIN}} {verb}\n',
+            "tools/command.sh": 'command git {verb} -q\n',
+            "tools/template.ts": 'execFileSync("git", [`{verb}`], {{ cwd: dir }});\n',
             # Not a source extension: prose is not scanned.
             "docs/notes.md": 'git {verb} -q\nrun `git("{verb}")`\n',
         })
@@ -1069,7 +1079,10 @@ class TempRepositoryMaintenanceTests(unittest.TestCase):
                                  "tools/trailing.sh:1": False, "tools/trailing.rs:1": False,
                                  "tools/block.rs:1": False, "tools/inline_block.ts:1": False,
                                  "docs/audits/bare.py:1": False, "crates/x/tests/bare.rs:2": False,
-                                 "tools/raw_script.rs:2": False, "tools/char_quote.rs:1": False})
+                                 "tools/raw_script.rs:2": False, "tools/char_quote.rs:1": False,
+                                 "tools/after_cd.sh:1": False, "tools/subshell.sh:1": False,
+                                 "tools/git_var.sh:1": False, "tools/braced_var.sh:1": False,
+                                 "tools/command.sh:1": False, "tools/template.ts:1": False})
 
     def test_census_accepts_each_supported_form(self):
         sites = self.census({
