@@ -158,6 +158,21 @@ pub(super) fn retain_parented_birth(pid: u32, expected_parent: u32) -> NativeBir
     birth
 }
 
+/// Retain the live original birth of a same-group member at readiness: its
+/// actual parent is the group leader and the kernel places it in that group.
+pub(super) fn retain_group_member_birth(
+    pid: u32,
+    expected_parent: u32,
+    expected_group: u32,
+) -> NativeBirth {
+    let birth = retain_parented_birth(pid, expected_parent);
+    assert_eq!(
+        birth.group, expected_group,
+        "controller-reported member must belong to the original process group"
+    );
+    birth
+}
+
 fn require_original_birth(original: NativeBirth) -> std::io::Result<i32> {
     let raw = i32::try_from(original.pid).map_err(|_| {
         std::io::Error::new(
@@ -191,6 +206,28 @@ fn kill_attested_group(original: NativeBirth) -> std::io::Result<()> {
         return Err(std::io::Error::new(
             std::io::ErrorKind::PermissionDenied,
             "original fixture leader has no exclusive group authority",
+        ));
+    }
+    kill(Pid::from_raw(-raw), Signal::SIGKILL).map_err(std::io::Error::from)
+}
+
+// Production parity with `process_group::terminate_attested_group`: a reaped
+// leader whose group survives through members keeps group cleanup, because
+// Darwin reserves a PGID while it has members. Stricter than production, the
+// fixture signals that group only while one retained same-group member birth
+// still matches exactly (PID, UID, start time and original PGID).
+fn kill_group_via_attested_member(member: NativeBirth, group: u32) -> std::io::Result<()> {
+    let member_raw = require_original_birth(member)?;
+    let raw = i32::try_from(group).map_err(|_| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "original group exceeds c_int",
+        )
+    })?;
+    if member.group != group || member_raw == raw || raw <= 1 || Pid::from_raw(raw) == getpgrp() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "retained member is not an exclusive original group member",
         ));
     }
     kill(Pid::from_raw(-raw), Signal::SIGKILL).map_err(std::io::Error::from)
@@ -251,6 +288,7 @@ pub(super) struct CycleCleanup {
     pub(super) peer: Option<Child>,
     pub(super) group: Option<u32>,
     pub(super) group_birth: Option<NativeBirth>,
+    pub(super) descendant_birth: Option<NativeBirth>,
     pub(super) leaker: Option<u32>,
     pub(super) leaker_birth: Option<NativeBirth>,
     pub(super) group_gone: bool,
@@ -263,6 +301,7 @@ impl CycleCleanup {
             peer: None,
             group: None,
             group_birth: None,
+            descendant_birth: None,
             leaker: None,
             leaker_birth: None,
             group_gone: false,
@@ -276,9 +315,14 @@ impl Drop for CycleCleanup {
             && let (Some(group), Some(birth)) = (self.group, self.group_birth)
             && group == birth.pid
         {
-            // If the original group leader was already reaped, or its numeric
-            // PGID was reused, there is no safe new authority in a saved event.
-            let _ = kill_attested_group(birth);
+            // A saved event is never authority. If the original leader was
+            // reaped or its PGID reused, only a retained same-group member
+            // birth that still matches exactly may keep group cleanup.
+            if kill_attested_group(birth).is_err()
+                && let Some(member) = self.descendant_birth
+            {
+                let _ = kill_group_via_attested_member(member, birth.pid);
+            }
         }
         if let Some(host) = self.host.as_mut() {
             let _ = host.kill();

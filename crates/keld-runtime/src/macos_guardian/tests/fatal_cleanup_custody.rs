@@ -13,6 +13,8 @@ use super::super::{
 };
 use super::test_support::{NativeChildOwner, test_group_identity};
 
+mod retry_authority;
+
 fn original_group_with_unusable_enrollment() -> (NativeChildOwner, RegisteredPrimaryGeneration) {
     let owned = NativeChildOwner::new(
         Command::new("/bin/sleep")
@@ -65,6 +67,7 @@ fn primary_with_dead_guardian(
         worker: None,
         shutdown_attributed,
         shutdown_failed: false,
+        orderly_acknowledged: false,
         shutdown_sent: None,
         shutdown_denial_fence: None,
     }
@@ -181,6 +184,7 @@ fn failed_worker_failsafe_cannot_consume_original_group_birth() {
         })),
         shutdown_attributed: false,
         shutdown_failed: false,
+        orderly_acknowledged: false,
         shutdown_sent: None,
         shutdown_denial_fence: None,
     };
