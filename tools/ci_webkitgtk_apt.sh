@@ -45,8 +45,10 @@ require_packages() {
     printf '%s\n' "$packages"
 }
 
-# The key binds the exact package list and the runner image, so a new image or
-# list starts a fresh entry instead of reusing packages built for another one.
+# The primary key binds the exact package list and runner image. A previous
+# image of the SAME ImageOS may supply candidate .debs through a prefix restore:
+# every byte is separately checked against the freshly signed apt index in
+# install_packages. Never reuse apt's index files or an unverified archive.
 cache_key() {
     local packages digest
     packages="$(require_packages)"
@@ -55,7 +57,9 @@ cache_key() {
     fi
     # shellcheck disable=SC2086 # the list is deliberately split into package names
     digest="$(printf '%s\n' $packages | LC_ALL=C sort -u | sha256_stdin)"
-    printf 'key=%s-%s-%s-%s\n' "$CACHE_KEY_PREFIX" "$ImageOS" "$ImageVersion" "$digest"
+    printf 'key=%s-%s-%s-%s\nrestore-prefix=%s-%s-\n' \
+        "$CACHE_KEY_PREFIX" "$ImageOS" "$ImageVersion" "$digest" \
+        "$CACHE_KEY_PREFIX" "$ImageOS"
 }
 
 apt_archives_dir() {
@@ -280,6 +284,12 @@ EOF
     [[ "$key1" == key=keld-webkitgtk-debs-v1-ubuntu24-20261005.1-* && "$key1" == "$key2" ]] ||
         fail "self-test: the key is not the image plus the package set ('$key1', '$key2')"
     [[ "$key1" != "$key3" ]] || fail "self-test: a new image version reused the cache key"
+    [[ "$key1" == *$'\nrestore-prefix=keld-webkitgtk-debs-v1-ubuntu24-' ]] ||
+        fail "self-test: same-OS images cannot restore verified older .debs"
+    [[ "$key3" == *$'\nrestore-prefix=keld-webkitgtk-debs-v1-ubuntu24-' ]] ||
+        fail "self-test: changing only ImageVersion changed the restore prefix"
+    [[ "$key1" != *'restore-prefix=keld-webkitgtk-debs-v1-ubuntu26-'* ]] ||
+        fail "self-test: cross-OS cache prefix was accepted"
     [[ "$key1" != "$(ImageOS=ubuntu24 ImageVersion=20261005.1 KELD_WEBKITGTK_PACKAGES="liba libb libc" "$self" key)" ]] ||
         fail "self-test: a changed package list reused the cache key"
     if ImageOS=ubuntu24 ImageVersion='' KELD_WEBKITGTK_PACKAGES="liba" "$self" key >/dev/null 2>&1; then
