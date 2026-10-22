@@ -1215,6 +1215,43 @@ mod tests {
         );
     }
 
+    /// GH-1095 criteria 7 and 13: a page script that replaces the global
+    /// `Error` after the facade installed cannot stop a rejection from
+    /// settling, and every rejection is still a genuine coded `Error`.
+    #[test]
+    fn rejections_settle_even_when_the_page_replaces_error() {
+        let out = run_script_harness(&json!({
+            "scenario": "tampered",
+            "nonce": NONCE_A,
+            "channel": ADMITTED,
+            "result": {"ok": false, "code": "KELD-WV-013", "detail": "application link ended before the renderer reply"},
+        }));
+        for path in ["localThrew", "resultThrew", "pagehideThrew"] {
+            assert_eq!(out[path], Value::Null, "{path}: {out}");
+        }
+        assert_coded_rejection(
+            &out["local"],
+            "KELD-WV-011",
+            "KELD-WV-011: opts is not supported by this bridge",
+        );
+        assert_eq!(out["result"].as_array().expect("result").len(), 1, "{out}");
+        assert_coded_rejection(
+            &out["result"][0],
+            "KELD-WV-013",
+            "KELD-WV-013: application link ended before the renderer reply",
+        );
+        assert_eq!(
+            out["pagehide"].as_array().expect("pagehide").len(),
+            1,
+            "{out}"
+        );
+        assert_coded_rejection(
+            &out["pagehide"][0],
+            "KELD-WV-013",
+            "KELD-WV-013: renderer document navigated before reply",
+        );
+    }
+
     /// GH-1095 AT-EC unit: the page facade constructs every rejection
     /// through its one coded-error helper.
     #[test]

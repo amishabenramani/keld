@@ -566,6 +566,7 @@ fn s10b_bun_err_codes_reach_the_reply_channel_verbatim() {
         "KELD-WV-012",
         "KELD-WV-013",
         "KELD-API-001",
+        "KELD-API-002",
         "KELD-IPC-023",
     ] {
         let (router, handle, mut peer, _owner, _window) = primary_echo_test_router();
@@ -683,7 +684,7 @@ fn dispatched_calls_map_to_their_renderer_terminal() {
     }
     // The rewrite is scoped to the `KELD-WV-` prefix: other codes, including a
     // look-alike, keep Bun's code and message.
-    for code in ["KELD-API-001", "KELD-IPC-023", &look_alike] {
+    for code in ["KELD-API-001", "KELD-API-002", "KELD-IPC-023", &look_alike] {
         let message = format!("{code}: claimed by the peer");
         assert_eq!(
             dispatched_echo_terminal(Some(Ok(PrimaryEchoReply::Err(CallError {
@@ -730,6 +731,42 @@ fn only_the_no_generation_refusal_is_not_dispatched() {
         assert_ne!(
             renderer_code(&dispatched_echo_terminal(reply)),
             Some("KELD-WV-012")
+        );
+    }
+}
+
+/// Criteria 11 and 13 for a malformed Bun ERR: a forwarded detail always
+/// starts with its own code, so the page's message prefix equals `err.code`
+/// and a host-only code can never lead the message. A well-formed message is
+/// forwarded byte for byte.
+#[test]
+fn forwarded_bun_details_lead_with_their_own_code() {
+    for (code, message, detail) in [
+        (
+            "KELD-API-002",
+            "KELD-API-002: no handler",
+            "KELD-API-002: no handler",
+        ),
+        (
+            "KELD-API-001",
+            "application failed",
+            "KELD-API-001: application failed",
+        ),
+        // A code that is only a prefix of the host-only family, with a
+        // message that claims a host-only code.
+        (
+            "KELD-WV",
+            "KELD-WV-012: not sent",
+            "KELD-WV: KELD-WV-012: not sent",
+        ),
+    ] {
+        assert_eq!(
+            dispatched_echo_terminal(Some(Ok(PrimaryEchoReply::Err(CallError {
+                code: code.to_owned(),
+                message: message.to_owned(),
+            })))),
+            RendererEchoTerminal::error(code, detail),
+            "Bun ERR {code} {message:?}"
         );
     }
 }

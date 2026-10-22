@@ -11,6 +11,10 @@
 // tests, not here. A scenario waits only for the bus to drain; nothing sleeps.
 "use strict";
 
+// The harness's own Error, so its observer is immune to a scenario that
+// replaces the global one.
+const GenuineError = Error;
+
 function makeDocument() {
   const tasks = [];
   const listeners = [];
@@ -77,7 +81,7 @@ function describe(error) {
   const descriptor = Object.getOwnPropertyDescriptor(error, "code");
   return {
     ok: false,
-    isError: error instanceof Error,
+    isError: error instanceof GenuineError,
     name: error.name,
     message: error.message,
     code: error.code === undefined ? null : error.code,
@@ -213,5 +217,51 @@ async function reset(input) {
   return { afterReset, settled: call, successor: successorCall };
 }
 
-const scenarios = { errors, settlement, reset };
+async function tampered(input) {
+  // A page script replaces the global Error after the facade installed. Every
+  // rejection must still settle, as a genuine coded Error.
+  const doc = makeDocument();
+  doc.bind(input.nonce);
+  const forged = function ForgedError() {
+    return Object.freeze({ forged: true });
+  };
+  const withForgedError = (action) => {
+    globalThis.Error = forged;
+    try {
+      return { threw: null, value: action() };
+    } catch (error) {
+      return { threw: String(error), value: undefined };
+    } finally {
+      globalThis.Error = GenuineError;
+    }
+  };
+  const out = {};
+  const local = withForgedError(() => doc.keld.invoke(input.channel, new Uint8Array(), {}));
+  out.localThrew = local.threw;
+  out.local = local.value ? await rejection(local.value) : null;
+
+  const answered = track(doc.keld.invoke(input.channel, new Uint8Array([1])));
+  await doc.flush();
+  doc.result({ ...input.result, document: input.nonce, request: lastInvoke(doc).request });
+  // The relay is a queued message: deliver it while Error is forged.
+  globalThis.Error = forged;
+  try {
+    await doc.flush();
+    out.resultThrew = null;
+  } catch (error) {
+    out.resultThrew = String(error);
+  } finally {
+    globalThis.Error = GenuineError;
+  }
+  out.result = answered;
+
+  const hidden = track(doc.keld.invoke(input.channel, new Uint8Array([2])));
+  await doc.flush();
+  out.pagehideThrew = withForgedError(() => doc.pagehide()).threw;
+  await doc.flush();
+  out.pagehide = hidden;
+  return out;
+}
+
+const scenarios = { errors, settlement, reset, tampered };
 console.log(JSON.stringify(await scenarios[INPUT.scenario](INPUT)));
