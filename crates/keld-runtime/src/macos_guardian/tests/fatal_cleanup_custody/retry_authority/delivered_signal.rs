@@ -12,7 +12,7 @@ use nix::sys::signal::{Signal, kill};
 use nix::unistd::Pid;
 
 use super::super::super::super::process_group::{
-    install_test_before_group_signal, require_attested_group_absence,
+    TestGroupSignalPoint, install_test_group_signal_hook, require_attested_group_absence,
 };
 use super::super::super::super::{
     GuardedPrimary, RecoveryState, RegisteredPrimaryGeneration, lock_generation,
@@ -78,19 +78,22 @@ fn denied_attested_signal_spends_the_generation_authority() {
     let leader_pid = Pid::from_raw(raw);
     let mut generation =
         RegisteredPrimaryGeneration::authenticated(1, test_group_identity(leader.id()));
-    install_test_before_group_signal(
+    let _hook = install_test_group_signal_hook(
         leader.id(),
-        Box::new(move || {
-            kill(leader_pid, Signal::SIGKILL).expect("kill the exact test-owned leader");
-            await_held_zombie_group(leader_pid);
+        Box::new(move |point| {
+            if point == TestGroupSignalPoint::BeforeSignal {
+                kill(leader_pid, Signal::SIGKILL).expect("kill the exact test-owned leader");
+                await_held_zombie_group(leader_pid);
+            }
         }),
     );
     let denied = generation
         .signal_if_armed()
         .expect_err("a held zombie-only group is not proven absent");
     assert!(
-        denied.to_string().contains("process-group signal"),
-        "the denied signal keeps its typed signal-phase failure: {denied}"
+        denied.to_string().contains("process-group signal")
+            && denied.to_string().contains("absence remains unproven"),
+        "the denied signal keeps its typed signal-phase failure and the absence reason: {denied}"
     );
     assert!(
         matches!(
