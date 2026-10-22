@@ -527,24 +527,24 @@ mod tests {
             .permissions()
             .mode();
         assert_eq!(mode & 0o777, 0o500, "fixture must apply mode 0o500");
-        // Mode bits deny nothing to a process that overrides DAC checks (root, or
-        // CAP_DAC_OVERRIDE), so the fixture cannot build a real deny there. The
-        // mode is proven applied above, so a create that still succeeds can only
-        // mean that override: report the missing prerequisite instead of a false
-        // FAIL. Hosted runners are non-root and run this control.
-        let sentinel = denied.join("dac-override-sentinel");
-        if fs::File::create(&sentinel).is_ok() {
-            fs::remove_file(&sentinel).expect("remove DAC-override sentinel");
+        // Fixture prerequisite: the applied mode must actually deny a create. It
+        // does not when the process overrides DAC checks (root, CAP_DAC_OVERRIDE),
+        // the filesystem ignores mode bits, or an ACL grants the create. This fails
+        // instead of skipping, so no test leg can pass without running this control.
+        let sentinel = denied.join("deny-prerequisite-sentinel");
+        let created = fs::File::create(&sentinel).is_ok();
+        if created {
+            fs::remove_file(&sentinel).expect("remove deny-prerequisite sentinel");
             fs::set_permissions(&denied, fs::Permissions::from_mode(0o700))
                 .expect("restore denied parent for cleanup");
-            eprintln!(
-                "SKIP filesystem_probe_passes_a_real_permission_deny_on_an_unoccupied_name: \
-                 this process overrides directory permission checks (running as root or with \
-                 CAP_DAC_OVERRIDE), so mode 0o500 cannot produce the real deny this positive \
-                 control needs; run the test as an unprivileged user"
-            );
-            return;
         }
+        assert!(
+            !created,
+            "fixture prerequisite missing: a create inside the mode-0o500 directory \
+             succeeded, so this environment does not enforce directory mode bits for \
+             this process and the positive control cannot build a real deny; run it as \
+             an unprivileged user on a filesystem that enforces mode bits"
+        );
 
         let row = probe_direct_filesystem_in(&denied);
         fs::set_permissions(&denied, fs::Permissions::from_mode(0o700))
