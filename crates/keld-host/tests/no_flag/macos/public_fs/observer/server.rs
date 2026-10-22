@@ -325,10 +325,15 @@ mod observation_marker_tests {
         let (implementation, _) = include_str!("server.rs")
             .split_once("#[cfg(test)]\nmod observation_marker_tests")
             .expect("adjacent regression module owns the source boundary");
+        // Whitespace-insensitive, so a formatter reflow cannot break the pin.
+        let compact: String = implementation
+            .chars()
+            .filter(|char| !char.is_whitespace())
+            .collect();
         assert!(
-            implementation.contains(
-                "let stage = Phase::observation_stage(&report);\n            \
-                 eprintln!(\"{}\", observed_marker(&report, stage));"
+            compact.contains(
+                "letstage=Phase::observation_stage(&report);\
+                 eprintln!(\"{}\",observed_marker(&report,stage));"
             ),
             "actual observation stderr callsite bypassed the fixed stage marker"
         );
