@@ -62,6 +62,7 @@ fn application_socket_pairs(
 
 #[cfg(test)]
 mod tests {
+    use super::super::private_diagnostics::private_failure_message;
     use super::*;
 
     #[test]
@@ -99,13 +100,9 @@ mod tests {
             ),
             ("0xHOST", "0xBUN", "host connected-peer symmetry"),
         ] {
-            let failure = std::panic::catch_unwind(|| {
+            let message = private_failure_message(|| {
                 assert_private_eq(left, right, reason);
-            })
-            .expect_err("the original identity predicate still fails");
-            let message = failure
-                .downcast_ref::<String>()
-                .expect("formatted assertion message");
+            });
             assert!(message.contains(reason), "fixed reason missing");
             for identity in [PRIVATE, "0xHOST", "0xBUN", "0xOTHER"] {
                 assert!(
