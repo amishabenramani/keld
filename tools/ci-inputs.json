@@ -367,14 +367,14 @@
         "crates/keld-host/tests/no_flag/macos/public_fs/project.rs",
         "crates/keld-host/tests/no_flag/macos/public_fs.rs"
       ],
-      "sha256": "ddd47714b720eae66aa8414befbd180383c08e20bf2a9bdd4231918b982fecf5"
+      "sha256": "15a594f113a63fe52fe239c94d3eac90c35bb7e75e4af6587d8cb9030ac6cab5"
     },
     "bun-readers": {
       "patterns": [
         "packages/*",
         "justfile"
       ],
-      "sha256": "816056f310848a675df1598767f22b838446c58270c92c2522445b1ad4a3b395"
+      "sha256": "3b496a050db47263b84073ab4393b617be136cd6d58ed6f29f13f4c62314da50"
     },
     "policy-readers": {
       "patterns": [
@@ -384,14 +384,14 @@
         ".githooks/*",
         "rust-toolchain.toml"
       ],
-      "sha256": "3f2c7f5125344bd008c3e28b834dd262de86379e7b6c4cbe9c39075bb61d6ddd"
+      "sha256": "4f011658730abe2fd1b3461462acc7aaf67a889d32dfdc4864e422afd719616b"
     },
     "audit-readers": {
       "patterns": [
         "docs/audits/*.py",
         "justfile"
       ],
-      "sha256": "f941a3d1deb6ba0fe78e75079b163a4c2855ed3afa0b1417d1ca3a74c5727c49"
+      "sha256": "71cf5d629952e885d8c93b55a116ac49aea10148914bd43478af8a24685ffd6f"
     },
     "rustdoc-readers": {
       "patterns": [
@@ -401,13 +401,13 @@
         "rust-toolchain.toml",
         ".cargo/*"
       ],
-      "sha256": "de88d0bcd39e0ad80bae847ba4de485b563a39abf532a47a75a201804077a9e3"
+      "sha256": "45c6ba4b4c719830db37a04b64da8d9013fb5ebb0a0409ba6fc1eb90543be8cc"
     },
     "dependency-command": {
       "patterns": [
         "justfile"
       ],
-      "sha256": "6d6ffa3863f13ed4a05fbdcc1a43d3fe40bfe01724dc5a0e84c616ab589bbeb7"
+      "sha256": "ea7f53dabfa860ab57e65be2707918ed385c4bb038ef1d00269e8c2cf78ac4db"
     },
     "status-test-readers": {
       "patterns": [
@@ -417,7 +417,7 @@
         "rust-toolchain.toml",
         "justfile"
       ],
-      "sha256": "e423e589dc19cdb6dbeca8299c550b47a9a8ef6230b7eb77d7b3eaf1c55c5e3a"
+      "sha256": "5d04cf151172b1acbfc963cd45bd4da935efb33497fef2e2ff6b630a7ca40e1b"
     }
   },
   "live_inputs": {
@@ -430,7 +430,7 @@
     "patterns": [
       "crates/*"
     ],
-    "membership_sha256": "a78e4274577ad94fdce29e2b879a63aee474f70e459d28ccf0df7036ae39d26d",
+    "membership_sha256": "b81a9cf77774980502f73e7a8a1ce84e81a69afafedcf89eb9c3f5825b72a5ea",
     "contract": "Broad census binds path membership only: new/removed crate paths fail closed. Existing crate-content edits select Rust through the crates/* input edge. A new cross-tree read in an existing source must register that reader and its input edge in the same change; exact-reader content digests then guard future drift."
   },
   "rust_package_inputs": {
