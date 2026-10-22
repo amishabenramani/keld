@@ -5,7 +5,7 @@
 use std::io;
 use std::os::unix::net::UnixStream;
 use std::os::unix::process::{CommandExt as _, ExitStatusExt as _};
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
@@ -16,10 +16,12 @@ use nix::sys::signal::kill;
 use nix::sys::wait::{WaitPidFlag, waitpid};
 use nix::unistd::{Pid, getpgid, getpgrp};
 
+use super::super::super::GenerationLease as _;
 use super::super::super::generation_host::GenerationHostAdmission;
 use super::super::super::process_group::{
-    LocalGroupWitness, install_test_attested_signal_fence, observe_group_identity,
-    terminate_attested_group, validate_guardian_child_group,
+    GroupIdentity, LocalGroupWitness, TestGroupSignalHookOwner, TestGroupSignalPoint,
+    install_test_group_signal_hook, observe_group_identity, terminate_attested_group,
+    validate_guardian_child_group,
 };
 use super::super::super::{
     BoundRoleGeneration, CONTROL_PREPARE, CONTROL_PREPARED, CONTROL_REGISTERED, CONTROL_SPAWNED,
@@ -28,7 +30,8 @@ use super::super::super::{
     RegisteredPrimaryGeneration, RevocationCause, RuntimeError, control_exchange, handshake_client,
     lock_generation, lock_recovery, parse_app_link, run_generation_host,
 };
-use super::super::{GuardedPrimaryLease, reap_guarded_child_before_clear};
+use super::super::GuardedPrimaryLease;
+use super::own_child_reap::{assert_classified_as_denied_signal, assert_signal_phase_eperm};
 
 struct OwnedChild(Child);
 
@@ -96,6 +99,22 @@ fn running_member(group: i32) -> OwnedChild {
         .stdout(Stdio::null())
         .stderr(Stdio::null());
     OwnedChild(command.spawn().expect("one exact test-owned group Child"))
+}
+
+// The original group leader. The Guardian lease takes its exact direct Child
+// for the shipping own-Child reap, so the fixture cannot also hold a kill
+// handle; it keeps only the leader's stdin. Closing that pipe makes the exact
+// original leader exit on its own: no PID, PGID or signal authority is used.
+fn exiting_leader() -> (OwnedChild, ChildStdin) {
+    let mut command = Command::new("/bin/cat");
+    command
+        .process_group(0)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    let mut leader = OwnedChild(command.spawn().expect("one exact test-owned group leader"));
+    let exit = leader.0.stdin.take().expect("original leader stdin pipe");
+    (leader, exit)
 }
 
 fn await_native_zombie(pid: u32, deadline: Instant) {
@@ -203,11 +222,7 @@ impl NativeKgc1Host {
             .expect("sole original Guardian KGC1 writer")
     }
 
-    fn assert_fatal_eof_and_retained_birth(
-        &mut self,
-        group_pid: u32,
-        original: super::super::super::process_group::GroupIdentity,
-    ) {
+    fn assert_fatal_eof_and_retained_birth(&mut self, group_pid: u32, original: GroupIdentity) {
         let eof = self
             .host_worker
             .join()
@@ -235,24 +250,16 @@ impl NativeKgc1Host {
     }
 }
 
-fn hold_exact_original_zombies(
-    leader: &Arc<Mutex<OwnedChild>>,
-    member: &mut OwnedChild,
-    group_pid: u32,
-) {
-    // The same birth-attested leader is held by its original Child owner.
-    // Kill only those exact Child objects; neither a stored numeric PID nor
-    // the original PGID grants signal authority to this test.
+fn hold_exact_original_zombies(leader_exit: ChildStdin, member: &mut OwnedChild, group_pid: u32) {
+    // The same birth-attested leader is held by the Guardian lease as its
+    // exact direct Child. Kill only the member's exact Child object and end
+    // the leader through its own stdin; neither a stored numeric PID nor the
+    // original PGID grants signal authority to this test.
     member
         .0
         .kill()
         .expect("kill exact original group member Child");
-    leader
-        .lock()
-        .expect("original leader")
-        .0
-        .kill()
-        .expect("kill exact original group leader Child");
+    drop(leader_exit);
     let deadline = Instant::now() + GUARDIAN_SHUTDOWN_DEADLINE;
     await_native_zombie(group_pid, deadline);
     await_native_zombie(member.0.id(), deadline);
@@ -273,18 +280,27 @@ fn assert_original_guardian_eperm(
     guardian_worker: &mut OwnedWorker<Result<(), RuntimeError>>,
     signal_released_at: Instant,
     group_pid: i32,
-) {
+) -> RuntimeError {
     let guardian_error = guardian_worker
         .join()
         .expect("Guardian lease worker joins")
         .expect_err("actual native EPERM must remain a failed Guardian revocation");
+    // The stack's D3 error contract: the typed signal-phase EPERM carries
+    // the absence owner's reason as context, so the kernel's raw EPERM is the
+    // wrapped source rather than `raw_os_error()` of the outer error.
+    assert_signal_phase_eperm(&guardian_error);
     assert!(
         matches!(
             guardian_error,
             RuntimeError::Lifecycle {
                 phase: "macOS guardian process-group signal",
                 ref source
-            } if source.raw_os_error() == Some(nix::libc::EPERM)
+            } if source
+                .get_ref()
+                .and_then(|context| context.source())
+                .and_then(|denied| denied.downcast_ref::<io::Error>())
+                .and_then(io::Error::raw_os_error)
+                == Some(nix::libc::EPERM)
         ),
         "retain exact original native signal-phase EPERM: {guardian_error}"
     );
@@ -302,12 +318,46 @@ fn assert_original_guardian_eperm(
         ),
         "Guardian must reap the original direct Child before returning signal-phase EPERM"
     );
+    guardian_error
+}
+
+// One-shot receipt on the shared `BeforeSignal` test hook: it runs on the
+// Guardian worker thread after the call's birth check and before its one
+// native group signal. The receipt re-reads the kernel birth itself, so it can
+// only fire for the exact original live leader, then holds the real signal
+// until the controller has produced the native zombie-only group. It
+// substitutes no PID, syscall, return value or clock.
+fn install_attested_signal_fence(
+    original: GroupIdentity,
+    observed: mpsc::SyncSender<()>,
+    release: mpsc::Receiver<()>,
+) -> TestGroupSignalHookOwner {
+    let mut fence = Some((observed, release));
+    install_test_group_signal_hook(
+        original.pid,
+        Box::new(move |point| {
+            if point != TestGroupSignalPoint::BeforeSignal {
+                return;
+            }
+            let Some((observed, release)) = fence.take() else {
+                return;
+            };
+            assert!(
+                observe_group_identity(original.pid).is_ok_and(|seen| seen == original),
+                "test signal observation must match the verified native birth"
+            );
+            observed.send(()).expect("original group birth checked");
+            release
+                .recv_timeout(GUARDIAN_SHUTDOWN_DEADLINE)
+                .expect("release authentic native group signal");
+        }),
+    )
 }
 
 #[test]
 fn native_attested_signal_eperm_causes_kgc1_eof_without_clearing_held_group() {
-    let leader = Arc::new(Mutex::new(running_member(0)));
-    let pid = leader.lock().expect("original leader owner").0.id();
+    let (mut leader, leader_exit) = exiting_leader();
+    let pid = leader.0.id();
     let raw = i32::try_from(pid).expect("native group identifier");
     assert!(
         raw > 1 && Pid::from_raw(raw) != getpgrp(),
@@ -338,21 +388,17 @@ fn native_attested_signal_eperm_causes_kgc1_eof_without_clearing_held_group() {
         group_pid: Some(pid),
         group_witness: witness,
         admission: None,
+        exec_withheld: false,
+        host_closed_registration: false,
+        refused_registration_retired: Arc::new(AtomicBool::new(false)),
     };
     let (checked_tx, checked_rx) = mpsc::sync_channel(1);
     let (signal_tx, signal_rx) = mpsc::sync_channel(1);
-    let original_leader = Arc::clone(&leader);
     let mut guardian_worker = OwnedWorker::new(thread::spawn(move || {
-        let _phase = install_test_attested_signal_fence(original, checked_tx, signal_rx);
-        lease.revoke_with_post_signal(
-            RevocationCause::Shutdown,
-            true,
-            |deadline| {
-                let mut leader = original_leader.lock().expect("original Child reap owner");
-                reap_guarded_child_before_clear(&mut leader.0, deadline)
-            },
-            terminate_attested_group,
-        )
+        let _phase = install_attested_signal_fence(original, checked_tx, signal_rx);
+        // The shipping supervisor path: the lease owns the exact direct Child
+        // and decides a denied group signal only after that Child's reap.
+        lease.revoke_with_child(RevocationCause::Shutdown, &mut leader.0)
     }));
     // This guard is declared after the worker so it releases the signal
     // barrier first during test unwinding, before the original Child owners
@@ -363,10 +409,11 @@ fn native_attested_signal_eperm_causes_kgc1_eof_without_clearing_held_group() {
         .recv_timeout(GUARDIAN_SHUTDOWN_DEADLINE)
         .expect("actual REVOKED ACK and original birth verification before signal");
     // The only forced scheduling cut follows a real, matching birth check.
-    hold_exact_original_zombies(&leader, &mut member, pid);
+    hold_exact_original_zombies(leader_exit, &mut member, pid);
     let signal_released_at = Instant::now();
     signal_release.release();
-    assert_original_guardian_eperm(&mut guardian_worker, signal_released_at, raw);
+    let guardian_error =
+        assert_original_guardian_eperm(&mut guardian_worker, signal_released_at, raw);
 
     host.assert_fatal_eof_and_retained_birth(pid, original);
     assert_eq!(
@@ -388,4 +435,7 @@ fn native_attested_signal_eperm_causes_kgc1_eof_without_clearing_held_group() {
     assert_eq!(getpgid(Some(Pid::from_raw(raw))), Err(Errno::ESRCH));
     assert_eq!(kill(Pid::from_raw(-raw), None), Err(Errno::ESRCH));
     terminate_attested_group(original).expect("native dual ESRCH after original Child reaps");
+    // Once the group is really gone, the one classifier accepts this very
+    // error as the exact signal-phase denial.
+    assert_classified_as_denied_signal(original, guardian_error);
 }
