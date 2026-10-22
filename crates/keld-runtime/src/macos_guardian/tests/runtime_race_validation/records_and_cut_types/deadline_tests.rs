@@ -88,5 +88,5 @@ fn actual_timely_private_record_retains_original_fields() {
     .expect("complete record in original clock");
     assert_eq!(record.kind, CONTROL_PREPARE);
     assert_eq!(record.attempt, 7);
-    assert!(record.payload.is_empty());
+    assert_eq!(record.payload, b"", "a PREPARE record carries no payload");
 }
