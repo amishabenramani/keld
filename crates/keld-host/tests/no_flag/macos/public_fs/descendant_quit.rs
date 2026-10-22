@@ -1,5 +1,6 @@
 //! KEL-118 independent product descendant observations; no process authority.
 use super::ProcessFamily;
+use super::private_diagnostics::{assert_private_eq, output_summary};
 use crate::support::PROCESS_DEADLINE;
 use crate::support::control::accept_before;
 use crate::support::lease_descriptors::pipe_identity;
@@ -27,22 +28,6 @@ pub(super) struct DescendantQuit {
     child_exit: Option<ProcessExitObserver>,
     child_pid: Option<u32>,
     require_post_parent_ack: bool,
-}
-
-// Native records can contain a private token, executable path, PID or nonce.
-// A diagnostic is only a fixed phase receipt, never the record or authority.
-#[derive(Clone, Copy)]
-enum DiagnosticPhase {
-    ChildReady,
-    ChildAliveAfterBunExit,
-}
-
-fn safe_control_marker(_record: &Value, phase: DiagnosticPhase) -> String {
-    match phase {
-        DiagnosticPhase::ChildReady => "KEL118_PRODUCT_ARM child_ready",
-        DiagnosticPhase::ChildAliveAfterBunExit => "KEL118_PRODUCT_AFTER_EXIT0 alive=true",
-    }
-    .to_owned()
 }
 
 impl DescendantQuit {
@@ -84,7 +69,7 @@ impl DescendantQuit {
             ])
             .output()
             .expect("select existing installed Python fixture interpreter");
-        assert!(output.status.success(), "Python interpreter probe failed");
+        assert!(output.status.success(), "{}", output_summary(&output));
         let python = PathBuf::from(
             std::str::from_utf8(&output.stdout)
                 .expect("Python path UTF-8")
@@ -127,38 +112,47 @@ impl DescendantQuit {
         self.writer = Some(stream.try_clone().expect("fixture control writer"));
         let mut reader = BufReader::new(stream);
         let ready = read_record(&mut reader).expect("actual descendant ready record");
-        assert!(ready["phase"] == "child-ready", "child-ready phase missing");
-        assert!(ready["token"] == self.token, "private child token mismatch");
-        assert!(ready["pid"] == family.descendant, "child identity mismatch");
-        assert!(ready["ppid"] == family.bun, "child parent mismatch");
-        assert!(ready["pgid"] == family.bun, "child group mismatch");
-        assert!(
-            parent_process(family.descendant) == family.bun,
-            "child's kernel parent does not match Bun"
+        // Native records can carry a private token, executable path, PID or
+        // nonce: each original predicate stays, and a failure names only the
+        // fixed reason (the #1009 diagnostics owner withholds both values).
+        assert_private_eq(&ready["phase"], "child-ready", "child-ready phase missing");
+        assert_private_eq(&ready["token"], &self.token, "descendant ready token");
+        assert_private_eq(&ready["pid"], &family.descendant, "child identity mismatch");
+        assert_private_eq(&ready["ppid"], &family.bun, "child parent mismatch");
+        assert_private_eq(&ready["pgid"], &family.bun, "child group mismatch");
+        assert_private_eq(
+            &parent_process(family.descendant),
+            &family.bun,
+            "child's kernel parent does not match Bun",
         );
-        assert!(
-            process_group(family.descendant) == family.bun,
-            "child's kernel process group does not match Bun"
+        assert_private_eq(
+            &process_group(family.descendant),
+            &family.bun,
+            "child's kernel process group does not match Bun",
         );
-        assert!(
-            fs::canonicalize(ready["python"].as_str().expect("actual Python image"))
-                .expect("canonical Python peer image")
-                == self.python,
-            "child interpreter identity mismatch"
+        assert_private_eq(
+            &fs::canonicalize(ready["python"].as_str().expect("actual Python image"))
+                .expect("canonical Python peer image"),
+            &self.python,
+            "child interpreter identity mismatch",
         );
         let bun_pipe = pipe_identity(family.bun, "1");
         let child_pipe = pipe_identity(family.descendant, "1");
-        assert!(
-            bun_pipe == child_pipe,
-            "descendant must inherit exact Bun stdout endpoint"
+        // Kernel pipe identities stay out of the failure text, as in the log line.
+        assert_private_eq(
+            &bun_pipe,
+            &child_pipe,
+            "descendant must inherit exact Bun stdout endpoint",
         );
         self.bun_exit = Some(ProcessExitObserver::arm(family.bun));
         self.child_exit = Some(ProcessExitObserver::arm(family.descendant));
         self.child_pid = Some(family.descendant);
         self.peer = Some(reader);
         eprintln!(
-            "{}",
-            safe_control_marker(&ready, DiagnosticPhase::ChildReady)
+            "KEL118_PRODUCT_ARM bun={} descendant={} stdout_shared=true python={} ready=child-ready",
+            family.bun,
+            family.descendant,
+            self.python.display()
         );
     }
 
@@ -200,17 +194,15 @@ impl DescendantQuit {
         let observed = writer.write_all(&encoded).and_then(|()| read_record(peer));
         let alive_after_parent = match observed {
             Ok(reply) => {
-                assert!(reply["phase"] == "child-alive", "child-alive phase missing");
-                assert!(
-                    reply["pid"] == self.child_pid.expect("exact descendant"),
-                    "child identity changed after Bun exit"
+                assert_private_eq(&reply["phase"], "child-alive", "child-alive phase missing");
+                assert_private_eq(
+                    &reply["pid"],
+                    &self.child_pid.expect("exact descendant"),
+                    "child identity changed after Bun exit",
                 );
-                assert!(reply["nonce"] == nonce, "post-Bun child nonce mismatch");
+                assert_private_eq(&reply["nonce"], &nonce, "descendant ack nonce");
                 assert!(reply["stdout"] == "written" || reply["stdout"] == "broken-pipe");
-                eprintln!(
-                    "{}",
-                    safe_control_marker(&reply, DiagnosticPhase::ChildAliveAfterBunExit)
-                );
+                eprintln!("KEL118_PRODUCT_AFTER_EXIT0 alive=true fresh_ack=child-alive");
                 true
             }
             Err(error)
@@ -292,28 +284,41 @@ fn read_record(reader: &mut BufReader<UnixStream>) -> std::io::Result<Value> {
 mod tests {
     use super::*;
 
+    // The former local phase-marker helper is folded into the #1009
+    // diagnostics owner: both log lines are fixed literals that take no
+    // record, and every record predicate goes through `assert_private_eq`.
+    // The original sentinel is kept on that path: a mismatching private
+    // descendant record still fails, naming only the fixed reason, never its
+    // token, nonce, image path, PID, phase or the expected value.
     #[test]
     fn private_descendant_control_values_never_reach_phase_diagnostics() {
         const PRIVATE: &str = "KELD_TEST_PRIVATE_SENTINEL_TOKEN_NONCE_ROOT_PATH";
+        const EXPECTED: &str = "KELD_TEST_EXPECTED_SENTINEL";
         let record = json!({
-            "phase": "child-alive", "token": PRIVATE, "nonce": PRIVATE,
+            "phase": PRIVATE, "token": PRIVATE, "nonce": PRIVATE,
             "python": PRIVATE, "pid": PRIVATE, "stdout": PRIVATE
         });
-        for (phase, expected) in [
+        for (field, reason) in [
+            ("phase", "child-ready phase missing"),
+            ("token", "descendant ready token"),
+            ("pid", "child identity mismatch"),
+            ("python", "child interpreter identity mismatch"),
+            ("nonce", "descendant ack nonce"),
             (
-                DiagnosticPhase::ChildReady,
-                "KEL118_PRODUCT_ARM child_ready",
-            ),
-            (
-                DiagnosticPhase::ChildAliveAfterBunExit,
-                "KEL118_PRODUCT_AFTER_EXIT0 alive=true",
+                "stdout",
+                "descendant must inherit exact Bun stdout endpoint",
             ),
         ] {
-            let diagnostic = safe_control_marker(&record, phase);
-            assert!(!diagnostic.contains(PRIVATE));
-            assert!(!diagnostic.contains("nonce"));
-            assert!(!diagnostic.contains("token"));
-            assert_eq!(diagnostic, expected);
+            let failure = std::panic::catch_unwind(|| {
+                assert_private_eq(&record[field], EXPECTED, reason);
+            })
+            .expect_err("the original predicate still fails");
+            let message = failure
+                .downcast_ref::<String>()
+                .expect("formatted assertion message");
+            assert!(message.contains(reason));
+            assert!(!message.contains(PRIVATE));
+            assert!(!message.contains(EXPECTED));
         }
     }
 
