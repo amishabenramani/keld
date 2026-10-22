@@ -88,6 +88,11 @@ const _: () = assert!(
 #[cfg(test)]
 thread_local! {
     static CONNECT_BUSY_WITNESS: RefCell<Option<mpsc::Sender<()>>> = const { RefCell::new(None) };
+    /// Test-only pause on this thread after a stream `ReadFile`/`WriteFile`
+    /// returned `ERROR_IO_PENDING` and `io_issue` was released, before the
+    /// completion wait. A terminal close can then run to completion while the
+    /// pending operation still uses its raw HANDLE.
+    static AFTER_PENDING_IO_ISSUE: Mutex<Option<TestConsumeGate>> = const { Mutex::new(None) };
 }
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
@@ -1298,6 +1303,8 @@ fn overlapped_io(
     if error.raw_os_error() != Some(ERROR_IO_PENDING.cast_signed()) {
         return Err(error);
     }
+    #[cfg(test)]
+    AFTER_PENDING_IO_ISSUE.with(wait_at_test_consume_gate);
     let wait_ms = duration_to_wait_ms(timeout);
     // SAFETY: event remains live and belongs to the live OVERLAPPED above.
     match unsafe { WaitForSingleObject(event.raw(), wait_ms) } {
@@ -1969,29 +1976,23 @@ mod cancellation_tests {
         );
     }
 
-    /// Native failure-first: a terminal close must not invalidate a pipe
-    /// HANDLE already borrowed by an in-flight reader before `ReadFile` starts.
-    #[expect(
-        clippy::too_many_lines,
-        reason = "the Win32 source-HANDLE pin and terminal-close interleaving remain observable in one bounded scenario"
-    )]
-    #[test]
-    fn terminal_close_keeps_borrowed_stream_handle_live_until_read_is_observed() {
-        use std::io::Read as _;
-        use std::os::windows::io::AsRawHandle as _;
-        use std::sync::{PoisonError, mpsc};
-        use std::thread;
-
-        use crate::bootstrap::{TestConsumeGate, random_test_locator};
-        use windows_sys::Win32::Foundation::GetHandleInformation;
-
+    /// Warms the native bind/accept/close path first: the first pipe/ACL lookup
+    /// can initialize process-wide OS caches, so the returned handle census then
+    /// counts only the caller's race. Returns that census, a real server accepted
+    /// by a silent client, the client, and the server stream.
+    fn warmed_silent_server_stream(
+        tag: &str,
+    ) -> (
+        u32,
+        super::WindowsNamedPipeServer,
+        super::WindowsNamedPipeStream,
+        super::WindowsNamedPipeStream,
+    ) {
         use super::{WaitOutcome, WindowsNamedPipeServer, process_handle_count};
+        use crate::bootstrap::random_test_locator;
 
-        // The first native pipe/ACL lookup can initialize process-wide OS
-        // caches. Warm the same bind/accept/close path before measuring leaks;
-        // the comparison then counts only this adversarial race's handles.
         let warm_endpoint = format!(
-            r"\\.\pipe\keld-gh910-warm-{}",
+            r"\\.\pipe\keld-gh910-{tag}-warm-{}",
             random_test_locator().expect("fresh native warmup pipe")
         );
         let warm_server = WindowsNamedPipeServer::bind(&warm_endpoint).expect("warm native server");
@@ -2009,7 +2010,7 @@ mod cancellation_tests {
 
         let baseline = process_handle_count().expect("warmed-up kernel handle count");
         let endpoint = format!(
-            r"\\.\pipe\keld-gh910-close-{}",
+            r"\\.\pipe\keld-gh910-{tag}-{}",
             random_test_locator().expect("fresh native pipe identity")
         );
         let server = WindowsNamedPipeServer::bind(&endpoint).expect("bind named pipe");
@@ -2020,7 +2021,25 @@ mod cancellation_tests {
                 .expect("real server accepted silent client"),
             WaitOutcome::Ready
         );
-        let mut stream = server.stream().expect("live server stream");
+        let stream = server.stream().expect("live server stream");
+        (baseline, server, client, stream)
+    }
+
+    /// Native failure-first: a terminal close must not invalidate a pipe
+    /// HANDLE already borrowed by an in-flight reader before `ReadFile` starts.
+    #[test]
+    fn terminal_close_keeps_borrowed_stream_handle_live_until_read_is_observed() {
+        use std::io::Read as _;
+        use std::os::windows::io::AsRawHandle as _;
+        use std::sync::{PoisonError, mpsc};
+        use std::thread;
+
+        use crate::bootstrap::TestConsumeGate;
+        use windows_sys::Win32::Foundation::GetHandleInformation;
+
+        use super::process_handle_count;
+
+        let (baseline, server, client, mut stream) = warmed_silent_server_stream("close");
         stream
             .set_read_timeout(Some(Duration::from_millis(850)))
             .expect("bounded native read");
@@ -2112,6 +2131,106 @@ mod cancellation_tests {
             process_handle_count().expect("final native handle count"),
             baseline,
             "terminal close and a racing read must not leak any pipe/event handle"
+        );
+    }
+
+    /// Native failure-first (GH-910): once `ReadFile` is pending and `io_issue`
+    /// is released, a terminal close runs to completion, yet the exact raw
+    /// HANDLE the pending read still passes to `GetOverlappedResult` and
+    /// `CancelIoEx` must stay valid until that read observes its completion.
+    /// Removing the read-side `Arc` pin makes the close free the HANDLE here.
+    #[test]
+    fn terminal_close_after_pending_read_issue_keeps_the_read_handle_valid() {
+        use std::io::Read as _;
+        use std::os::windows::io::AsRawHandle as _;
+        use std::sync::{PoisonError, mpsc};
+        use std::thread;
+
+        use crate::bootstrap::TestConsumeGate;
+        use windows_sys::Win32::Foundation::GetHandleInformation;
+
+        use super::{AFTER_PENDING_IO_ISSUE, process_handle_count};
+
+        let (baseline, server, client, mut stream) = warmed_silent_server_stream("pending");
+        // Kill switch only: the terminal close cancels the read long before.
+        stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .expect("bounded native read");
+
+        let (entered, entered_rx) = mpsc::sync_channel(1);
+        let (release_tx, release) = mpsc::channel();
+        let (read_tx, read_rx) = mpsc::sync_channel(1);
+        let reader = thread::spawn(move || {
+            AFTER_PENDING_IO_ISSUE.with(|gate| {
+                *gate.lock().unwrap_or_else(PoisonError::into_inner) =
+                    Some(TestConsumeGate { entered, release });
+            });
+            let mut byte = [0_u8; 1];
+            read_tx
+                .send(stream.read(&mut byte))
+                .expect("send native read observation");
+        });
+        entered_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("the silent peer's ReadFile is pending with io_issue released");
+
+        let raw = server
+            .inspect_owned_pipe(|owned| Ok(owned.as_raw_handle()))
+            .expect("native handle identity before terminal close");
+        let mut flags = 0_u32;
+        // SAFETY: the server still owns this pipe HANDLE; flags is writable.
+        let valid_before = unsafe { GetHandleInformation(raw.cast(), &raw mut flags) } != 0;
+
+        // The parked read must already have released io_issue; otherwise the
+        // close below would block behind it. Fail instead of hanging.
+        if server.inner.io_issue.try_lock().is_err() {
+            release_tx
+                .send(())
+                .expect("release the reader before failing");
+            reader.join().expect("native reader joined");
+            panic!("a pending ReadFile still holds io_issue at its completion wait");
+        }
+        // io_issue is free, so the terminal close is not held behind the read:
+        // it cancels the pending I/O and drops the server's HANDLE reference
+        // while the read has not yet observed its completion.
+        let terminal = server.close_terminal();
+        let server_released = server
+            .inspect_owned_pipe(|owned| Ok(owned.as_raw_handle()))
+            .is_err();
+        // SAFETY: GetHandleInformation only queries the exact captured HANDLE
+        // value and writes the live `flags`; a freed, not yet reused value fails
+        // with ERROR_INVALID_HANDLE. No ownership transfer or dereference occurs.
+        let valid_while_pending = unsafe { GetHandleInformation(raw.cast(), &raw mut flags) } != 0;
+
+        release_tx
+            .send(())
+            .expect("release the pending reader after the close completed");
+        let observation = read_rx
+            .recv_timeout(Duration::from_secs(3))
+            .expect("native read has a finite terminal outcome");
+        reader.join().expect("native reader joined");
+        drop(client);
+        drop(server);
+
+        terminal.expect("terminal close completes while the read is pending");
+        assert!(valid_before, "original named pipe HANDLE was never live");
+        assert!(
+            server_released,
+            "terminal close must drop the server's own HANDLE reference"
+        );
+        assert!(
+            valid_while_pending,
+            "terminal close freed the HANDLE a pending ReadFile still uses"
+        );
+        match observation {
+            Ok(0) => {}
+            Err(error) if matches!(error.raw_os_error(), Some(995 | 109 | 232 | 233)) => {}
+            other => panic!("pending read used a disposed/wrong HANDLE: {other:?}"),
+        }
+        assert_eq!(
+            process_handle_count().expect("final native handle count"),
+            baseline,
+            "terminal close and a pending read must not leak any pipe/event handle"
         );
     }
 
