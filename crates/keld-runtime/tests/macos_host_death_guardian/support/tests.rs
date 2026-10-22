@@ -1,9 +1,11 @@
 //! Native controller-event and original-birth test-ownership negative controls.
-use super::{CycleCleanup, Fixture, accept_line_before, retain_parented_birth};
+use super::{
+    CycleCleanup, Fixture, accept_line_before, retain_group_member_birth, retain_parented_birth,
+};
 use nix::unistd::{Pid, getpgid, getpgrp};
 use std::io::{Read as _, Write as _};
 use std::os::unix::net::{UnixListener, UnixStream};
-use std::os::unix::process::CommandExt as _;
+use std::os::unix::process::{CommandExt as _, ExitStatusExt as _};
 use std::process::{Child, Command, Stdio};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
@@ -149,6 +151,114 @@ fn original_kernel_birth_allows_cleanup_of_exact_test_owned_leaker() {
         Some(9),
         "valid original kernel birth must retain safe leaker cleanup"
     );
+}
+
+fn same_group_member(leader: &OwnedSentinel) -> OwnedSentinel {
+    let group = i32::try_from(leader.0.id()).expect("valid leader PID");
+    let member = OwnedSentinel(
+        Command::new("/bin/cat")
+            .process_group(group)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("own a live member of the leader's native group"),
+    );
+    let raw = i32::try_from(member.0.id()).expect("valid member PID");
+    assert_eq!(
+        getpgid(Some(Pid::from_raw(raw))),
+        Ok(Pid::from_raw(group)),
+        "member must really be in the original group"
+    );
+    member
+}
+
+fn reap_leader(leader: &mut OwnedSentinel) {
+    leader.0.kill().expect("kill exact test-owned leader");
+    leader.0.wait().expect("reap exact test-owned leader");
+}
+
+// Bounded observation of the owned member's own exit; the deadline is only a
+// kill switch, and the owned Drop still kills and reaps a survivor.
+fn await_member_signal(member: &mut OwnedSentinel) -> Option<i32> {
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        match member.0.try_wait().expect("inspect owned member") {
+            Some(status) => return status.signal(),
+            None if Instant::now() < deadline => std::thread::yield_now(),
+            None => return None,
+        }
+    }
+}
+
+fn reaped_leader_cleanup(leader_birth: super::NativeBirth, member: super::NativeBirth) {
+    let host = Command::new("/usr/bin/true")
+        .spawn()
+        .expect("own completed harmless host");
+    let mut cleanup = CycleCleanup::new(host);
+    cleanup.group = Some(leader_birth.pid);
+    cleanup.group_birth = Some(leader_birth);
+    cleanup.descendant_birth = Some(member);
+    drop(cleanup);
+}
+
+#[test]
+fn reaped_leader_cleanup_kills_group_through_exact_attested_member() {
+    let mut leader = native_sentinel();
+    let leader_birth = retain_parented_birth(leader.0.id(), std::process::id());
+    let mut member = same_group_member(&leader);
+    let member_birth =
+        retain_group_member_birth(member.0.id(), std::process::id(), leader_birth.pid);
+    reap_leader(&mut leader);
+    reaped_leader_cleanup(leader_birth, member_birth);
+    assert_eq!(
+        await_member_signal(&mut member),
+        Some(9),
+        "a reaped leader with a live attested same-group member keeps group cleanup"
+    );
+}
+
+#[test]
+fn altered_member_birth_cannot_signal_reaped_leader_group() {
+    let mut leader = native_sentinel();
+    let leader_birth = retain_parented_birth(leader.0.id(), std::process::id());
+    let mut member = same_group_member(&leader);
+    let mut stale = retain_group_member_birth(member.0.id(), std::process::id(), leader_birth.pid);
+    stale.started_usec = stale.started_usec.wrapping_add(1);
+    reap_leader(&mut leader);
+    reaped_leader_cleanup(leader_birth, stale);
+    assert_sentinel_echo(&mut member);
+}
+
+// The original group still has a live (unattested) member, so a cleanup that
+// accepted any valid birth as a member witness would visibly kill it.
+#[test]
+fn member_birth_outside_the_original_group_cannot_signal() {
+    let mut leader = native_sentinel();
+    let leader_birth = retain_parented_birth(leader.0.id(), std::process::id());
+    let mut in_group = same_group_member(&leader);
+    let mut outsider = native_sentinel();
+    let outsider_birth = retain_parented_birth(outsider.0.id(), std::process::id());
+    reap_leader(&mut leader);
+    reaped_leader_cleanup(leader_birth, outsider_birth);
+    assert_sentinel_echo(&mut in_group);
+    assert_sentinel_echo(&mut outsider);
+}
+
+#[test]
+fn retained_birth_requires_the_actual_direct_parent_and_group() {
+    let sentinel = native_sentinel();
+    let pid = sentinel.0.id();
+    let me = std::process::id();
+    assert!(
+        std::panic::catch_unwind(|| retain_parented_birth(pid, 1)).is_err(),
+        "a forged parent must not yield a retained birth"
+    );
+    assert!(
+        std::panic::catch_unwind(|| retain_group_member_birth(pid, me, me)).is_err(),
+        "a member outside the expected group must not yield a retained birth"
+    );
+    assert_eq!(retain_parented_birth(pid, me).pid, pid);
 }
 
 #[test]
