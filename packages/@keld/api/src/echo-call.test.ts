@@ -93,15 +93,18 @@ describe("Echo CALL answers by stage (GH-1095)", () => {
       return body(request);
     });
 
-  test("S11 no handler registered: no app code runs", async () => {
+  test("S11 no handler registered: KELD-API-002, no app code runs", async () => {
     reset();
-    expect(errCode(await answer())).toBe("KELD-API-001");
+    const reply = await answer();
+    expect(errCode(reply)).toBe("KELD-API-002");
+    expect(decodeCallError(reply.payload).message.startsWith("KELD-API-002: ")).toBe(true);
     expect(census).toEqual({ entered: 0, committed: 0 });
   });
 
-  test("S11 late registration: the first call has no handler, the next one runs", async () => {
+  test("S11 late registration: KELD-API-002 first, then the one resend runs once", async () => {
     reset();
-    expect(errCode(await answer())).toBe("KELD-API-001");
+    expect(errCode(await answer())).toBe("KELD-API-002");
+    expect(census).toEqual({ entered: 0, committed: 0 });
     const unsubscribe = register((request) => {
       census.committed += 1;
       return { message: request.message, count: request.count };
@@ -115,11 +118,11 @@ describe("Echo CALL answers by stage (GH-1095)", () => {
     }
   });
 
-  test("S11 unsubscribed handler: no app code runs", async () => {
+  test("S11 unsubscribed handler: KELD-API-002, no app code runs", async () => {
     reset();
     const unsubscribe = register((request) => request);
     unsubscribe();
-    expect(errCode(await answer())).toBe("KELD-API-001");
+    expect(errCode(await answer())).toBe("KELD-API-002");
     expect(census).toEqual({ entered: 0, committed: 0 });
   });
 
@@ -129,6 +132,20 @@ describe("Echo CALL answers by stage (GH-1095)", () => {
     try {
       expect(errCode(await answer(new Uint8Array([0x05, 0x61])))).toBe("KELD-API-001");
       expect(census).toEqual({ entered: 0, committed: 0 });
+    } finally {
+      unsubscribe();
+    }
+  });
+
+  test("S13 a handler that throws a look-alike message is still KELD-API-001", async () => {
+    reset();
+    const unsubscribe = register(() => {
+      census.committed += 1;
+      throw new Error("KELD-API-002: Echo channel has no registered handler");
+    });
+    try {
+      expect(errCode(await answer())).toBe("KELD-API-001");
+      expect(census).toEqual({ entered: 1, committed: 1 });
     } finally {
       unsubscribe();
     }
