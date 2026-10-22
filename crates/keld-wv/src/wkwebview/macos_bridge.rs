@@ -36,6 +36,8 @@ const ADMITTED_CHANNEL_PLACEHOLDER: &str = "__KELD_ADMITTED_CHANNEL__";
 const PAGE_FACADE_SCRIPT: &str = r#"
 (() => {
   "use strict";
+  // Captured at document start, before any page script can replace them.
+  const Error = globalThis.Error;
   const post = window.postMessage.bind(window);
   const freeze = Object.freeze.bind(Object);
   const define = Object.defineProperty.bind(Object);
@@ -696,7 +698,7 @@ impl MacRendererBridge {
 #[derive(Debug, Serialize)]
 struct PageOutcome {
     request: u32,
-    document: String,
+    document: Option<String>,
     ok: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     payload: Option<Vec<u8>>,
@@ -715,7 +717,7 @@ impl PageOutcome {
                 request, payload, ..
             } => Self {
                 request,
-                document,
+                document: Some(document),
                 ok: true,
                 payload: Some(payload),
                 code: None,
@@ -728,7 +730,7 @@ impl PageOutcome {
                 ..
             } => Self {
                 request,
-                document,
+                document: Some(document),
                 ok: false,
                 payload: None,
                 code: Some(code),
@@ -742,7 +744,7 @@ impl PageOutcome {
     fn navigation_reset(cleared: PendingRequest) -> Self {
         Self {
             request: cleared.request,
-            document: cleared.document,
+            document: Some(cleared.document),
             ok: false,
             payload: None,
             code: Some(String::from("KELD-WV-013")),
@@ -756,7 +758,7 @@ impl PageOutcome {
     fn refused(request: u32, document: &str, detail: &str) -> Self {
         Self {
             request,
-            document: document.to_owned(),
+            document: Some(document.to_owned()),
             ok: false,
             payload: None,
             code: Some(String::from("KELD-WV-011")),
@@ -1185,7 +1187,7 @@ mod tests {
     fn navigation_reset_result_settles_only_the_live_document_once() {
         let reset = PageOutcome {
             request: 0,
-            document: NONCE_A.to_owned(),
+            document: Some(NONCE_A.to_owned()),
             ok: false,
             payload: None,
             code: Some(String::from("KELD-WV-013")),
