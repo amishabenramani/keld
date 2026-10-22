@@ -20,6 +20,9 @@ type Fixture = { jobs: Record<string, FixtureJob>; env?: Record<string, unknown>
 const source = readFileSync(join(import.meta.dir, "../.github/workflows/ci.yml"), "utf8");
 const windowsMediaOracle = readFileSync(join(import.meta.dir, "../crates/keld-wv/tests/windows_media_guard.ps1"));
 const selectedRustToolchain = readFileSync(join(import.meta.dir, "../rust-toolchain.toml"), "utf8");
+const windowsRustCacheNormalizer = readFileSync(
+  join(import.meta.dir, "./ci_windows_rust_cache.ps1"), "utf8",
+);
 // Both versions come from the live pin, so a toolchain bump never turns a
 // mutation below into a silent no-op.
 const selectedRust = String(
@@ -349,6 +352,16 @@ function assertWindowsCacheBoundary(workflow: Fixture, jobName: string): void {
       !String(prep.if ?? "").includes("matrix.os == 'windows-latest'")) {
     throw new Error(`${jobName}: toolchain removal must be Windows-only`);
   }
+  if (jobName === "check") {
+    const nativeTest = steps.findIndex(s => s.name === "Windows Rust cache normalization contract tests");
+    const testStep = steps[nativeTest];
+    if (!(rust < nativeTest && nativeTest < prepare) ||
+        testStep?.shell !== "pwsh" ||
+        testStep?.run !== "pwsh -File tools/test_ci_windows_rust_cache.ps1" ||
+        !String(testStep.if ?? "").includes("matrix.os == 'windows-latest'")) {
+      throw new Error("Windows native PowerShell negatives must run before normalization");
+    }
+  }
   const inputs = (steps[cache]!.with ?? {}) as Record<string, unknown>;
   const hashInputs = String(inputs["env-vars"] ?? "");
   for (const input of ["CARGO", "CC", "CFLAGS", "CXX", "CMAKE", "RUST", "ImageOS", "ImageVersion"]) {
@@ -369,12 +382,52 @@ test("Windows cache key pilot retains compiler, flags, lockfile and hosted image
     noPrep.jobs[job]!.steps = noPrep.jobs[job]!.steps.filter(s =>
       s.name !== "Normalize hosted Windows Rust cache toolchains");
     expect(() => assertWindowsCacheBoundary(noPrep, job)).toThrow("normalization");
+    if (job === "check") {
+      const noNativeTests = fixture();
+      noNativeTests.jobs.check!.steps = noNativeTests.jobs.check!.steps.filter(s =>
+        s.name !== "Windows Rust cache normalization contract tests");
+      expect(() => assertWindowsCacheBoundary(noNativeTests, job)).toThrow("PowerShell negatives");
+    }
     const noImage = fixture();
     const cache = noImage.jobs[job]!.steps.find(s =>
       String(s.uses ?? "").startsWith("Swatinem/rust-cache@"))!;
     (cache.with as Record<string, unknown>)["env-vars"] = "CARGO CC CFLAGS CXX CMAKE RUST";
     expect(() => assertWindowsCacheBoundary(noImage, job)).toThrow("ImageOS");
   }
+});
+
+test("Windows cache normalizer cannot be replaced by a no-op or delete the selected compiler", () => {
+  // This source-level guard detects removal or obvious bypass of the
+  // fail-closed boundary. It is NOT a Windows execution/cache-hit oracle.
+  function checkNormalizer(source: string): void {
+    const lines = new Set(source.split(/\r?\n/).map(line => line.trim()));
+    for (const line of [
+      "$ErrorActionPreference = 'Stop'",
+      "Set-StrictMode -Version Latest",
+      "$env:RUNNER_ENVIRONMENT -ne 'github-hosted' -or",
+      "$env:RUNNER_OS -ne 'Windows') {",
+      "$pinMatches = [regex]::Matches($toolchainManifest, '(?m)^\\s*channel\\s*=\\s*\"(?<version>\\d+\\.\\d+\\.\\d+)\"\\s*(?:#.*)?$')",
+      "if ($pinMatches.Count -ne 1) { throw 'Expected one exact Rust compiler channel in rust-toolchain.toml' }",
+      "if ($active -ne $expectedToolchain) { throw \"Wrong active Rust compiler: expected $expectedToolchain, got $active\" }",
+      "if ($releaseLines.Count -ne 1 -or $releaseLines[0] -ne \"release: $pin\") {",
+      "if ($before -notcontains $active) { throw \"Active Rust toolchain $active is missing from inventory\" }",
+      "if ($toolchain -eq $active) { continue }",
+      "& rustup toolchain uninstall $toolchain",
+      "if ($LASTEXITCODE -ne 0) { throw \"Could not uninstall unrelated hosted toolchain $toolchain\" }",
+      "if ($after.Count -ne 1 -or $after[0] -ne $active) {",
+      "$explicitCompiler = @(& rustup run $active rustc -vV 2>&1)",
+    ]) {
+      if (!lines.has(line)) throw new Error(`Windows normalization safety line removed: ${line}`);
+    }
+  }
+  expect(() => checkNormalizer(windowsRustCacheNormalizer)).not.toThrow();
+  expect(() => checkNormalizer(windowsRustCacheNormalizer.replace(
+    "& rustup toolchain uninstall $toolchain", "Write-Host $toolchain"))).toThrow("toolchain uninstall");
+  expect(() => checkNormalizer(windowsRustCacheNormalizer.replace(
+    "if ($toolchain -eq $active) { continue }", "# selected toolchain now unprotected"))).toThrow("eq $active");
+  expect(() => checkNormalizer(windowsRustCacheNormalizer.replace(
+    "if ($active -ne $expectedToolchain) { throw \"Wrong active Rust compiler: expected $expectedToolchain, got $active\" }",
+    "# wrong active compiler silently allowed"))).toThrow("expectedToolchain");
 });
 
 test("Windows media oracle matches its reviewed full-file digest", () => {

@@ -15,12 +15,38 @@ if ([string]::IsNullOrWhiteSpace($env:ImageOS) -or
     throw 'Missing ImageOS/ImageVersion: cache would not invalidate on a Windows runner image change'
 }
 
+$manifestPath = Join-Path (Split-Path -Parent $PSScriptRoot) 'rust-toolchain.toml'
+$toolchainManifest = [System.IO.File]::ReadAllText($manifestPath)
+if ($toolchainManifest -notmatch '(?m)^\[toolchain\][ \t]*$') {
+    throw 'rust-toolchain.toml is missing the selected [toolchain] table'
+}
+$pinMatches = [regex]::Matches($toolchainManifest, '(?m)^\s*channel\s*=\s*"(?<version>\d+\.\d+\.\d+)"\s*(?:#.*)?$')
+if ($pinMatches.Count -ne 1) { throw 'Expected one exact Rust compiler channel in rust-toolchain.toml' }
+$pin = $pinMatches[0].Groups['version'].Value
+
+$actualCompiler = @(& rustc -vV 2>&1)
+if ($LASTEXITCODE -ne 0) { throw 'Active rustc -vV failed' }
+$releaseLines = @($actualCompiler | Where-Object { $_.ToString().StartsWith('release: ') })
+if ($releaseLines.Count -ne 1 -or $releaseLines[0] -ne "release: $pin") {
+    throw "Active Rust compiler does not match pinned version $pin"
+}
+$hostLines = @($actualCompiler | Where-Object { $_.ToString().StartsWith('host: ') })
+if ($hostLines.Count -ne 1) { throw 'Cannot identify active Rust target triple' }
+$compilerHost = $hostLines[0].ToString().Substring('host: '.Length).Trim()
+if ($compilerHost -notmatch '^[A-Za-z0-9_-]+$') { throw 'Invalid Rust target triple' }
+$expectedToolchain = "$pin-$compilerHost"
+
 $activeOutput = @(& rustup show active-toolchain 2>&1)
 if ($LASTEXITCODE -ne 0 -or $activeOutput.Count -ne 1) {
     throw 'Cannot identify the active compiler selected by rust-toolchain.toml'
 }
 $active = ($activeOutput[0].ToString().Trim() -split '\s+')[0]
 if ([string]::IsNullOrWhiteSpace($active)) { throw 'Active Rust toolchain name is empty' }
+if ($active -ne $expectedToolchain) { throw "Wrong active Rust compiler: expected $expectedToolchain, got $active" }
+$explicitCompiler = @(& rustup run $active rustc -vV 2>&1)
+if ($LASTEXITCODE -ne 0 -or ($actualCompiler -join "`n") -ne ($explicitCompiler -join "`n")) {
+    throw "Selected rustc differs from the pinned compiler $active"
+}
 
 $beforeOutput = @(& rustup toolchain list --quiet 2>&1)
 if ($LASTEXITCODE -ne 0) { throw 'Failed to list installed Rust toolchains' }
@@ -40,11 +66,5 @@ if ($after.Count -ne 1 -or $after[0] -ne $active) {
     throw "Cache Rust toolchain inventory must contain only $active; found: $($after -join ', ')"
 }
 
-$actualCompiler = @(& rustc -vV 2>&1)
-if ($LASTEXITCODE -ne 0) { throw 'Active rustc -vV failed' }
-$explicitCompiler = @(& rustup run $active rustc -vV 2>&1)
-if ($LASTEXITCODE -ne 0 -or ($actualCompiler -join "`n") -ne ($explicitCompiler -join "`n")) {
-    throw "Selected rustc differs from the pinned compiler $active"
-}
 Write-Host "Rust cache compiler: $active; hosted image: $env:ImageOS/$env:ImageVersion"
 Write-Host ($actualCompiler -join "`n")

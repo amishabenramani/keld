@@ -196,6 +196,10 @@ jobs:
         with:
           toolchain: 1.99.1
           components: rustfmt, clippy
+      - name: Windows Rust cache normalization contract tests
+        if: matrix.os == 'windows-latest'
+        shell: pwsh
+        run: pwsh -File tools/test_ci_windows_rust_cache.ps1
       - name: Normalize hosted Windows Rust cache toolchains
         if: matrix.os == 'windows-latest'
         shell: pwsh
