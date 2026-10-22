@@ -17,7 +17,7 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parents[2]
-PARENT = "54ac81e57f676a7805520b2cc7cb12a0fa3d13e9"
+PARENT = "7cf35e99dd02f4aa58158eb0b40f9a4ea82e0224"
 BASELINE = "899e287ea487f38ec1cd347f7c9db8f1927348ef"
 SOURCE = "77b1c5aef9202a6cc0d84195fc1f4c32e1eb1cba"
 PARENT_REL = "docs/audits/macos-guardian-2026-10-19-2c488b9a-next8"
@@ -36,7 +36,7 @@ LIMITED = "source-reviewed-limited-batch7"
 REVIEWED = {
     PATH_ROOT + "control_acknowledgement.rs": (24, 51, 63, 68, 85, 95, 101, 117, 125, 149, 162, 190, 225, 238, 250),
     PATH_ROOT + "generation_control_wire.rs": (15, 20, 28, 35, 41, 53, 57, 66, 70, 74, 79, 100, 104, 110, 118, 126, 136, 146, 152, 168, 195, 208),
-    PATH_ROOT + "generic_pre_registration_crash.rs": (22, 28, 39, 60, 65, 87, 92, 107, 110, 126, 130, 136, 142, 151, 156, 163),
+    PATH_ROOT + "generic_pre_registration_crash.rs": (22, 28, 39, 60, 65, 87, 92, 107, 110, 124, 126, 130, 136, 142, 147, 151, 156, 163),
     PATH_ROOT + "generic_pre_registration_crash/cleanup_authority.rs": (15, 27, 35, 43, 46, 58, 67, 70, 85),
     PATH_ROOT + "initial_generation_adversaries.rs": (23, 33, 41, 49, 51, 63, 79, 89, 102, 105, 108, 117, 123, 125, 145, 154, 160, 175, 185, 199, 202),
     PATH_ROOT + "registration_record_adversaries.rs": (21, 31, 32, 40, 45, 49, 64, 76, 79, 80, 89, 94, 99, 106, 111, 116, 121, 126),

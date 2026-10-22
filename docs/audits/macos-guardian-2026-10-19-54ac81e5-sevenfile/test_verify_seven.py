@@ -37,9 +37,11 @@ class SevenSourceEvidenceTests(unittest.TestCase):
         mutation(summary)
         path.write_text(json.dumps(summary))
 
-    def assert_invalid(self) -> None:
-        with self.assertRaises(Invalid):
+    def assert_invalid(self, expected: str | None = None) -> None:
+        with self.assertRaises(Invalid) as caught:
             verify(ROOT, self.folder)
+        if expected is not None:
+            self.assertIn(expected, str(caught.exception))
 
     def change_citation(self, basename: str, old: str, new: str) -> None:
         def shrink(rows):
@@ -107,6 +109,16 @@ class SevenSourceEvidenceTests(unittest.TestCase):
     def test_original_guardian_birth_signal_citation_required(self) -> None:
         self.change_citation("generic_pre_registration_crash.rs", "95-131", "95-126")
         self.assert_invalid()
+
+    def test_kill_instant_capture_citation_required(self) -> None:
+        # killed_at (:124) is taken before the attested SIGKILL; dropping it from the cited spans must be refused.
+        self.change_citation("generic_pre_registration_crash.rs", "95-131", "95-123,125-131")
+        self.assert_invalid("line 124 omitted")
+
+    def test_post_kill_three_second_bound_citation_required(self) -> None:
+        # The corrected record rests on the post-loop killed_at.elapsed() < 3s assertion (:147-150).
+        self.change_citation("generic_pre_registration_crash.rs", "132-168", "132-146,151-168")
+        self.assert_invalid("line 147 omitted")
 
     def test_wrong_birth_stranger_signal_denial_citation_required(self) -> None:
         self.change_citation("cleanup_authority.rs", "26-52", "26-43")
