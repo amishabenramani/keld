@@ -24,8 +24,10 @@ const FACTORY_ERROR_GATE_ENV: &str = "KELD_TEST_GUARDED_FACTORY_ERROR_GATE";
 const BUN_MARKER_ENV: &str = "KELD_TEST_GUARDED_EARLY_BUN_MARKER";
 const VERIFIED_BUN_ENV: &str = "KELD_TEST_GUARDED_VERIFIED_BUN_PATH";
 const POST_S_SPAWN_DENIAL_ENV: &str = "KELD_TEST_GUARDED_POST_S_SPAWN_DENIAL";
-// Negative control value: the host denies recovery WITHOUT writing S.
+// Negative control values: the host denies recovery WITHOUT writing S, or
+// denies it through an accepted Quit (Q/KQA) instead of an orderly S.
 const POST_DENIAL_WITHOUT_S: &str = "deny-without-s";
+const POST_DENIAL_BY_QUIT: &str = "deny-by-quit";
 const ROLE_TEST: &str =
     "macos_guardian::tests::bootstrap_shutdown_race::immediate_shutdown_guardian_role";
 
@@ -137,7 +139,7 @@ fn immediate_shutdown_guardian_role() {
             Ok(_) => eprintln!("KELD_TEST_POST_S_SPAWN_ORDERLY"),
             Err(error) => eprintln!("KELD_TEST_POST_S_SPAWN_TERMINAL {error}"),
         }
-        if case == POST_DENIAL_WITHOUT_S {
+        if case == POST_DENIAL_WITHOUT_S || case == POST_DENIAL_BY_QUIT {
             let error = result.expect_err("a refused spawn without host S is not orderly");
             assert!(
                 error

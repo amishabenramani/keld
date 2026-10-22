@@ -456,6 +456,12 @@ fn supervisor_outcome_failures(
                 && (host.orderly_requested || !host.host_dead) =>
         {
             let orderly = if host.orderly_requested {
+                // The loop already consumed S and sent KSA. Skip the bounded
+                // host-EOF wait the read-after-failure path performs: the
+                // refused child never executed, was killed and reaped, and
+                // left no process, so containment does not depend on it.
+                // The host still owns the next step (it drops its writer
+                // after KSA and reaps this Guardian).
                 Ok(true)
             } else {
                 observe_failed_initial_preparation_shutdown(liveness, quit_ack)

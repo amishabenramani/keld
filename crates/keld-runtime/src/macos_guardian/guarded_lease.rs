@@ -68,6 +68,12 @@ where
                 ));
             }
         };
+        // The factory MUST NOT install its own `pre_exec` hook. std runs such
+        // hooks in registration order, so one added here would run BEFORE
+        // the SpawnAdmission gate below, could fork, and would void the
+        // "a refused child is its whole process group" fact that lets a
+        // refused spawn be retired by its exact Child alone. std offers no
+        // way to count installed hooks, so this is a review-enforced rule.
         let mut command = match (self.command_factory)(&app_link) {
             Ok(command) => command,
             Err(primary) => {

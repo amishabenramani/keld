@@ -41,6 +41,10 @@ pub struct GuardedPrimary {
     /// An earlier shutdown returned a fatal error after consuming OS/worker
     /// witnesses. Re-reading cached child status must not erase that failure.
     pub(super) shutdown_failed: bool,
+    /// The shutdown acknowledgment was the Guardian's KSA for the host's
+    /// orderly S, not a KQA for an accepted Quit. Only S may retire a
+    /// refused spawn as an orderly cancellation.
+    pub(super) orderly_acknowledged: bool,
     #[cfg(test)]
     pub(super) shutdown_sent: Option<mpsc::SyncSender<()>>,
     /// Scoped native test proof: denial lock must remain held until S is
@@ -156,6 +160,7 @@ impl GuardedPrimary {
             worker: Some(worker),
             shutdown_attributed: false,
             shutdown_failed: false,
+            orderly_acknowledged: false,
             #[cfg(test)]
             shutdown_sent: None,
             #[cfg(test)]
@@ -241,6 +246,15 @@ impl GuardedPrimary {
             .write_all(&[SUPERVISED_QUIT_ACCEPTED])
             .and_then(|()| writer.flush())
             .map_err(|source| lifecycle_error("macOS guardian supervised-Quit control", source))?;
+        #[cfg(test)]
+        if let Some(sent) = &self.shutdown_sent {
+            sent.send(()).map_err(|_| {
+                lifecycle_error(
+                    "macOS guardian test-only shutdown receipt",
+                    io::Error::other("native controller stopped before observing Q"),
+                )
+            })?;
+        }
         read_supervised_quit_ack(ack_reader)?;
         self.shutdown_attributed = true;
         lock_recovery(&self.recovery_decision).shutdown_acknowledged = true;
@@ -474,6 +488,7 @@ impl GuardedPrimary {
         }
         read_supervised_orderly_ack(ack_reader)?;
         self.shutdown_attributed = true;
+        self.orderly_acknowledged = true;
         lock_recovery(&self.recovery_decision).shutdown_acknowledged = true;
         Ok(())
     }
@@ -487,6 +502,7 @@ impl GuardedPrimary {
         if !was_running {
             return worker_result;
         }
+        let orderly_acknowledged = self.orderly_acknowledged;
         let (acknowledged, denied, denied_before_initial_ready) = {
             let recovery = lock_recovery(&self.recovery_decision);
             (
@@ -495,32 +511,36 @@ impl GuardedPrimary {
                 recovery.denied && !recovery.initial_ready && recovery.expected_attempt == 1,
             )
         };
-        let shutdown_won = self.shutdown_attributed
-            && acknowledged
-            && lock_generation(&self.current_generation).is_none();
+        // The one acknowledgment check. Without an actual KSA/KQA no worker
+        // outcome is orderly; a failed worker keeps its own provenance.
+        if !acknowledged {
+            return Err(worker_result.err().unwrap_or_else(|| {
+                lifecycle_error(
+                    "macOS guardian generation host worker",
+                    io::Error::other("worker ended before acknowledged shutdown"),
+                )
+            }));
+        }
+        let shutdown_won =
+            self.shutdown_attributed && lock_generation(&self.current_generation).is_none();
         // These are the ONLY expected worker outcomes when the host's own
         // acknowledged shutdown raced generation admission: a rejected first
         // PREPARE after the Guardian's idle probe, or an in-flight SPAWNED
-        // refused after S. Each needs an actual KSA, zero registered group
-        // and its private typed result; the refusal type exists only after
-        // the attested group was signalled and the lease revoked. The
-        // Guardian's own exit status still proves its local retirement.
-        // Never downgrade another worker failure.
+        // refused after S. Each needs zero registered group and its private
+        // typed result; the refusal type exists only after the attested group
+        // was signalled and the lease revoked, and only an orderly S (KSA, not
+        // an accepted Quit's KQA) may retire it. The Guardian's own exit
+        // status still proves its local retirement. Never downgrade another
+        // worker failure.
         let reconciled = |error: &RuntimeError| {
             shutdown_won
                 && ((denied_before_initial_ready && is_initial_recovery_denied(error))
-                    || (denied && is_post_shutdown_spawn_refused(error)))
+                    || (orderly_acknowledged && denied && is_post_shutdown_spawn_refused(error)))
         };
         if let Err(error) = worker_result
             && !reconciled(&error)
         {
             return Err(error);
-        }
-        if !acknowledged {
-            return Err(lifecycle_error(
-                "macOS guardian generation host worker",
-                io::Error::other("worker ended before acknowledged shutdown"),
-            ));
         }
         if lock_generation(&self.current_generation).is_some() {
             return Err(lifecycle_error(

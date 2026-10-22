@@ -18,8 +18,8 @@ use crate::macos_guardian::process_group::{
 
 use super::super::test_support::await_spawned_gate;
 use super::{
-    GUARDIAN_SHUTDOWN_DEADLINE, GuardianBootstrap, POST_DENIAL_WITHOUT_S, POST_S_SPAWN_DENIAL_ENV,
-    ROLE_ENV, ROLE_TEST, VERIFIED_BUN_ENV, verified_real_bun,
+    GUARDIAN_SHUTDOWN_DEADLINE, GuardianBootstrap, POST_DENIAL_BY_QUIT, POST_DENIAL_WITHOUT_S,
+    POST_S_SPAWN_DENIAL_ENV, ROLE_ENV, ROLE_TEST, VERIFIED_BUN_ENV, verified_real_bun,
 };
 
 struct AttestedTestGroup(GroupIdentity);
@@ -64,6 +64,10 @@ enum HostDenial {
     /// Negative control: the host only denies recovery. No S is written
     /// until the Guardian has already exited.
     WithoutS,
+    /// Negative control: the host's accepted Quit (Q) is flushed and gets a
+    /// genuine KQA. The same acknowledged flag is set, but only an orderly S
+    /// may retire a refused spawn as a clean cancellation.
+    AcceptedQuit,
 }
 
 #[test]
@@ -96,6 +100,23 @@ fn native_host_denial_without_s_keeps_the_spawned_refusal_fatal() {
     );
 }
 
+#[test]
+fn native_host_accepted_quit_keeps_the_spawned_refusal_fatal() {
+    let (outcome, guardian_status) = run_post_denial_spawn(HostDenial::AcceptedQuit);
+    // The role exits 0 only after asserting its own run kept the typed
+    // host-closed registration error. With that exit the host's decision
+    // rests on its own reconcile alone, which must require KSA, not KQA.
+    assert!(
+        guardian_status.success(),
+        "role must observe the Guardian's terminal refusal under Q: {guardian_status:?}"
+    );
+    let error = outcome.expect_err("a refusal retired under an accepted Quit cannot be clean");
+    assert!(
+        error.to_string().contains("SPAWNED refused after host S"),
+        "actual host registration denial must survive the Quit shutdown: {error}"
+    );
+}
+
 fn run_post_denial_spawn(
     denial: HostDenial,
 ) -> (
@@ -112,6 +133,7 @@ fn run_post_denial_spawn(
     let case = match denial {
         HostDenial::OrderlyS => "orderly-s",
         HostDenial::WithoutS => POST_DENIAL_WITHOUT_S,
+        HostDenial::AcceptedQuit => POST_DENIAL_BY_QUIT,
     };
     let command = post_s_guardian_command(&preexec_socket, &no_bun_marker, case);
     let pending = GuardianBootstrap::spawn_supervised(command).expect("real KGC1 Guardian role");
@@ -167,6 +189,24 @@ fn run_post_denial_spawn(
                 .expect("actual host wrote S before reporter was released");
             release_held_reporter(&mut preexec, &spawned_rx, group_pid);
             shutdown.join().expect("host shutdown task joined")
+        }
+        HostDenial::AcceptedQuit => {
+            let (sent_tx, sent_rx) = mpsc::sync_channel(1);
+            primary.shutdown_sent = Some(sent_tx);
+            let quit = thread::spawn(move || {
+                let accepted = primary.accept_shutdown();
+                (accepted, primary)
+            });
+            // The real Q byte is flushed before SPAWNED, so the Guardian's
+            // liveness loop reads it (and sends KQA) before seeing Failed.
+            sent_rx
+                .recv_timeout(GUARDIAN_SHUTDOWN_DEADLINE)
+                .expect("actual host wrote Q before reporter was released");
+            release_held_reporter(&mut preexec, &spawned_rx, group_pid);
+            let (accepted, mut primary) = quit.join().expect("host Quit task joined");
+            accepted.expect("the real Guardian acknowledged the accepted Quit with KQA");
+            primary.shutdown_sent = None;
+            (primary.shutdown(), primary)
         }
         HostDenial::WithoutS => {
             primary.deny_recovery();
