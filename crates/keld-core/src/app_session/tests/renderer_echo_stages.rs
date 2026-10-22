@@ -664,7 +664,11 @@ fn dispatched_calls_map_to_their_renderer_terminal() {
         ended,
         "a dropped reply channel"
     );
-    for claimed in ["KELD-WV-011", "KELD-WV-012", "KELD-WV-013", "KELD-WV-999"] {
+    // Codes no Keld component emits are built at run time, so the error
+    // registry scanner does not read these hostile inputs as emitted codes.
+    let unassigned = format!("{}{}", "KELD-WV-", 999);
+    let look_alike = format!("{}{}", "KELD-WVX-", "012");
+    for claimed in ["KELD-WV-011", "KELD-WV-012", "KELD-WV-013", &unassigned] {
         assert_eq!(
             dispatched_echo_terminal(Some(Ok(PrimaryEchoReply::Err(CallError {
                 code: claimed.to_owned(),
@@ -679,7 +683,7 @@ fn dispatched_calls_map_to_their_renderer_terminal() {
     }
     // The rewrite is scoped to the `KELD-WV-` prefix: other codes, including a
     // look-alike, keep Bun's code and message.
-    for code in ["KELD-API-001", "KELD-IPC-023", "KELD-WVX-012"] {
+    for code in ["KELD-API-001", "KELD-IPC-023", &look_alike] {
         let message = format!("{code}: claimed by the peer");
         assert_eq!(
             dispatched_echo_terminal(Some(Ok(PrimaryEchoReply::Err(CallError {

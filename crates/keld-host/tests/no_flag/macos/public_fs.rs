@@ -752,7 +752,7 @@ fn assert_pending_recovery_rejection(report: &Value, initial_document: &Value) {
     assert_eq!(
         report["outcomes"][2],
         json!({"action":"recovery-pending","name":"Error",
-        "error":"KELD-WV-011: application link ended before the renderer reply","code":null})
+        "error":"KELD-WV-013: application link ended before the renderer reply","code":null})
     );
     let terminals = report["terminals"]
         .as_array()
@@ -764,7 +764,7 @@ fn assert_pending_recovery_rejection(report: &Value, initial_document: &Value) {
     assert_eq!(
         old,
         [
-            &json!({"nonce":request["nonce"],"ok":false,"code":"KELD-WV-011",
+            &json!({"nonce":request["nonce"],"ok":false,"code":"KELD-WV-013",
         "detail":"application link ended before the renderer reply"})
         ]
     );

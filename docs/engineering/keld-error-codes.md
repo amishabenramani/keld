@@ -268,6 +268,18 @@ match the crate that already emits the code. Do not invent a third spelling.
 - message: Renderer bridge request rejected, or ended without a reply; until GH-1095 lands this code is also returned after application dispatch
 - fix: Never resend the call automatically. Until GH-1095 lands, treat it as possibly run whatever the detail says. Invoke only the declared Keld renderer API with a valid payload, one call at a time, and never supply stale document state, undeclared channels, oversized payloads, or page-selected authority. Do not reload the document to recover.
 
+## KELD-WV-012
+
+- crate: keld-core
+- message: Renderer request definitely not dispatched: no application generation was admitted, so the host wrote nothing and no application code ran
+- fix: Resend at most once, as a new invoke, after a later user action or a reliable app signal; never from a timer or a retry loop. If the resend also fails with KELD-WV-012, surface it to the user. Keld itself never resends.
+
+## KELD-WV-013
+
+- crate: keld-core
+- message: Renderer request outcome unknown: the host attempted the application write, or the connection ended after it, so the handler may have run
+- fix: Never resend automatically. Resend only when the call is safe to repeat: the page sends an app-owned idempotency key that the handler records with its effect in one durable transaction, or the app's own status check confirms the effect did not happen.
+
 ## KELD-CLI-010
 
 - crate: keld-cli

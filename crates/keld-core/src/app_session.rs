@@ -5651,9 +5651,20 @@ struct PrimaryEchoCall {
     reply: Receiver<Result<PrimaryEchoReply, HostAppError>>,
 }
 
-/// The renderer code for a call refused before the host attempted a write.
+/// The renderer code for a call refused before the host attempted a write
+/// (GH-1095 §4.2, S1–S7): never sent, and never resent automatically.
 #[cfg(target_os = "macos")]
 const RENDERER_REFUSED: &str = "KELD-WV-011";
+
+/// The renderer code for a call with no admitted generation (S8): the host
+/// attempted no write, so the call is definitely not dispatched.
+#[cfg(target_os = "macos")]
+const RENDERER_NOT_DISPATCHED: &str = "KELD-WV-012";
+
+/// The renderer code for a call whose CALL write the host attempted (S9,
+/// S10, S10b, S15): the handler may have run, so the outcome is unknown.
+#[cfg(target_os = "macos")]
+const RENDERER_OUTCOME_UNKNOWN: &str = "KELD-WV-013";
 
 /// Why `begin_echo_call` refused a renderer Echo call (GH-1095 §4.2, S5–S9).
 ///
@@ -5727,16 +5738,27 @@ impl RendererEchoTerminal {
 
 #[cfg(target_os = "macos")]
 impl EchoCallRefusal {
-    /// The renderer terminal for a call refused at this stage.
+    /// The renderer terminal for a call refused at this stage. Only
+    /// `NoGeneration` proves that no write was attempted.
     fn renderer_terminal(&self) -> RendererEchoTerminal {
         match self {
-            Self::Quitting
-            | Self::StateUnavailable
-            | Self::Busy
-            | Self::NoGeneration
-            | Self::WriteFailed(_) => RendererEchoTerminal::error(
+            Self::Quitting => {
+                RendererEchoTerminal::error(RENDERER_REFUSED, "application is quitting")
+            }
+            Self::StateUnavailable => {
+                RendererEchoTerminal::error(RENDERER_REFUSED, "host call state is unavailable")
+            }
+            Self::Busy => RendererEchoTerminal::error(
                 RENDERER_REFUSED,
-                "application call is unavailable or already pending",
+                "another application call is already pending",
+            ),
+            Self::NoGeneration => RendererEchoTerminal::error(
+                RENDERER_NOT_DISPATCHED,
+                "no application generation is admitted; the call was not sent",
+            ),
+            Self::WriteFailed(_) => RendererEchoTerminal::error(
+                RENDERER_OUTCOME_UNKNOWN,
+                "application call write failed; the application may have received it",
             ),
         }
     }
@@ -5744,18 +5766,28 @@ impl EchoCallRefusal {
 
 /// The renderer terminal for a call whose CALL frame the host wrote: the
 /// reply channel's answer, or its retirement (GH-1095 §4.2, S10, S10b, S15).
+///
+/// Every Bun ERR arrives after the dispatch point, so it can never prove
+/// "not sent": a Bun-supplied `KELD-WV-*` code is rewritten, which keeps
+/// `KELD-WV-011` and `KELD-WV-012` host-minted only (criterion 11).
 #[cfg(target_os = "macos")]
 fn dispatched_echo_terminal(
     reply: Option<Result<PrimaryEchoReply, HostAppError>>,
 ) -> RendererEchoTerminal {
     match reply {
         Some(Ok(PrimaryEchoReply::Reply(payload))) => RendererEchoTerminal::Reply(payload),
+        Some(Ok(PrimaryEchoReply::Err(error))) if error.code.starts_with("KELD-WV-") => {
+            RendererEchoTerminal::error(
+                RENDERER_OUTCOME_UNKNOWN,
+                "application answered with a host-only renderer code",
+            )
+        }
         Some(Ok(PrimaryEchoReply::Err(error))) => RendererEchoTerminal::Error {
             code: error.code,
             detail: error.message,
         },
         Some(Err(_)) | None => RendererEchoTerminal::error(
-            RENDERER_REFUSED,
+            RENDERER_OUTCOME_UNKNOWN,
             "application link ended before the renderer reply",
         ),
     }
