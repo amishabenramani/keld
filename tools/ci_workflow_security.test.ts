@@ -26,6 +26,83 @@ import {
 } from "./ci_workflow_security";
 
 type Step = Record<string, unknown>;
+
+test("direct native formatter selects JS/TS, honors ignores and checks without writes", () => {
+  const root = mkdtempSync(join(tmpdir(), "keld-native-fmt-"));
+  try {
+    cpSync(join(import.meta.dir, "../bunfig.toml"), join(root, "bunfig.toml"));
+    expect(
+      Bun.spawnSync(["git", "init", "--quiet"], { cwd: root }).exitCode,
+    ).toBe(0);
+    expect(
+      Bun.spawnSync(["git", "config", "maintenance.auto", "false"], {
+        cwd: root,
+      }).exitCode,
+    ).toBe(0);
+    const original = "export const value={answer:42};\n";
+    const sources = ["js", "jsx", "mjs", "cjs", "ts", "tsx", "mts", "cts"].map(
+      (extension) => `source.${extension}`,
+    );
+    sources.push("source with spaces.ts", "--ignore-pattern=source.ts");
+    const untouched = [
+      "source.rs",
+      "document.md",
+      "page.html",
+      "data.json",
+      "data.yaml",
+      "ignored.ts",
+    ];
+    for (const name of [...sources, ...untouched])
+      writeFileSync(join(root, name), original);
+    // Track a source and an ignored source; all the remaining sources stay untracked.
+    expect(
+      Bun.spawnSync(["git", "add", "source.ts", "ignored.ts"], { cwd: root })
+        .exitCode,
+    ).toBe(0);
+    writeFileSync(join(root, ".gitignore"), "ignored.ts\nnode_modules/\n");
+    mkdirSync(join(root, "node_modules"));
+    writeFileSync(join(root, "node_modules/invalid.ts"), "invalid {{{");
+    // A same-named script must never take over this native formatting command.
+    const packageBytes = JSON.stringify({ scripts: { fmt: "exit 99" } });
+    writeFileSync(join(root, "package.json"), packageBytes);
+    const native = (...flags: string[]) =>
+      Bun.spawnSync(
+        [
+          process.execPath,
+          "fmt",
+          "--no-script",
+          ...flags,
+          "**/*.{js,jsx,mjs,cjs,ts,tsx,mts,cts}",
+        ],
+        { cwd: root },
+      );
+    const listing = native("--list-files");
+    expect(listing.exitCode).toBe(0);
+    expect(listing.stdout.toString().trim().split(/\r?\n/).sort()).toEqual(
+      [...sources].sort(),
+    );
+    expect(native("--check").exitCode).toBe(1);
+    for (const name of [...sources, ...untouched])
+      expect(readFileSync(join(root, name), "utf8")).toBe(original);
+    expect(native().exitCode).toBe(0);
+    const formatted = sources.map((name) => readFileSync(join(root, name)));
+    for (const bytes of formatted) expect(bytes.toString()).not.toBe(original);
+    expect(native("--check").exitCode).toBe(0);
+    expect(native().exitCode).toBe(0);
+    sources.forEach((name, index) =>
+      expect(readFileSync(join(root, name))).toEqual(formatted[index]),
+    );
+    for (const name of untouched)
+      expect(readFileSync(join(root, name), "utf8")).toBe(original);
+    expect(readFileSync(join(root, "package.json"), "utf8")).toBe(packageBytes);
+    const invalid = "export const broken={{{\n";
+    writeFileSync(join(root, "syntax-error.ts"), invalid);
+    expect(native("--check").exitCode).toBe(2);
+    expect(readFileSync(join(root, "syntax-error.ts"), "utf8")).toBe(invalid);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
 type FixtureJob = {
   steps: Step[];
   env?: Record<string, unknown>;

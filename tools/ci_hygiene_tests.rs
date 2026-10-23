@@ -216,7 +216,9 @@ fn valid_workflow() -> String {
             "        with:",
             "          bun-version: \"1.4.4\"",
             "      - name: Native JavaScript formatting",
-            "        run: bun tools/js_format.ts --check",
+            "        run: |",
+            "          bun packages/@keld/kipc/scripts/echo-codegen.ts check",
+            "          bun fmt --no-script --check \"**/*.{js,jsx,mjs,cjs,ts,tsx,mts,cts}\"",
             "      - name: Documentation placeholder contracts",
             "        run: |",
             "          mkdir -p target/doc-placeholders",
@@ -465,7 +467,7 @@ fn complete_fixture() -> TempDir {
                 "    {{python_command}} -B docs/audits/verify.py\n",
                 "    {{python_command}} -B docs/audits/test_verify.py\n",
                 "ci-full: audit-docs mermaid-full js-fmt-check fmt-check clippy test doc deny\n",
-                "js-fmt-check:\n    bun tools/js_format.ts --check\n",
+                "js-fmt-check:\n    bun packages/@keld/kipc/scripts/echo-codegen.ts check\n    bun fmt --no-script --check \"**/*.{js,jsx,mjs,cjs,ts,tsx,mts,cts}\"\n",
                 "mermaid-full: mermaid-test mermaid-check mermaid-render-check\n",
                 "mermaid-ci:\n",
                 "    #!/usr/bin/env bash\n",
@@ -1894,18 +1896,33 @@ fn bun_ci_accepts_requested_144_and_rejects_other_versions() {
 
 #[test]
 fn native_js_formatting_cannot_be_removed_or_skipped() {
-    let step =
-        "      - name: Native JavaScript formatting\n        run: bun tools/js_format.ts --check\n";
+    let step = concat!(
+        "      - name: Native JavaScript formatting\n        run: |\n",
+        "          bun packages/@keld/kipc/scripts/echo-codegen.ts check\n",
+        "          bun fmt --no-script --check \"**/*.{js,jsx,mjs,cjs,ts,tsx,mts,cts}\"\n",
+    );
     for replacement in [
-        "",
-        "      - name: Native JavaScript formatting\n        run: echo bun tools/js_format.ts --check\n",
-        "      - name: Native JavaScript formatting\n        if: false\n        run: bun tools/js_format.ts --check\n",
-        "      - name: Native JavaScript formatting\n        continue-on-error: true\n        run: bun tools/js_format.ts --check\n",
+        String::new(),
+        step.replace("bun fmt", "echo bun fmt"),
+        step.replace("        run:", "        if: false\n        run:"),
+        step.replace(
+            "        run:",
+            "        continue-on-error: true\n        run:",
+        ),
+        step.replace(
+            "          bun packages/@keld/kipc/scripts/echo-codegen.ts check\n",
+            "",
+        ),
+        step.lines()
+            .filter(|line| !line.contains("bun fmt"))
+            .collect::<Vec<_>>()
+            .join("\n")
+            + "\n",
     ] {
         let temp = complete_fixture();
         let workflow = valid_workflow();
         assert!(workflow.contains(step));
-        temp.write(WORKFLOW, &workflow.replace(step, replacement));
+        temp.write(WORKFLOW, &workflow.replace(step, &replacement));
         assert!(
             check(temp.path()).is_err(),
             "missing/skipped formatter passed"
@@ -1919,8 +1936,8 @@ fn native_js_formatting_allows_explanatory_comments() {
     temp.write(
         WORKFLOW,
         &valid_workflow().replace(
-            "        run: bun tools/js_format.ts --check\n",
-            "        run: bun tools/js_format.ts --check\n      # Explain the next check.\n",
+            "        run: |\n          bun packages/@keld/kipc/scripts/echo-codegen.ts check\n",
+            "        run: |\n          # Freshness before format.\n          bun packages/@keld/kipc/scripts/echo-codegen.ts check\n",
         ),
     );
     check(temp.path()).expect("comments do not disable a native check");

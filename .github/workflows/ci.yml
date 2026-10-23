@@ -809,7 +809,9 @@ jobs:
         with:
           bun-version: "1.4.4"
       - name: Native JavaScript formatting
-        run: bun tools/js_format.ts --check
+        run: |
+          bun packages/@keld/kipc/scripts/echo-codegen.ts check
+          bun fmt --no-script --check "**/*.{js,jsx,mjs,cjs,ts,tsx,mts,cts}"
       # doc-placeholders scans docs/, .agents/, llms.txt, llms-full.txt, AGENTS.md
       # and README.md, every one of which selects this job; it runs whenever the
       # job does (#650; #639 merged an unknown `{A}` placeholder that only the
@@ -851,7 +853,6 @@ jobs:
           rustc --edition=2024 -D warnings --test tools/ci_hygiene.rs -o target/ci-hygiene/ci-hygiene-test
           target/ci-hygiene/ci-hygiene-test
           bun --no-install test tools/ci_workflow_security.test.ts
-          bun --no-install test tools/js_format.test.ts
       - name: Check this checkout
         if: needs.changes.outputs.hygiene == 'true'
         # GH-508 append-only baseline: compare with the PR base or, on push,

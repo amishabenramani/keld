@@ -250,7 +250,7 @@ esac
 cd "$temp_dir/bound"
 
 # Each native JS/TS family member and each generator source must reach hosted formatting.
-for input in packages/@keld/api/src/index.ts tools/example.jsx crates/keld-cli/templates/hello/keld.config.ts crates/keld-ipc/src/echo.rs crates/keld-native/src/fs.rs crates/keld-native/src/auth/mod.rs; do
+for input in bunfig.toml packages/@keld/api/src/index.ts tools/example.jsx crates/keld-cli/templates/hello/keld.config.ts crates/keld-ipc/src/echo.rs crates/keld-native/src/fs.rs crates/keld-native/src/auth/mod.rs; do
     formatted_classification="$(result_for_paths "$input")"
     expect_exact_output "native formatting input $input selects hygiene" hygiene true "$formatted_classification"
 done

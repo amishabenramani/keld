@@ -729,7 +729,7 @@ classify_path() {
     # Native JS formatting also covers tools and crate fixtures, not only packages.
     # Generator source changes can change the checked-in formatted artifacts.
     case "$changed_file" in
-        *.js | *.jsx | *.mjs | *.cjs | *.ts | *.tsx | *.mts | *.cts | \
+        bunfig.toml | *.js | *.jsx | *.mjs | *.cjs | *.ts | *.tsx | *.mts | *.cts | \
         crates/keld-ipc/src/echo.rs | crates/keld-ipc/src/channel_table.rs | \
         crates/keld-native/src/fs.rs | crates/keld-native/src/auth/mod.rs)
             hygiene="$TRUE"

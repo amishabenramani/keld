@@ -1,5 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import {
+  cpSync,
+  mkdirSync,
   mkdtempSync,
   readFileSync,
   readdirSync,
@@ -7,7 +9,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { relative, resolve } from "node:path";
+import { dirname, relative, resolve } from "node:path";
 
 import {
   assertEchoArtifactFresh,
@@ -23,6 +25,140 @@ import {
 } from "../../api/src/fs.generated.ts";
 import { MAX_FRAME_LEN } from "../src/transport.ts";
 import { pathToFileURL } from "node:url";
+
+// KEL-177: CLI computation/formatting contracts belong beside the generator's
+// existing semantic cases. Revisit this module's size when those owners split.
+const generationOutputs = [
+  "crates/keld-cli/templates/hello/src/echo.generated.ts",
+  "packages/@keld/api/src/echo.generated.ts",
+  "packages/@keld/api/src/fs.generated.ts",
+  "packages/@keld/api/src/auth.generated.ts",
+  "packages/@keld/kipc/src/transport.ts",
+];
+
+function withGeneratorCheckout(run: (root: string) => void): void {
+  const root = mkdtempSync(resolve(tmpdir(), "keld-generation-contract-"));
+  try {
+    for (const path of [
+      ...generationOutputs,
+      "packages/@keld/kipc/scripts/echo-codegen.ts",
+      "crates/keld-ipc/src/echo.rs",
+      "crates/keld-ipc/src/channel_table.rs",
+      "crates/keld-native/src/fs.rs",
+      "crates/keld-native/src/auth/mod.rs",
+    ]) {
+      mkdirSync(dirname(resolve(root, path)), { recursive: true });
+      cpSync(
+        resolve(import.meta.dir, "../../../..", path),
+        resolve(root, path),
+      );
+    }
+    writeFileSync(resolve(root, "bunfig.toml"), "[fmt]\nignorePatterns = []\n");
+    run(root);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+}
+
+function runGenerator(root: string, command: "generate" | "check") {
+  return Bun.spawnSync(
+    [
+      process.execPath,
+      resolve(root, "packages/@keld/kipc/scripts/echo-codegen.ts"),
+      command,
+    ],
+    { cwd: root },
+  );
+}
+
+test("late transport computation failure leaves every destination unchanged", () => {
+  withGeneratorCheckout((root) => {
+    const echo = resolve(root, "crates/keld-ipc/src/echo.rs");
+    writeFileSync(
+      echo,
+      readFileSync(echo, "utf8").replaceAll(
+        "pub count: u32,",
+        "pub attempts: u32,",
+      ),
+    );
+    const transport = resolve(root, generationOutputs[4]);
+    writeFileSync(
+      transport,
+      readFileSync(transport, "utf8").replace(
+        "// @generated-end channel-table",
+        "// missing-end channel-table",
+      ),
+    );
+    const before = generationOutputs.map((path) =>
+      readFileSync(resolve(root, path)),
+    );
+    const result = runGenerator(root, "generate");
+    expect(result.exitCode).not.toBe(0);
+    expect(result.stderr.toString()).toContain(
+      "exactly one channel-table region",
+    );
+    generationOutputs.forEach((path, index) => {
+      expect(readFileSync(resolve(root, path)), path).toEqual(before[index]);
+    });
+  });
+});
+
+test("generation preserves valid unformatted manual transport bytes", () => {
+  withGeneratorCheckout((root) => {
+    const path = resolve(root, generationOutputs[4]);
+    const manual = "\nexport const manualFormattingControl={answer:42};\n";
+    writeFileSync(path, readFileSync(path, "utf8") + manual);
+    const result = runGenerator(root, "generate");
+    expect(result.stderr.toString()).toBe("");
+    expect(result.exitCode).toBe(0);
+    expect(readFileSync(path, "utf8").endsWith(manual)).toBe(true);
+    expect(runGenerator(root, "check").exitCode).toBe(0);
+  });
+});
+
+test("generation and freshness honor real destination-specific Bun overrides", () => {
+  withGeneratorCheckout((root) => {
+    writeFileSync(
+      resolve(root, "bunfig.toml"),
+      `[fmt]
+ignorePatterns = []
+[[fmt.overrides]]
+files = ["packages/@keld/api/src/*.generated.ts", "packages/@keld/kipc/src/transport.ts"]
+options = { semi = false, printWidth = 120 }
+`,
+    );
+    const result = runGenerator(root, "generate");
+    expect(result.stderr.toString()).toBe("");
+    expect(result.exitCode).toBe(0);
+    expect(readFileSync(resolve(root, generationOutputs[0]), "utf8")).toContain(
+      "message: string;",
+    );
+    expect(readFileSync(resolve(root, generationOutputs[1]), "utf8")).toContain(
+      "message: string\n",
+    );
+    for (const path of generationOutputs.slice(0, 4)) {
+      const check = Bun.spawnSync(
+        [process.execPath, "fmt", "--no-script", "--check", path],
+        { cwd: root },
+      );
+      expect(
+        check.exitCode,
+        check.stderr.toString() + check.stdout.toString(),
+      ).toBe(0);
+    }
+    expect(readFileSync(resolve(root, generationOutputs[4]), "utf8")).toContain(
+      "export const HANDSHAKE_CHANNEL = 0\n",
+    );
+    expect(runGenerator(root, "check").exitCode).toBe(0);
+    const before = generationOutputs.map((path) =>
+      readFileSync(resolve(root, path)),
+    );
+    expect(runGenerator(root, "generate").exitCode).toBe(0);
+    generationOutputs.forEach((path, index) =>
+      expect(readFileSync(resolve(root, path))).toEqual(before[index]),
+    );
+  });
+});
 
 const repositoryRoot = resolve(import.meta.dir, "../../../..");
 const echoSource = readFileSync(

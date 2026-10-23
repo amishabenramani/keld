@@ -53,10 +53,12 @@ generator, package manifests and CLI template owner. Do not add a second formatt
 implementation or a formatter runtime dependency. Keep `tsc --noEmit` and existing
 semantic tests; formatting and linting are separate contracts from type checking.
 
-Repository formatting selects the tracked JavaScript/TypeScript family, including
-tests and tooling, through one owning recipe. Bun's native ignore files remain
-authoritative exclusions; selecting a tracked file does not override them. The
-regression test covers all eight JS/TS extensions and unchanged non-JS/TS files.
+Repository formatting calls native Bun directly with
+`"**/*.{js,jsx,mjs,cjs,ts,tsx,mts,cts}"`, including tests, tooling and nonignored
+untracked sources. Root `bunfig.toml` owns formatter configuration; its empty
+`ignorePatterns` adds no exclusions beyond Bun's native ignore rules. The native
+inventory contains no source requiring an additional exclusion. Existing CI tests
+cover all eight extensions, native ignores and unchanged non-JS/TS files.
 Do not run an unrestricted formatter
 over instruction Markdown, historical evidence, nested research or vendor files.
 Use Bun defaults unless an existing project contract requires an explicit setting;
@@ -64,6 +66,15 @@ disable import sorting and other optional transforms by leaving their defaults o
 Generated files must reach the same formatting through their existing owner, never
 through manual edits. Preserve intentional malformed parser fixtures as fixtures,
 with a named path and regression oracle rather than a broad source exclusion.
+
+`just fmt` normalizes Rust (including included files) before `just js-fmt`.
+`just js-fmt` generates bindings, runs the native formatter, then regenerates to
+restamp the final transport bytes and checks freshness. The generator formats only
+owned outputs and the channel-table region, using each actual destination path
+for Bun options; it preserves the manual transport body. It computes all outputs
+before any write so a late computation failure leaves destinations unchanged.
+Filesystem write errors are not a multi-file transaction. Read-only local/hosted
+checks run explicit codegen freshness and the direct native formatter check.
 
 Generated applications expose `format` invoking `bun fmt --no-script` over the
 JS/TS family glob and `format:check = bun run format --check`, forwarding the

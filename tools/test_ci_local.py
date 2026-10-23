@@ -461,6 +461,59 @@ class ExecutorTests(SelectionTests):
                     expected.append("api:test")
                 self.assertEqual(observed, expected)
 
+    def test_fmt_repairs_rust_before_codegen_and_restamps_native_output(self):
+        source = Path(__file__).resolve().parent.parent
+        with tempfile.TemporaryDirectory(prefix="keld-fmt-order-") as temporary:
+            root = Path(temporary)
+            outputs = ["crates/keld-cli/templates/hello/src/echo.generated.ts",
+                       "packages/@keld/api/src/echo.generated.ts",
+                       "packages/@keld/api/src/fs.generated.ts",
+                       "packages/@keld/api/src/auth.generated.ts",
+                       "packages/@keld/kipc/src/transport.ts"]
+            for relative in outputs + ["justfile", "bunfig.toml", "tools/fmt_included.sh",
+                    "packages/@keld/kipc/scripts/echo-codegen.ts",
+                    "crates/keld-ipc/src/echo.rs", "crates/keld-ipc/src/channel_table.rs",
+                    "crates/keld-native/src/fs.rs", "crates/keld-native/src/auth/mod.rs"]:
+                destination = root / relative
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(source / relative, destination)
+            (root / "src").mkdir()
+            (root / "Cargo.toml").write_bytes(
+                b'[package]\nname = "format-order-control"\nversion = "0.0.0"\nedition = "2024"\n')
+            (root / "src/lib.rs").write_bytes(
+                b'#[path = "../crates/keld-ipc/src/echo.rs"]\nmod echo;\n'
+                b'include!("included.rs");\nmacro_rules! fixture { ($($tokens:tt)*) => {} }\n'
+                b'fixture! {\n    #[path = "path.rs"]\n    mod path;\n}\n')
+            (root / "src/included.rs").write_bytes(b'pub fn included(  ) {}\n')
+            (root / "src/path.rs").write_bytes(b'pub fn path(  ) {}\n')
+            echo = root / "crates/keld-ipc/src/echo.rs"
+            echo.write_bytes(echo.read_bytes().replace(b"pub struct EchoRequest {", b"pub struct EchoRequest{"))
+            subprocess.run(["git", "init", "--quiet"], cwd=root, check=True)
+            subprocess.run(["git", "config", "maintenance.auto", "false"], cwd=root, check=True)
+            # The standalone Rust crate owns these tracked modules. Native Rust
+            # files are untracked generator fixtures without their module trees.
+            subprocess.run(["git", "add", "src", "Cargo.toml", "crates/keld-ipc/src/echo.rs"], cwd=root, check=True)
+            # Negative control: moving JS generation back to a prerequisite
+            # must reject the still-valid, unformatted Rust before repairing it.
+            justfile = root / "justfile"
+            correct_order = justfile.read_text(encoding="utf-8")
+            justfile.write_bytes(correct_order.replace("fmt:\n    cargo fmt --all", "fmt: js-fmt\n    cargo fmt --all")
+                                .replace("    just js-fmt\n", "").encode())
+            wrong_order = subprocess.run(["just", "fmt"], cwd=root, capture_output=True)
+            self.assertNotEqual(wrong_order.returncode, 0)
+            self.assertIn(b"rustfmt-normalized", wrong_order.stderr)
+            self.assertIn(b"pub struct EchoRequest{", echo.read_bytes())
+            justfile.write_bytes(correct_order.encode())
+            result = subprocess.run(["just", "fmt"], cwd=root, capture_output=True)
+            self.assertEqual(result.returncode, 0, result.stderr.decode("utf-8", errors="replace"))
+            self.assertIn(b"pub struct EchoRequest {", echo.read_bytes())
+            self.assertEqual((root / "src/included.rs").read_bytes(), b"pub fn included() {}\n")
+            self.assertEqual((root / "src/path.rs").read_bytes(), b"pub fn path() {}\n")
+            for command in (["bun", "packages/@keld/kipc/scripts/echo-codegen.ts", "check"],
+                            ["bun", "fmt", "--no-script", "--check", "**/*.{js,jsx,mjs,cjs,ts,tsx,mts,cts}"]):
+                checked = subprocess.run(command, cwd=root, capture_output=True)
+                self.assertEqual(checked.returncode, 0, checked.stderr.decode("utf-8", errors="replace"))
+
     def test_real_just_inventory_preserves_bodyful_prerequisites_and_order(self):
         with tempfile.TemporaryDirectory(prefix="keld-ci-inventory-") as temporary:
             root = Path(temporary)

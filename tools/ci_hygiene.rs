@@ -531,13 +531,17 @@ fn check_serial_rust_gates(root: &Path) -> Result<(), String> {
         }
     }
     for recipe in ["ci", "ci-full"] {
-        if !expanded_gates(&justfile, recipe).is_some_and(|gates| {
-            gates.iter().filter(|gate| **gate == "js-fmt-check").count() == 1
-        }) || just_recipe_commands(&justfile, "js-fmt-check").as_deref()
-            != Some(&["bun tools/js_format.ts --check".to_owned()])
+        if !expanded_gates(&justfile, recipe)
+            .is_some_and(|gates| gates.iter().filter(|gate| **gate == "js-fmt-check").count() == 1)
+            || just_recipe_commands(&justfile, "js-fmt-check").as_deref()
+                != Some(&[
+                    "bun packages/@keld/kipc/scripts/echo-codegen.ts check".to_owned(),
+                    "bun fmt --no-script --check \"**/*.{js,jsx,mjs,cjs,ts,tsx,mts,cts}\""
+                        .to_owned(),
+                ])
         {
             return Err(format!(
-                "CI-HYGIENE: `{recipe}` must run js-fmt-check exactly once through bun tools/js_format.ts --check."
+                "CI-HYGIENE: `{recipe}` must run js-fmt-check exactly once with codegen freshness and the direct native JS/TS formatter check."
             ));
         }
     }
@@ -1348,12 +1352,16 @@ fn check_bun_test_job(text: &str) -> Result<(), String> {
             .filter(|line| !line.is_empty() && !line.starts_with('#'))
             .collect::<Vec<_>>()
     });
-    if format_lines != Some(vec![
-        "- name: Native JavaScript formatting",
-        "run: bun tools/js_format.ts --check",
-    ]) {
+    if format_lines
+        != Some(vec![
+            "- name: Native JavaScript formatting",
+            "run: |",
+            "bun packages/@keld/kipc/scripts/echo-codegen.ts check",
+            "bun fmt --no-script --check \"**/*.{js,jsx,mjs,cjs,ts,tsx,mts,cts}\"",
+        ])
+    {
         return Err(format!(
-            "CI-HYGIENE: `{WORKFLOW}` hygiene needs one unconditional native JS formatting step: bun tools/js_format.ts --check."
+            "CI-HYGIENE: `{WORKFLOW}` hygiene needs one unconditional codegen freshness and direct native JS/TS formatting step."
         ));
     }
     let Some(block) = workflow_job_block(text, "bun-test") else {

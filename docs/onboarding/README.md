@@ -201,11 +201,11 @@ bun --revision
 just ci
 ```
 
-`just js-fmt` formats tracked JavaScript/TypeScript, honoring Bun's native ignore
-files, and refreshes generated bindings
+`just js-fmt` formats JavaScript/TypeScript (including nonignored untracked files),
+using root `bunfig.toml` and Bun's native ignore rules, and refreshes generated bindings
 and transport stamps through their generator. `just js-fmt-check` checks without
 writing; it is included in `just ci` and the hosted hygiene check. `just fmt` also
-runs the JS/TS formatter before Rust formatting.
+normalizes Rust first, then runs JS/TS generation, native formatting and restamping.
 
 New `keld create` applications include `bun run format` and `bun run format:check`
 for their JavaScript/TypeScript, with no formatter package to install. Use native

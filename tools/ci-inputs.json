@@ -14,6 +14,7 @@
     "rustfmt.toml",
     "deny.toml",
     "justfile",
+    "bunfig.toml",
     "llms.txt",
     "llms-full.txt",
     "crates/*",
@@ -82,6 +83,7 @@
         "local_typescript"
       ],
       "inputs": [
+        "bunfig.toml",
         "crates/keld-ipc/tests/fixtures/*",
         "crates/keld-cli/templates/*",
         "crates/*.ts",
@@ -263,6 +265,7 @@
         "local_hygiene"
       ],
       "inputs": [
+        "bunfig.toml",
         ".github/*",
         ".gitignore",
         ".config/*",
@@ -271,8 +274,7 @@
         "AGENTS.md",
         "*/AGENTS.md",
         "crates/keld-ipc/channel_allocations.txt",
-        "crates/keld-ipc/src/channel_table.rs",
-        "tools/js_format*"
+        "crates/keld-ipc/src/channel_table.rs"
       ],
       "contract": "ci-hygiene check also compares crates/keld-ipc/channel_allocations.txt with its merge base (GH-508 append-only rule); the baseline and channel_table.rs select it, as the hosted router does.",
       "reader_set": "policy-readers"
@@ -342,12 +344,13 @@
         "*.mts",
         "*.cts",
         "justfile",
+        "bunfig.toml",
         "crates/keld-ipc/src/echo.rs",
         "crates/keld-ipc/src/channel_table.rs",
         "crates/keld-native/src/fs.rs",
         "crates/keld-native/src/auth/mod.rs"
       ],
-      "contract": "tools/js_format.ts inventories tracked JS/TS, invokes the existing echo generator for freshness/stamps and native Bun fmt. The exact Rust enum/channel generator inputs are formatting inputs too. Hosted hygiene is additively routed by ci_changes.sh for the same source family.",
+      "contract": "Direct native Bun JS/TS globs use root bunfig.toml and native ignores, including nonignored untracked files locally. The existing echo generator explicitly checks freshness/stamps. Its exact Rust enum/channel inputs select the same gate; hosted hygiene is additively routed by ci_changes.sh.",
       "reader_set": "policy-readers"
     }
   ],
@@ -398,7 +401,7 @@
         "packages/*",
         "justfile"
       ],
-      "sha256": "6457177fe683c82f5cfe2b68187ff5d22ea4b81750ae0d36f405369e662cfd9b"
+      "sha256": "90e103b1602c0a8ebf58f2f916bfdf27cee13d2b64a0d147638bc379812d73bc"
     },
     "policy-readers": {
       "patterns": [
@@ -408,14 +411,14 @@
         ".githooks/*",
         "rust-toolchain.toml"
       ],
-      "sha256": "3e53b0ef0bede11d452151b78435b5e7b165a72476fea90a36f3277a69a00da9"
+      "sha256": "a6574a828311a70c5d225b8afd0f4319b9f1d55de6dd454d44cfbb288971b6eb"
     },
     "audit-readers": {
       "patterns": [
         "docs/audits/*.py",
         "justfile"
       ],
-      "sha256": "185e7ec79867c3725daafa906fec878d00d92948d40ac49691fd74270aab1ad3"
+      "sha256": "053dc33f9e629e4c58c20d604665303ca4a6164bbd7786a75419426c1348caf8"
     },
     "rustdoc-readers": {
       "patterns": [
@@ -425,13 +428,13 @@
         "rust-toolchain.toml",
         ".cargo/*"
       ],
-      "sha256": "605b15a2dfb51f49f6fb29ce4a1a6440a19be01c5ef46208f55b41228f50a46f"
+      "sha256": "02f5c651dc252f0954b08e6595c7bcae72dd4bce84d29119524480814bae56e0"
     },
     "dependency-command": {
       "patterns": [
         "justfile"
       ],
-      "sha256": "f62480da75efe1e88ce8b280c100884bef7bd4fb561de33dda372e8820427d00"
+      "sha256": "4c63aa6a1752da8197c7dacd63d0a3b2eaf1fa258e261d3463462640fbf99075"
     },
     "status-test-readers": {
       "patterns": [
@@ -441,7 +444,7 @@
         "rust-toolchain.toml",
         "justfile"
       ],
-      "sha256": "ff289da515e8bdceb587e57d8f0a91157d555898e307b48af41bc60dffdd2bfb"
+      "sha256": "275534f4f909e92a4959ec67e775c641557cbd83ab07b25b5a3e8fe30b6acf28"
     }
   },
   "live_inputs": {
