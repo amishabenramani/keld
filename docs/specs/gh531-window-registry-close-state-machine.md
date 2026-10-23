@@ -2,13 +2,16 @@
 Status: approved
 Linear: GH-531 (#517) · Owner: @0monish · Updated: 2026-10-07
 
-**Scoped amendment candidate — 2026-10-23:** pending independent technical review
-and exact-head approval. The status and date above preserve the approved baseline;
-they do not approve this amendment. The readiness/replay and recovery decisions below
-were selected by the agent under the repository owner's explicit delegation in the
-active user session. Their exact technical content will be bound to a separate
-approval record after independent review; no personal human review of these bytes is
-asserted. Carrier: [GH #446](https://github.com/gyldlab/keld/issues/446) /
+**Scoped amendment approved — 2026-10-23:** the separate
+[owner-delegated approval](https://github.com/gyldlab/keld/pull/657#issuecomment-6371083658)
+binds reviewed technical head `a04e1ed889733a64cc33c1b64535e02b4afb0902` and this
+specification's blob `7b0fdeaf98c847387ea47ffdef9158f64868685b`, together with gh446.
+The status and date above preserve the original approved baseline. The agent made
+the new readiness/replay and recovery decisions under the repository owner's
+explicit delegation, after independent lifecycle/API and authority/custody/wire-order
+review. This commit carries approval metadata only. Neither personal human review
+of these bytes nor runtime acceptance is asserted. Carrier:
+[GH #446](https://github.com/gyldlab/keld/issues/446) /
 [PR #657](https://github.com/gyldlab/keld/pull/657); owning
 [claim](https://github.com/gyldlab/keld/issues/446#issuecomment-6370495240).
 The scoped recovery decision is recorded separately in §5.
@@ -116,7 +119,7 @@ fail. "Owner" is the implementing ticket.
    `Created` event for that window, and the `Create` request schema has no identity
    field. *NC:* minting the id in the facade, so the id was never delivered by the host,
    fails the id-equality assertion. **Independent identity control (2026-10-23
-   amendment candidate):** the fixture advances and retires host registry entries
+   approved amendment):** the fixture advances and retires host registry entries
    before starting the fresh facade, so its first host-supplied reference
    (`HostWindowRef` in the facade, `WindowRef` on the wire) has WindowId 41 while the
    facade's first local allocation would be 1. Assert the host pair in the mirror
@@ -253,7 +256,7 @@ fail. "Owner" is the implementing ticket.
     always a `primary` role declared in KEL-75, and only after that link subscribed with
     the X05-T2 `lifecycle` `Subscribe` call. The facade sends `Subscribe` when its link
     binds (at `LifecycleLink` construction over `WorkerLink.open`). Sending the call
-    is not readiness. **Completion barrier (2026-10-23 amendment candidate):** on the
+    is not readiness. **Completion barrier (2026-10-23 approved amendment):** on the
     first accepted subscription, the host transfers the surviving windows and writes
     the complete `Created` replay before the correlated lifecycle `Subscribed`
     reply, through the same ordered writer (§4.b ordering rule 4). That reply marks
@@ -723,7 +726,7 @@ registers each code in `docs/engineering/keld-error-codes.md` with a fix sentenc
    (`Created` before `Created`; `Destroyed`, then any `LastWindowClosed`, before
    `Destroyed`, T11). With gh527 step 1, the
    caller therefore sees host state as of the reply. The window `Subscribe` refinement
-   (2026-10-23 amendment candidate) uses this same rule across channels: the complete
+   (2026-10-23 approved amendment) uses this same rule across channels: the complete
    window `Created` replay precedes the correlated lifecycle `Subscribed` reply.
    Applying the replay and accepting that reply completes criterion 20's subscription
    barrier; no new completion message or wire variant is introduced.
@@ -1226,9 +1229,9 @@ reversible, and each names the observation that reopens it.
   object. The app owns navigation of adopted windows. *Falsifier and NCs:* criterion
   46. (amended by #657)
   *Approval history:* the 2026-10-07 decision above remains the historical owner
-  record. The scoped 2026-10-23 candidate in §5 explicitly qualifies the schema-2
-  document guarantee and requires its own exact-head approval; the earlier decision
-  is not approval of that new wording.
+  record. The scoped 2026-10-23 amendment in §5 explicitly qualifies the schema-2
+  document guarantee under the separate exact-content approval linked above; the
+  earlier decision is not approval of that new wording.
 - **D5. Channel id.** F02-T2 appends the window-state channel entry under #508's rule
   (draft PR #613). This spec fixes no number. *Falsifier:* #613's approved rule
   assigns ids by a mechanism other than an appended table entry.
@@ -1430,8 +1433,8 @@ there is no `PROTOCOL_VERSION` bump. Review gates: wire protocol and public API.
 - Must not touch: the `WebEngine` trait; frame layout, `PROTOCOL_VERSION`, `HELLO`;
   `keld-guard` evaluation; keld-runtime's `RoleRegistry`; the Windows and Linux
   backends beyond exhaustive-match arms; the workspace `Cargo.toml` (no dependency).
-- **Scoped recovery decision — 2026-10-23 owner delegation; amendment candidate,
-  pending independent technical review and exact-head approval (GH #446 / PR #657).**
+- **Scoped recovery decision — approved under 2026-10-23 owner delegation,
+  independent review and exact-content approval (GH #446 / PR #657, record above).**
   Schema 1 retains native-window and document identity under the existing KEL-139
   AC5 contract. In schema 2, every surviving native window retains its identity across
   Bun-role recovery, whether it is eligible for constructor adoption, already claimed,
@@ -1445,8 +1448,8 @@ there is no `PROTOCOL_VERSION` bump. Review gates: wire protocol and public API.
   a document identity changes before the recovered app's explicit navigation; a stale
   RoleInstance generation gains authority; or successor Ready/privileged calls become
   observable before retired FS work quiesces. The delegated choice and owning claim
-  are linked in the amendment provenance above. Until its exact technical candidate
-  is approved, the previously approved contract remains in force.
+  and separate exact-content approval are linked in the amendment provenance above.
+  Implementation acceptance remains required; the historical approval is unchanged.
 - Re-slice (amended by #657): the D6 transfer, the `Created` replay at `Subscribe`
   without `pending_close`, `adoptable`, criterion 46, `WindowResponse::Adopted`,
   `KELD-CORE-045`, and the constructor returning the replayed object are in this
@@ -1561,5 +1564,5 @@ there (gh527 §10 Q1).
 None. The questions raised in the first draft were decided under the orchestrator's
 delegation, and D6 by the owner; all are recorded, with falsifiers, in §4.i.
 This records the approved baseline. The separately identified 2026-10-23 amendment
-candidate still needs independent technical review and exact-head approval; its owner
-choice has been made under the explicit delegation recorded above.
+has independent technical review and exact-content approval under the explicit
+owner delegation recorded above; its implementation acceptance remains outstanding.
