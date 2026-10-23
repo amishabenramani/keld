@@ -1913,6 +1913,58 @@ fn bun_lane_runs_on_every_os() {
 }
 
 #[test]
+fn bun_lane_rejects_matrix_exclusions_and_includes() {
+    let workflow = valid_workflow();
+    let lane = "  bun-test:\n    runs-on: ${{ matrix.os }}\n    if: needs.changes.outputs.ts == 'true'\n    strategy:\n      fail-fast: false\n      matrix:\n        os: [ubuntu-latest, macos-latest, windows-latest]\n";
+    assert!(workflow.contains(lane), "fixture lacks the Bun matrix");
+    for (extra, label) in [
+        ("        exclude:\n          - os: windows-latest\n", "exclude Windows"),
+        ("        exclude:\n          - os: macos-latest\n", "exclude macOS"),
+        ("        exclude:\n          - os: ubuntu-latest\n", "exclude Ubuntu"),
+        ("        include:\n          - os: windows-latest\n", "matrix include"),
+        ("        os: [ubuntu-latest, macos-latest, windows-latest]\n", "duplicate os key"),
+    ] {
+        let changed = workflow.replacen(lane, &format!("{lane}{extra}"), 1);
+        let error = check_bun_test_job(&changed).expect_err(label);
+        assert!(error.contains("bun-test"), "{label}: {error}");
+    }
+}
+
+#[test]
+fn bun_lane_requires_the_actual_job_level_routing_condition() {
+    let workflow = valid_workflow();
+    let route = "    if: needs.changes.outputs.ts == 'true'\n    strategy:";
+    let step = "      - name: bun test\n";
+    assert!(workflow.contains(route), "fixture lacks the Bun route");
+    assert!(workflow.contains(step), "fixture lacks the Bun test step");
+
+    // A step-level condition cannot substitute for the job-level router gate.
+    for (job_if, label) in [
+        ("    if: needs.changes.outputs.rust == 'true'\n", "wrong job route"),
+        ("", "missing job route"),
+    ] {
+        let changed = workflow
+            .replacen(route, &format!("{job_if}    strategy:"), 1)
+            .replacen(
+                step,
+                "      - name: bun test\n        if: needs.changes.outputs.ts == 'true'\n",
+                1,
+            );
+        let error = check_bun_test_job(&changed).expect_err(label);
+        assert!(error.contains("bun-test"), "{label}: {error}");
+    }
+
+    // Duplicate mapping keys are ambiguous: never trust a matching first key.
+    let duplicated = workflow.replacen(
+        route,
+        "    if: needs.changes.outputs.ts == 'true'\n    if: needs.changes.outputs.rust == 'true'\n    strategy:",
+        1,
+    );
+    let error = check_bun_test_job(&duplicated).expect_err("duplicate job route");
+    assert!(error.contains("bun-test"), "{error}");
+}
+
+#[test]
 fn bun_ci_accepts_requested_142_and_rejects_other_versions() {
     let requested = valid_workflow();
     assert!(requested.contains("bun-version: \"1.4.2\""));
