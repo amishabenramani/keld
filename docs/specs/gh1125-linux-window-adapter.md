@@ -1,6 +1,16 @@
 # Spec: Linux MVP native window adapter and facade boot
-Status: draft
-Linear: GH-1125 (#517) · Owner: @0monish · Updated: 2026-10-23
+Status: approved
+Linear: GH-1125 (#517) · Owner: @0monish · Updated: 2026-10-24
+
+Approval: the repository owner approved the bounded design in the active user
+session on 2026-10-24, conditional on independent engineering cross-checks. The
+[approval record](https://github.com/gyldlab/keld/issues/1125#issuecomment-6373060597)
+binds the reviewed technical baseline at PR #1133 head
+`e2bc7cd6749c56b0568e3ad44d5c1f7d50b3e809`, spec SHA-256
+`faa7f7da315fa067df501fb5e0a1dfb6cd7ad9d55af86e41251f6beb9b166c1c`,
+Git blob `c39d6de00de05e803f9881c80a80833462a9c819`. This carrier records that
+approval and corrects maintenance evidence; it claims no separate GitHub human
+review or native acceptance. Implementation prerequisites remain in §6.
 
 ## 1. Goal & non-goals
 
@@ -8,7 +18,8 @@ Enable the existing shared BrowserWindow registry and close protocol on Linux us
 the current GTK3/WebKitGTK backend. A facade boot has zero application windows at
 Ready; its first constructor creates exactly one native window. Native close can be
 vetoed without destroying that window, and accepted close releases the webview before
-the window. This is a proposed Linux platform extension, not implementation evidence.
+the window. This approved Linux platform extension still requires implementation
+and native acceptance evidence.
 
 Non-goals: another registry, codec, mirror, boot schema, principal, recovery policy or
 UI thread; a GTK4 rewrite; Windows/macOS behavior changes; chrome (#395), hidden paint
@@ -26,8 +37,12 @@ The Linux program is #1124; #530 remains the cross-platform family owner.
 - [PR #657 technical head `a04e1ed8`](https://github.com/gyldlab/keld/pull/657#issuecomment-6371083658),
   full commit `a04e1ed889733a64cc33c1b64535e02b4afb0902`: gh446 and amended gh531,
   schema-2 Ready, subscription barrier, surviving-window adoption. Its approval is
-  macOS-scoped; §4.9 explicitly refuses Linux schema 2. This draft requests the exact
-  Linux extension in §4.2; it does not extend that historical approval implicitly.
+  macOS-scoped; §4.9 explicitly refuses Linux schema 2. The separate approval above
+  authorizes the exact Linux extension in §4.2; historical macOS approval stays scoped.
+- Current main `f19c8847787aaf0e9a14e07c0af008fc5a4c2a1f` includes GH1095's
+  gh531 O11 amendment: `IPC-022` after a written Create is outcome-unknown and
+  must not be replayed; `IPC-024` proves nonexecution. Preserve this later contract
+  when consuming #657's older approved snapshot.
 - `kel96-no-flag-host-boot.md` startup/cleanup; KEL-75 role/window lifetime;
   KEL-133 receive validation; KEL-136 shared transport. #528, #540/#541 and the
   shared #449/#450 implementation remain dependencies, not code to duplicate here.
@@ -118,13 +133,16 @@ closures own Copy identifiers and a proxy, never Core state or a strong widget c
 No additional thread, socket, wire parser, identity counter or close timer is added.
 Configuration is captured at ResolveBoot; Create values at registry admission.
 
-The one additional dependency edge proposed is Linux `gtk = 0.18.2`, already locked
+The one approved additional dependency edge is Linux `gtk = 0.18.2`, already locked
 transitively by tao/wry, workspace-pinned under the designated manifest owner. It
 provides safe `WidgetExt` signal/state access through tao's `WindowExtUnix::gtk_window`
 and wry's `WebViewExtUnix::webview`. No direct WebKit binding or production unsafe is
-needed. GTK3 Rust bindings are marked unmaintained upstream; this proposal does not
-upgrade or enlarge the existing native stack. The independent dependency review must
-cover that maintenance/advisory fact and supported features before implementation.
+needed. Published 0.18.2 package metadata still marks that release UNMAINTAINED;
+current [RustSec RUSTSEC-2024-0415](https://rustsec.org/advisories/RUSTSEC-2024-0415.html)
+was withdrawn on 2026-08-14 after upstream development resumed. The independent
+dependency review supports this existing-package edge with unchanged features and
+the existing GLib backport. Actual candidate manifest, cargo-deny, build and native
+gates remain required; this approval adds no manifest edge or policy exception.
 Registry receipt: `cargo info gtk@0.18.2 --registry crates-io` (2026-10-23) reports
 MIT, Rust 1.70, and unmaintained status; Cargo.lock pins checksum
 `fd56fb197bfc42bd5d2751f4f017d44ff59fbb58140c6b49f9b3b2bdab08506a`.
@@ -135,7 +153,7 @@ or close handler (tao already prevents default destruction); polling requested
 fullscreen state (tao `fullscreen()` caches the setter's request); another boot enum
 or facade registry (existing owners suffice). No performance claim justifies a rewrite.
 
-### 4.2 Exact proposed Linux extension to shared owners
+### 4.2 Exact approved Linux extension to shared owners
 
 Use gh446's **same** `ParsedBoot.initial: InitialWindow` and `ReadyTrigger`:
 schema 1 selects `Renderer`/`InitialNavigation`; schema 2 selects
@@ -260,9 +278,13 @@ and conformance; no persisted state, generated codec change or temporary adapter
   [Electron 44.4.5 BrowserWindow](https://github.com/electron/electron/blob/694f45852a0f1726cd23bfd379854de489cccb65/docs/api/browser-window.md),
   retrieved 2026-10-23. Supported claim: native state notification and Wayland zero
   global coordinates; this platform limitation does not require a new window schema.
+- Refresh: independent architecture and dependency reviews on 2026-10-24 support
+  the approved source seams. RustSec's current advisory and raw frontmatter confirm
+  the withdrawn maintenance advisory; selected-release metadata remains historical.
 - Fallback/blocker: no API-source blocker; real compositor, lifecycle/recovery and
-  callback-quiescence acceptance are unknown. Dependency review and exact-content
-  approval remain mandatory; GTK's documented API does not prove Keld integration.
+  callback-quiescence acceptance are unknown. The actual GTK-edge manifest,
+  cargo-deny/build and native checks remain mandatory; documented APIs and design
+  approval do not prove Keld integration.
 
 ## 5. Boundaries
 
@@ -275,8 +297,8 @@ macOS specs, wire/schema generators, identity/guard policy, CI or agent instruct
 
 ## 6. Tasks (each ≈ one PR; ordered; no placeholders — vertical slices only)
 
-- [ ] T1, #1125: approve this exact draft after independent lifecycle/API and
-  authority/dependency review; record the content hash and §10 decisions.
+- [x] T1, #1125: owner approval recorded above after independent lifecycle/API and
+  authority/dependency review; exact technical content hash and §10 decisions bound.
 - [ ] T2, #1125 implementation claim: after shared #446/#449/#450 dependencies, one
   Linux boot-to-Create/state/close vertical slice, regression/conformance first,
   together with the shared-owner platform amendments. No enabled half-adapter.
@@ -300,7 +322,7 @@ native Wayland requires an actual Wayland session and its own close/state oracle
 No source model, screenshot alone, or successful build substitutes for these cells.
 Run `just ci`, actual format, warning-denied workspace clippy, workspace tests and
 applicable documentation gates. This new spec is outside the LLMS source allowlist;
-do not hand-edit generated corpora. Native tests have not run for this draft.
+do not hand-edit generated corpora. Native tests have not run for this approved design.
 
 ## 8. Review gates triggered
 
@@ -321,10 +343,10 @@ separate native census, work, queues/copies, clocks, statistic and attributed ar
 
 ## 10. Open questions
 
-Approval is required from @0monish for these exact proposed decisions: extend the
-shared schema-2/registry contract to Linux with the same recovery/replay rules; use
-the safe existing GTK access seam and reviewed direct GTK 0.18.2 edge; use documented
-Wayland zero global coordinates with separate native qualification. Recommended:
-approve this bounded design after independent review; keep implementation blocked
-until the shared implementation dependencies and their ownership handoffs exist.
-No macOS approval, spec-only merge, or X11 pass authorizes a Linux native pass.
+None for the current design decisions. The owner approved extending the shared
+schema-2/registry contract to Linux with the same recovery/replay rules, safe existing
+GTK access and the reviewed direct GTK 0.18.2 edge, and documented Wayland zero global
+coordinates with separate native qualification. T2 remains blocked until the shared
+implementation dependencies and their ownership handoffs exist. Those are code and
+acceptance prerequisites, not another request for the same design approval.
+No macOS approval, spec-only merge, or X11 pass supplies a Linux native pass.
