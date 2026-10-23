@@ -64,7 +64,8 @@ const PAGE_FACADE_SCRIPT: &str = r#"
     } else {
       const code = typeof msg.code === "string" ? msg.code : "KELD-WV-011";
       const detail = typeof msg.detail === "string" ? msg.detail : "renderer bridge request failed";
-      waiter.reject(coded(code, detail.startsWith(code) ? detail : code + ": " + detail));
+      // The one prefix rule (spec r2 §4.9), idempotent and applied only here.
+      waiter.reject(coded(code, detail.startsWith(code + ": ") ? detail : code + ": " + detail));
     }
   };
   window.addEventListener("message", onResult, false);

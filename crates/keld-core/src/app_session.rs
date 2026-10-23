@@ -5782,20 +5782,12 @@ fn dispatched_echo_terminal(
                 "application answered with a host-only renderer code",
             )
         }
-        // The page shows a detail that already starts with the code as is, so
-        // a detail that does not lead with its own code gets that prefix: the
-        // message prefix stays equal to the forwarded code (criterion 13).
-        Some(Ok(PrimaryEchoReply::Err(error))) => {
-            let detail = if error.message.starts_with(&format!("{}: ", error.code)) {
-                error.message
-            } else {
-                format!("{}: {}", error.code, error.message)
-            };
-            RendererEchoTerminal::Error {
-                code: error.code,
-                detail,
-            }
-        }
+        // The message is forwarded unchanged; the page facade alone applies
+        // the prefix rule (spec r2 §4.9).
+        Some(Ok(PrimaryEchoReply::Err(error))) => RendererEchoTerminal::Error {
+            code: error.code,
+            detail: error.message,
+        },
         Some(Err(_)) | None => RendererEchoTerminal::error(
             RENDERER_OUTCOME_UNKNOWN,
             "application link ended before the renderer reply",
