@@ -1254,6 +1254,49 @@ mod tests {
         );
     }
 
+    /// GH-1095 criterion 7: the script a host `navigate()` reset delivers
+    /// for the call it clears is produced without a fallible step, exactly
+    /// once, so no early return can leave that call unsettled; the later host
+    /// outcome then finds no entry.
+    #[test]
+    fn navigation_reset_yields_one_settling_script() {
+        let state = Arc::new(Mutex::new(BridgeState::new(WebviewId(2), ADMITTED)));
+        let (nonce, call) = {
+            let mut bridge = lock_state(&state);
+            bridge.bind_webview(0x2000).expect("bind WebView");
+            let nonce = bridge.bind().expect("bind");
+            let call = bridge
+                .admit_invoke(&nonce, 6, ADMITTED, vec![1])
+                .expect("admit");
+            (nonce, call)
+        };
+        let script: String = navigation_reset_script(&state).expect("the cleared call settles");
+        let json = script
+            .strip_prefix("globalThis.__keldBridgeNativeResult(")
+            .and_then(|rest| rest.strip_suffix(");"))
+            .expect("one native result call");
+        assert_eq!(
+            serde_json::from_str::<Value>(json).expect("result JSON"),
+            json!({
+                "request": 6,
+                "document": nonce,
+                "ok": false,
+                "code": "KELD-WV-013",
+                "detail": "renderer navigation started before reply",
+            })
+        );
+        assert_eq!(
+            navigation_reset_script(&state),
+            None,
+            "settled exactly once"
+        );
+        assert_eq!(
+            lock_state(&state).settle(call.navigation(), call.request()),
+            None,
+            "the later host outcome finds no entry"
+        );
+    }
+
     /// GH-1095 AT-EC unit: the page facade constructs every rejection
     /// through its one coded-error helper.
     #[test]
