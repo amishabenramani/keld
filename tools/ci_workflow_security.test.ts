@@ -27,6 +27,8 @@ import {
 
 type Step = Record<string, unknown>;
 
+// Thirteen native Bun and six Git children share this fixture's kill switch.
+// The oracle is their effects and exit status, with no latency requirement.
 test("direct native formatter selects JS/TS, honors ignores and checks without writes", () => {
   const root = mkdtempSync(join(tmpdir(), "keld-native-fmt-"));
   try {
@@ -136,7 +138,7 @@ test("direct native formatter selects JS/TS, honors ignores and checks without w
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
-});
+}, 30_000);
 type FixtureJob = {
   steps: Step[];
   env?: Record<string, unknown>;
