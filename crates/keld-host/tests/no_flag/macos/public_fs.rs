@@ -37,6 +37,9 @@ mod preclick;
 mod process_image;
 #[path = "public_fs/project.rs"]
 mod project;
+// GH-1095: request error codes on the real host, Bun and WKWebView.
+#[path = "public_fs/request_codes.rs"]
+mod request_codes;
 #[path = "public_fs/retirement.rs"]
 mod retirement;
 use application_link::assert_single_application_link;
