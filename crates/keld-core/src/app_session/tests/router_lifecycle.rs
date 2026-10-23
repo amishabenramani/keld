@@ -371,6 +371,26 @@ fn recovered_generation_orders_window_events_once_across_installation() {
     println!("{RECOVERED_CHILD_OBSERVED}");
 }
 
+/// Every frame the role reads until the host ends the link.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+fn frames_until_link_loss(
+    client: &mut std::os::unix::net::UnixStream,
+) -> Vec<(keld_ipc::FrameHeader, Vec<u8>)> {
+    let mut frames = Vec::new();
+    loop {
+        match keld_ipc::link::read_frame(client) {
+            Ok(frame) => frames.push(frame),
+            Err(error) => {
+                assert!(
+                    error.to_string().starts_with("KELD-IPC-001"),
+                    "the role observes link loss, not {error}"
+                );
+                return frames;
+            }
+        }
+    }
+}
+
 /// GH-1095 AT-B3 (spec §4.5, owner decision Q3): a role CALL written before
 /// its `Quit` is run by the host, so a role that sees `KELD-IPC-022` for such
 /// a call cannot infer "not executed". The census is the host's own REPLY
@@ -385,7 +405,7 @@ fn gh1095_call_written_before_quit_is_run_by_the_host() {
 
     use keld_ipc::codec::{decode, encode};
     use keld_ipc::echo::{EchoRequest, EchoResponse};
-    use keld_ipc::link::{AppLinkDeadlines, read_frame};
+    use keld_ipc::link::AppLinkDeadlines;
 
     let (server, mut client) = UnixStream::pair().expect("session pair");
     client
@@ -450,19 +470,7 @@ fn gh1095_call_written_before_quit_is_run_by_the_host() {
         .expect("role CALL");
     }
 
-    let mut answered = Vec::new();
-    loop {
-        match read_frame(&mut client) {
-            Ok((header, payload)) => answered.push((header, payload)),
-            Err(error) => {
-                assert!(
-                    error.to_string().starts_with("KELD-IPC-001"),
-                    "the role observes link loss, not {error}"
-                );
-                break;
-            }
-        }
-    }
+    let answered = frames_until_link_loss(&mut client);
     eof_tx.send(()).expect("record EOF");
     let replies: Vec<u32> = answered
         .iter()
