@@ -477,6 +477,18 @@ fn real_pointer_roundtrip_uses_isolated_bridge_and_keld_api_handler() {
         "unexpected KEL-142 acceptance cleanup status: {output:?}"
     );
     let stderr = String::from_utf8(output.stderr).expect("KEL-142 stderr UTF-8");
+    assert_single_admitted_roundtrip(&stderr);
+    let click_evidence = String::from_utf8_lossy(&click.stdout);
+    eprintln!(
+        "KELD_KEL142_REAL_ACCEPTANCE host={host_pid} window={} path={RESPONSE_PATH} input={}",
+        windows[0],
+        click_evidence.trim()
+    );
+}
+
+// The host's acceptance report must show exactly one bound, admitted renderer
+// call reaching exactly one @keld/api handler invocation with the typed payload.
+fn assert_single_admitted_roundtrip(stderr: &str) {
     assert!(stderr.contains("KELD_KEL142_BIND webview="), "{stderr}");
     assert_eq!(
         stderr
@@ -498,12 +510,6 @@ fn real_pointer_roundtrip_uses_isolated_bridge_and_keld_api_handler() {
     assert!(
         stderr.contains("KELD_KEL142_BUN_HANDLER call=1 message=\"renderer-click\" count=42"),
         "{stderr}"
-    );
-    let click_evidence = String::from_utf8_lossy(&click.stdout);
-    eprintln!(
-        "KELD_KEL142_REAL_ACCEPTANCE host={host_pid} window={} path={RESPONSE_PATH} input={}",
-        windows[0],
-        click_evidence.trim()
     );
 }
 
