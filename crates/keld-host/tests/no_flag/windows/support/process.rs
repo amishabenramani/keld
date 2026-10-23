@@ -102,7 +102,18 @@ pub(crate) fn terminate_test_process(process: &OwnedHandle) {
 }
 
 pub(crate) fn assert_process_signaled(process: &OwnedHandle, label: &str) {
-    let result = wait_for_process_signal(process, 10_000);
+    assert_process_signaled_within(process, label, Duration::from_secs(10));
+}
+
+/// [`assert_process_signaled`] under a caller-chosen kill switch, for an exit that
+/// still runs an ordered shutdown such as a `WebView2` UI end.
+pub(crate) fn assert_process_signaled_within(
+    process: &OwnedHandle,
+    label: &str,
+    kill_switch: Duration,
+) {
+    let timeout_ms = u32::try_from(kill_switch.as_millis()).expect("kill switch fits a Win32 wait");
+    let result = wait_for_process_signal(process, timeout_ms);
     assert_eq!(result, WAIT_OBJECT_0, "{label} survived host death");
 }
 
