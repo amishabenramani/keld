@@ -927,7 +927,7 @@ jobs:
   # language that skipped and an unselected one that ran.
   codeql-rust:
     name: CodeQL (rust)
-    runs-on: macos-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     needs: changes
     if: ${{ !cancelled() && (needs.changes.outputs.codeql_rust == 'true' || (github.event_name == 'push' && needs.changes.result != 'success')) }}
@@ -943,7 +943,9 @@ jobs:
           toolchain: 1.99.1
       # Rust none mode still executes build.rs/proc macros. Keep this on hosted
       # pull_request runners without secrets or repository write permission.
-      # macOS avoids another GTK apt lane; this is not all-OS containment proof.
+      # Pinned Ubuntu 24.04 is a CodeQL-supported pilot runner; this job has no
+      # GTK apt-install step. Rust-analyzer uses build.rs/proc macros, so macOS
+      # cfg, extraction quality and SARIF parity await hosted comparison.
       - name: Initialize CodeQL
         uses: github/codeql-action/init@24c54180a607b1449ed407dd24f251e4e9147c8d # v4.38.3, bundle 2.27.2
         with:
