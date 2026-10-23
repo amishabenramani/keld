@@ -250,6 +250,41 @@ impl Drop for Fixture {
         }
     }
 }
+/// Auth caller ownership observed around the fixture's normal stop.
+struct JoinedCallers {
+    /// No caller stayed in `pending` before the stop.
+    pending_empty: bool,
+    /// The typed result of `finish()`.
+    cleanup: Result<(), super::super::HostAppError>,
+    /// Physical caller leases still counted after the worker was joined.
+    used: usize,
+}
+
+/// Stops the fixture and observes caller ownership without racing the worker.
+///
+/// A terminal publication removes its caller from `pending` before the reply is
+/// written, so `pending` is ordered by the reply the test already read and is
+/// checked first. The worker thread drops its own physical lease only after
+/// that write, so the lease counter is read after `finish()` joins the worker:
+/// the join is the happens-before edge for that release. The tail's clearing
+/// of `pending` cannot hide a leaked caller, because the map was read first.
+fn join_and_observe_callers(
+    fixture: &mut Fixture,
+    session: &AuthSession,
+) -> FixtureResult<JoinedCallers> {
+    let pending_empty = session
+        .pending
+        .lock()
+        .map_err(|_| "pending poisoned")?
+        .is_empty();
+    let cleanup = fixture.finish();
+    Ok(JoinedCallers {
+        pending_empty,
+        cleanup,
+        used: session.used.load(Ordering::Acquire),
+    })
+}
+
 fn begin(hint: Option<String>) -> AuthRequest {
     AuthRequest::Begin {
         provider: "entra-common".to_owned(),
@@ -381,8 +416,13 @@ fn auth_capacity_refuses_one_call_without_fatal_or_stream_desynchronization() ->
     assert_eq!(fixture.call(&begin(None), 102)?.code, "KELD-GUARD001");
     session.retire(1)?;
     drop(tickets);
-    assert_eq!(session.used.load(Ordering::Acquire), 0);
-    fixture.finish()?;
+    let joined = join_and_observe_callers(&mut fixture, &session)?;
+    assert!(
+        joined.pending_empty,
+        "a published or retired caller stayed pending"
+    );
+    joined.cleanup?;
+    assert_eq!(joined.used, 0);
     Ok(())
 }
 
@@ -1029,8 +1069,8 @@ fn auth_terminal_write_loss_keeps_host_owner_and_actual_successor_route() -> Fix
         .thread()
         .id()
         == worker;
-    let zero = session.used.load(Ordering::Acquire);
-    let cleanup = fixture.finish(); // Complete normal fixture cleanup before the baseline oracle.
+    // Complete normal fixture cleanup before the baseline oracle.
+    let joined = join_and_observe_callers(&mut fixture, &session)?;
     assert!(
         failure.is_none(),
         "successful retirement/ACK became Fatal: {failure:?}"
@@ -1038,8 +1078,12 @@ fn auth_terminal_write_loss_keeps_host_owner_and_actual_successor_route() -> Fix
     assert!((retired_before_ack && stopped_before_ack && read_closed) && running);
     assert!(accepting && !tail && no_fatal && same_owner && same_worker);
     assert_eq!(healthy.as_deref(), Some("KELD-GUARD001"));
-    assert_eq!(zero, 0);
-    cleanup?;
+    assert!(
+        joined.pending_empty,
+        "a published auth caller stayed pending"
+    );
+    assert_eq!(joined.used, 0);
+    joined.cleanup?;
     Ok(())
 }
 
