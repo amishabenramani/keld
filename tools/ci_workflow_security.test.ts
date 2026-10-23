@@ -836,7 +836,7 @@ test("nothing in the deny job can replace or redirect the verified binary", () =
   // The policy must read the event's own tree, not another ref.
   const ref = fixture();
   (ref.jobs.deny!.steps[0]!.with as Step).ref = "main";
-  expect(() => check(ref)).toThrow("jobs.deny checkout");
+  expect(() => check(ref)).toThrow("event-owned checkout");
 });
 
 for (const style of ["block", "flow", "alias"] as const) {
@@ -873,6 +873,51 @@ test("every checkout must be protected; one secure step cannot mask another", ()
     }
   }
   expect(checked).toBeGreaterThan(1);
+});
+
+test("every CI checkout must use the event-owned repository and source tree", () => {
+  const workflow = fixture();
+  const forbiddenInputs: Array<[string, unknown]> = [
+    ["ref", "refs/heads/main"],
+    ["repository", "untrusted/keld"],
+    ["path", "other-checkout"],
+    ["sparse-checkout", "tools/**"],
+    ["filter", "blob:none"],
+    ["submodules", true],
+    ["token", "unreviewed-token"],
+    ["ssh-key", "unreviewed-key"],
+    ["clean", false],
+    ["fetch-depth", 1],
+  ];
+  let checked = 0;
+  for (const [jobName, job] of Object.entries(workflow.jobs)) {
+    for (const [index, candidate] of job.steps.entries()) {
+      if (typeof candidate.uses !== "string"
+        || !candidate.uses.toLowerCase().startsWith("actions/checkout@")) continue;
+      for (const [input, value] of forbiddenInputs) {
+        const mutated = fixture();
+        (mutated.jobs[jobName]!.steps[index]!.with as Step)[input] = value;
+        expect(() => check(mutated), jobName + " checkout " + input).toThrow("event-owned checkout");
+      }
+      checked++;
+    }
+  }
+  expect(checked).toBeGreaterThan(10);
+});
+
+test("flow-style and aliased checkouts cannot select another source", () => {
+  const examples: Array<[string, string]> = [
+    ["flow ref", "      - { uses: '" + checkout + "', with: { persist-credentials: false, ref: refs/heads/main } }\n"],
+    ["flow repository", "      - { uses: '" + checkout + "', with: { persist-credentials: false, repository: untrusted/keld } }\n"],
+    ["aliased ref", "      - &source_checkout { uses: '" + checkout + "', with: { persist-credentials: false, ref: refs/heads/main } }\n      - *source_checkout\n"],
+    ["case and path alias", "      - { uses: 'Actions/Checkout/.@3d3c42e5aac5ba805825da76410c181273ba90b1', with: { persist-credentials: false, path: other-checkout } }\n"],
+  ];
+  for (const [label, inserted] of examples) {
+    const mutated = source.replace("      - name: Initialize CodeQL\n",
+      inserted + "      - name: Initialize CodeQL\n");
+    expect(mutated, label + " mutation applied").not.toBe(source);
+    expect(() => checkWorkflowSecurity(mutated), label).toThrow("event-owned checkout");
+  }
 });
 
 test("checkout repository case and subpaths cannot bypass its policy", () => {

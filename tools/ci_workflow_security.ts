@@ -605,6 +605,15 @@ export function checkWorkflowSecurity(source: string): void {
         if (scalar(inputs["persist-credentials"]) !== "false") {
           fail(`${label} actions/checkout must set persist-credentials: false; every checkout is checked.`);
         }
+        // Every CI lane must test the event's source tree. A pinned checkout
+        // action can still select a different ref, repository or partial tree
+        // through its inputs. Admit only the existing reviewed settings.
+        const reviewedInputs = Object.hasOwn(inputs, "fetch-depth")
+          ? ["persist-credentials", "fetch-depth"] : ["persist-credentials"];
+        exactKeys(inputs, reviewedInputs, label + " event-owned checkout inputs");
+        if (Object.hasOwn(inputs, "fetch-depth") && scalar(inputs["fetch-depth"]) !== "0") {
+          fail(label + " event-owned checkout permits fetch-depth only 0 when specified.");
+        }
       }
       if (identity === "taiki-e/install-action") {
         // An approved action SHA alone cannot protect its binary trust policy:
