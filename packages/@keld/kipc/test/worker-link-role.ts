@@ -353,14 +353,20 @@ function mirrorFailure(mode: "decode" | "apply" | "earlier-answer" | "prior-clos
     });
     let decodes = 0, attempts = 0, applies = 0;
     const events = collector(1);
-    const applied = new Map<number, { seq: number }>();
+    type Fact = { [MIRROR_FACT_MARKER]: object; seq: number };
+    // Keep decoded facts alive without adding indexed observer references, so a
+    // failed apply retained by the helper cannot hide behind the source Map.
+    const anchors: Record<string, Fact> = {};
+    const applied = new Map<number, Fact>();
     attachMirror(link, {
       channel: LIFECYCLE_CHANNEL,
       decode(payload) {
         const seq = seqOf(payload);
         decodes += 1;
         if (seq === 1 && mode !== "apply") throw kipcError("KELD-IPC-003", "second fixture record is undecodable");
-        return { seq };
+        const fact = { [MIRROR_FACT_MARKER]: {}, seq };
+        anchors[String(seq)] = fact;
+        return fact;
       },
       apply(fact) {
         attempts += 1;
@@ -395,6 +401,11 @@ function mirrorFailure(mode: "decode" | "apply" | "earlier-answer" | "prior-clos
     await answer;
     await unanswered;
     const end = await ended;
+    await nextTask();
+    const terminal = mirrorRetention(Bun.generateHeapSnapshot());
+    report("mirror-terminal-facts", terminal.facts);
+    report("mirror-terminal-indexed", terminal.indexedEdges);
+    report("mirror-terminal-anchors", Object.keys(anchors).map((key) => anchors[key].seq).join(","));
     report("mirror-end-code", codeOf(end));
     report("mirror-end-cause-005", end.message.includes("KELD-IPC-005"));
     report("mirror-decodes", decodes);

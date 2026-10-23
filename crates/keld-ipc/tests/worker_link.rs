@@ -710,6 +710,19 @@ fn mirror_source_failure(scenario: &str, earlier_answer: bool, prior_close: bool
         "1"
     };
     expect_report(&output, &[("mirror-apply-attempts", attempts)]);
+    let (facts, anchors) = if scenario == "mirror-apply-failure" {
+        ("2", "0,1")
+    } else {
+        ("1", "0")
+    };
+    expect_report(
+        &output,
+        &[
+            ("mirror-terminal-facts", facts),
+            ("mirror-terminal-indexed", "0"),
+            ("mirror-terminal-anchors", anchors),
+        ],
+    );
 }
 
 /// Decoder003 becomes source close cause005; only the earlier fact drains.

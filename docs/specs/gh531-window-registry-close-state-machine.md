@@ -157,12 +157,15 @@ fail. "Owner" is the implementing ticket.
 11. **Undecodable fact is terminal.** This criterion covers decode failures only.
     Given a window `EVENT` whose discriminant is unknown to the adapter, or whose
     payload is not valid postcard for `WindowEvent`, when it arrives, then the link
-    closes with the cause `KELD-IPC-005` (gh527 §4.4: a throwing applier records
-    `STATE = 22`, and the cause is written to the role log) after earlier records are
-    delivered, and no getter returns a value newer than the last applied fact. A
-    parked `Create` or `Destroy`, and every pending call, then throws `KELD-IPC-022`
-    whose detail names that `KELD-IPC-005` cause. The codec's internal `KELD-IPC-003`
-    is never surfaced. The other gh527 transport wake codes (`KELD-IPC-022` to
+    ends delivery at the failing record and drains earlier records, including earlier
+    answers to pending calls. When this source failure wins the existing
+    first-terminal-recorder transition, the cause is `KELD-IPC-005` (gh527 §4.4:
+    `STATE = 22`, with the cause written to the role log); a prior terminal cause
+    keeps its priority. No getter returns a value newer than the last applied fact.
+    A parked `Create` or `Destroy`, and still-unanswered pending calls, throw
+    `KELD-IPC-022` naming the recorded cause. The codec's internal `KELD-IPC-003`
+    is never surfaced as that cause. This follows the approved GH-1142 correction
+    recorded in §4.d. The other gh527 transport wake codes (`KELD-IPC-022` to
     `KELD-IPC-027`, gh527 §4.4) stay distinct and pass through to a parked `Create` or
     `Destroy` unchanged; the facade never remaps or swallows them. *NC 1:* skipping the
     unknown record and continuing fails, because the mirror then serves state that the
@@ -594,8 +597,17 @@ pub enum WindowResponse {
     ReplyApplied,                        // 5
     ReplyStale,                          // 6; plus one host diagnostic
     Destroyed,                           // 7; written after the Destroyed EVENT
+    Adopted { window: WindowRef },       // 8; a successor Create adopted a transferred window
+                                         //    (D6 scope, criterion 46): no EVENT, no state change
+                                         //    (amended by #657)
 }
 ```
+
+The `Adopted` row reconciles the existing [GH-657 owner
+approval](https://github.com/gyldlab/keld/pull/657#issuecomment-6371083658),
+technical `a04e1ed889733a64cc33c1b64535e02b4afb0902`, carried by
+`bb43e474577297f0792740676994aa153e5df1dd`. Its D6 behavior still requires the
+approved recovery integration; payload support alone does not complete it.
 
 Every `ERR` is a `CallError` with a registered code (02 §2). This spec reserves the
 next free numbers. FACT (2026-10-07): `origin/main`'s registry ends at
@@ -680,7 +692,7 @@ F02 owns one primitive in `@keld/api`. F06-T5 reuses it for display and theme fa
 export interface MirrorSource<Fact> {
   /** Channel id from the X05-T4 generated constants. */
   readonly channel: number;
-  /** Throws on an unknown discriminant or bad payload; the link closes with cause KELD-IPC-005 (criterion 11). */
+  /** Throws on an unknown discriminant or bad payload; criterion 11 owns terminal-cause priority. */
   decode(payload: Uint8Array): Fact;
   /** Synchronous; mutates mirror state only; never calls user code. */
   apply(fact: Fact): void;
