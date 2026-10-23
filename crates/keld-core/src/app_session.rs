@@ -5940,6 +5940,20 @@ impl PrimaryRouterHandle {
     /// the generation (S9).
     #[cfg(target_os = "macos")]
     fn begin_echo_call(&self, payload: &[u8]) -> Result<PrimaryEchoCall, EchoCallRefusal> {
+        self.begin_echo_call_with(payload, |writer, correlation, bytes| {
+            write_frame(writer, FrameKind::Call, 0, ECHO_CHANNEL, correlation, bytes)
+        })
+    }
+
+    /// Keep admission and failed-write retirement identical for the real
+    /// socket and for a `Write` wrapper that forwards an exact partial prefix
+    /// to that socket. The production writer remains `BootstrapStream`.
+    #[cfg(target_os = "macos")]
+    fn begin_echo_call_with(
+        &self,
+        payload: &[u8],
+        write_call: impl FnOnce(&mut BootstrapStream, CorrelationId, &[u8]) -> Result<(), IpcError>,
+    ) -> Result<PrimaryEchoCall, EchoCallRefusal> {
         let transition = self.shutdown.transition_guard();
         if !self.shutdown.is_running() {
             return Err(EchoCallRefusal::Quitting);
@@ -5969,14 +5983,7 @@ impl PrimaryRouterHandle {
         self.pending_echo_corr
             .store(correlation.0, Ordering::Release);
 
-        if let Err(source) = write_frame(
-            &mut active.writer,
-            FrameKind::Call,
-            0,
-            ECHO_CHANNEL,
-            correlation,
-            payload,
-        ) {
+        if let Err(source) = write_call(&mut active.writer, correlation, payload) {
             self.pending_echo_corr.store(0, Ordering::Release);
             self.pending_echo_attempt.store(0, Ordering::Release);
             pending.take();

@@ -4,10 +4,11 @@
 //! Oracles are host-observable facts: the bytes the Bun end of the socket
 //! receives up to EOF, the refusal `begin_echo_call` returns, whether the
 //! generation and the pending slot survive, and how the reply channel
-//! settles. No production hook: a partial write is a socket buffer the test
-//! fills through its own descriptor of the same socket, and the router's own
-//! `APP_LINK_IO_DEADLINE` ends the write. Waits are blocking reads and
-//! receives on those observables; every timeout is a kill switch only.
+//! settles. Socket-pressure tests fill the send buffer and use the real
+//! `APP_LINK_IO_DEADLINE`. Exact-byte tests use a `Write` wrapper that forwards
+//! the accepted prefix to the real socket, then injects a failure at the next
+//! write. Both exercise the same router cleanup. Waits are blocking reads
+//! and receives on those observables; every timeout is a kill switch only.
 
 use super::super::{EchoCallRefusal, RendererEchoTerminal, dispatched_echo_terminal};
 use super::{
@@ -480,6 +481,246 @@ fn s9_control_full_space_reaches_the_dispatch_point() {
     drop(router.shutdown());
     drop(handle);
     assert_eq!(owner.join().expect("owner thread"), [] as [u32; 0]);
+}
+
+/// Exercise the router's actual `begin_echo_call` cleanup with deterministic
+/// `Write` failures while forwarding every accepted byte to its real socket.
+/// Unlike the socket-space test, this also reaches k=1 and k=15 on macOS.
+struct FaultingSocketWriter<'a> {
+    socket: &'a mut UnixStream,
+    accept: usize,
+    written: usize,
+    fail_flush: bool,
+    write_errors: usize,
+    flushes: usize,
+}
+
+impl std::io::Write for FaultingSocketWriter<'_> {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        if buf.is_empty() {
+            return Ok(0);
+        }
+        if self.written == self.accept {
+            self.write_errors += 1;
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::BrokenPipe,
+                "injected real-socket write failure",
+            ));
+        }
+        let accepted = self
+            .socket
+            .write(&buf[..buf.len().min(self.accept - self.written)])?;
+        self.written += accepted;
+        Ok(accepted)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.flushes += 1;
+        if self.fail_flush {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::BrokenPipe,
+                "injected real-socket flush failure",
+            ))
+        } else {
+            self.socket.flush()
+        }
+    }
+}
+
+fn assert_s9_generation_unusable(
+    handle: &PrimaryRouterHandle,
+    stop: &std::sync::atomic::AtomicBool,
+    accepted: usize,
+) {
+    assert_slot_empty(handle);
+    assert_eq!(
+        handle
+            .pending_echo_attempt
+            .load(std::sync::atomic::Ordering::Acquire),
+        0,
+        "k={accepted}: pending attempt atomic survived"
+    );
+    assert_eq!(
+        handle
+            .pending_echo_corr
+            .load(std::sync::atomic::Ordering::Acquire),
+        0,
+        "k={accepted}: pending correlation atomic survived"
+    );
+    assert!(
+        stop.load(std::sync::atomic::Ordering::Acquire),
+        "k={accepted}: G1 reader not stopped"
+    );
+    assert!(
+        handle.current.lock().expect("generation lock").is_none(),
+        "k={accepted}: poisoned G1 is still admitted"
+    );
+    let refused = handle
+        .begin_echo_call(&request("never-retry-g1"))
+        .expect_err("poisoned G1 cannot accept another call");
+    assert!(
+        matches!(refused, EchoCallRefusal::NoGeneration),
+        "{refused:?}"
+    );
+}
+
+fn assert_s9_g1_socket_prefix(
+    peer: &mut UnixStream,
+    payload: &[u8],
+    correlation: CorrelationId,
+    accepted: usize,
+) {
+    let mut expected = FrameHeader {
+        kind: FrameKind::Call,
+        flags: 0,
+        channel: ECHO_CHANNEL,
+        corr: correlation,
+        len: u32::try_from(payload.len()).expect("small payload"),
+    }
+    .encode()
+    .to_vec();
+    expected.extend_from_slice(payload);
+    assert_eq!(expected.len(), 4_112);
+    assert_eq!(
+        bytes_until_eof(peer),
+        expected[..accepted],
+        "k={accepted}: G1 must observe only the exact written prefix and EOF"
+    );
+}
+
+/// S9: exact `Write` boundary on the real router, then an independent G2
+/// exchange. The bytes, pending state, owner commands and future call are
+/// separate observations; a reported WV-013 alone does not prove cleanup.
+fn assert_s9_exact_injected_failure(accepted: usize, fail_flush: bool) {
+    let (router, handle, mut g1_peer, owner_commands, _window) = primary_echo_test_router();
+    let owner = std::thread::spawn(move || {
+        let mut failures = Vec::new();
+        while let Ok(command) = owner_commands.recv_timeout(KILL_SWITCH) {
+            if let GuardianOwnerCommand::FailGeneration(attempt, reply) = command {
+                failures.push(attempt);
+                reply.send(Ok(())).expect("owner accepts G1 failure");
+            }
+        }
+        failures
+    });
+    let stop = handle
+        .current
+        .lock()
+        .expect("generation lock")
+        .as_ref()
+        .expect("G1 exists")
+        .reader_stop
+        .clone();
+    let payload = max_request();
+    let first_corr = CorrelationId(
+        handle
+            .next_host_corr
+            .load(std::sync::atomic::Ordering::Acquire),
+    );
+    let mut observed = (0, 0, 0);
+    let error = handle
+        .begin_echo_call_with(&payload, |stream, correlation, bytes| {
+            let mut writer = FaultingSocketWriter {
+                socket: stream,
+                accept: accepted,
+                written: 0,
+                fail_flush,
+                write_errors: 0,
+                flushes: 0,
+            };
+            let result = write_frame(
+                &mut writer,
+                FrameKind::Call,
+                0,
+                ECHO_CHANNEL,
+                correlation,
+                bytes,
+            );
+            observed = (writer.written, writer.write_errors, writer.flushes);
+            result
+        })
+        .expect_err("injected I/O fault reaches the real router");
+    assert!(
+        matches!(&error, EchoCallRefusal::WriteFailed(source)
+            if source.to_string().contains("renderer Echo call write")),
+        "accepted={accepted}, flush={fail_flush}: {error:?}"
+    );
+    assert_eq!(
+        renderer_code(&error.renderer_terminal()),
+        Some("KELD-WV-013"),
+        "k={accepted}: any attempted failed CALL is outcome unknown"
+    );
+    assert_eq!(
+        observed,
+        (accepted, usize::from(!fail_flush), usize::from(fail_flush)),
+        "k={accepted}: injected socket write and flush census"
+    );
+    assert_s9_generation_unusable(&handle, &stop, accepted);
+    assert_s9_g1_socket_prefix(&mut g1_peer, &payload, first_corr, accepted);
+
+    let (g2_server, mut g2_peer) = UnixStream::pair().expect("successor socketpair");
+    g2_peer
+        .set_read_timeout(Some(KILL_SWITCH))
+        .expect("G2 kill switch");
+    handle
+        .install_generation(2, g2_server)
+        .expect("admit healthy successor");
+    let healthy = request("fresh-g2-only");
+    let call = handle.begin_echo_call(&healthy).expect("healthy G2 call");
+    answer_next_call(&mut g2_peer, &call, &healthy);
+    router.shutdown().expect("S9 injected router shutdown");
+    assert!(
+        bytes_until_eof(&mut g2_peer).is_empty(),
+        "k={accepted}: replayed G1 CALL to G2"
+    );
+    drop(handle);
+    assert_eq!(
+        owner.join().expect("owner thread"),
+        [1],
+        "k={accepted}: retire G1 once"
+    );
+}
+
+#[test]
+fn s9_real_router_injects_exact_byte_faults_and_recovers_on_successor() {
+    for accepted in [0, 1, HEADER_LEN - 1, HEADER_LEN, 4_111] {
+        assert_s9_exact_injected_failure(accepted, false);
+    }
+    assert_s9_exact_injected_failure(4_112, true);
+}
+
+#[test]
+fn s9_exact_injected_full_write_control_dispatches_normally() {
+    let (router, handle, mut peer, _owner, _window) = primary_echo_test_router();
+    let payload = max_request();
+    let mut observed = (0, 0, 0);
+    let call = handle
+        .begin_echo_call_with(&payload, |stream, correlation, bytes| {
+            let mut writer = FaultingSocketWriter {
+                socket: stream,
+                accept: 4_112,
+                written: 0,
+                fail_flush: false,
+                write_errors: 0,
+                flushes: 0,
+            };
+            let result = write_frame(
+                &mut writer,
+                FrameKind::Call,
+                0,
+                ECHO_CHANNEL,
+                correlation,
+                bytes,
+            );
+            observed = (writer.written, writer.write_errors, writer.flushes);
+            result
+        })
+        .expect("full CALL and flush complete");
+    assert_eq!(observed, (4_112, 0, 1));
+    assert!(handle.current.lock().expect("generation lock").is_some());
+    answer_next_call(&mut peer, &call, &payload);
+    router.shutdown().expect("full-write router shutdown");
+    assert_eq!(bytes_until_eof(&mut peer), [] as [u8; 0]);
 }
 
 /// S10: after the CALL was written, every retirement settles the pending
