@@ -395,6 +395,55 @@ const rustToolchainInstallerJobs = new Set([
   "msrv", "deny", "hygiene", "mermaid", "codeql-rust",
 ]);
 
+// The required-result command consumes these bindings in the documented
+// 35-argument order. Keep the environment and complete shell script bound to
+// one reviewed contract: injected BASH_ENV/PATH or a prepended exit 0 must fail.
+const reviewedRequiredResultBindings: Record<string, string> = {
+  KELD_RESULT_CHANGES: "${{ needs.changes.result }}",
+  KELD_RESULT_FMT: "${{ needs.fmt.result }}",
+  KELD_RESULT_CHECK: "${{ needs.check.result }}",
+  KELD_RESULT_BUN: "${{ needs['bun-test'].result }}",
+  KELD_RESULT_GUI: "${{ needs['linux-gui-smoke'].result }}",
+  KELD_RESULT_MSRV: "${{ needs.msrv.result }}",
+  KELD_RESULT_DENY: "${{ needs.deny.result }}",
+  KELD_RESULT_SECRETS: "${{ needs.secrets.result }}",
+  KELD_RESULT_HYGIENE: "${{ needs.hygiene.result }}",
+  KELD_RESULT_MERMAID: "${{ needs.mermaid.result }}",
+  KELD_ROUTE_RUST: "${{ needs.changes.outputs.rust }}",
+  KELD_ROUTE_TS: "${{ needs.changes.outputs.ts }}",
+  KELD_ROUTE_GUI: "${{ needs.changes.outputs.gui }}",
+  KELD_ROUTE_MSRV: "${{ needs.changes.outputs.msrv }}",
+  KELD_ROUTE_DENY: "${{ needs.changes.outputs.deny }}",
+  KELD_ROUTE_HYGIENE: "${{ needs.changes.outputs.hygiene }}",
+  KELD_ROUTE_DOCS: "${{ needs.changes.outputs.docs }}",
+  KELD_ROUTE_MERMAID: "${{ needs.changes.outputs.mermaid }}",
+  KELD_RESULT_CODEQL_RUST: "${{ needs['codeql-rust'].result }}",
+  KELD_RESULT_CODEQL_JAVASCRIPT_TYPESCRIPT: "${{ needs['codeql-javascript-typescript'].result }}",
+  KELD_RESULT_CODEQL_ACTIONS: "${{ needs['codeql-actions'].result }}",
+  KELD_ROUTE_CODEQL_RUST: "${{ needs.changes.outputs.codeql_rust }}",
+  KELD_ROUTE_CODEQL_JAVASCRIPT_TYPESCRIPT: "${{ needs.changes.outputs.codeql_javascript_typescript }}",
+  KELD_ROUTE_CODEQL_ACTIONS: "${{ needs.changes.outputs.codeql_actions }}",
+  KELD_RESULT_DEPENDENCY_REVIEW: "${{ needs['dependency-review'].result }}",
+  KELD_RESULT_WORKSPACE: "${{ needs['workspace-contracts'].result }}",
+  KELD_ROUTE_WORKSPACE: "${{ needs.changes.outputs.workspace }}",
+  KELD_EVENT_NAME: "${{ github.event_name }}",
+  KELD_ROUTE_RUST_DOCUMENTATION_ONLY: "${{ needs.changes.outputs.rust_documentation_only }}",
+  KELD_ROUTE_CHECK_OS: "${{ needs.changes.outputs.check_os }}",
+  KELD_RESULT_DOCTEST: "${{ needs.doctest.result }}",
+  KELD_ROUTE_DOCTEST: "${{ needs.changes.outputs.doctest }}",
+  KELD_RESULT_MEDIA: "${{ needs['windows-media'].result }}",
+  KELD_ROUTE_MEDIA: "${{ needs.changes.outputs.rust == 'true' && contains(needs.changes.outputs.packages, 'keld-wv') }}",
+  KELD_RESULT_ROUTER_CONTRACTS: "${{ needs['router-contracts'].result }}",
+};
+
+const reviewedRequiredResultNames = Object.keys(reviewedRequiredResultBindings);
+const reviewedRequiredRun = [
+  "tools/ci_required.sh test",
+  "tools/ci_required.sh check \\",
+  ...reviewedRequiredResultNames.map((name, index) =>
+    '  "$' + name + '"' + (index + 1 === reviewedRequiredResultNames.length ? "" : " \\")),
+].join("\n") + "\n";
+
 function refuseRustupToolchainOverride(env: unknown, label: string): void {
   if (env === undefined) return;
   const values = mapping(env, label);
@@ -464,6 +513,14 @@ function checkWorkflowAdmission(workflow: Mapping): void {
   if (Object.keys(permissions).length !== 1 || permissions.contents !== "read") {
     fail("CI workflow permissions must remain read-only.");
   }
+  // The required-result script inherits workflow-level environment variables.
+  // An extra BASH_ENV, PATH or shell option can bypass an otherwise exact run
+  // step. Bind the three existing global settings and refuse all other inputs.
+  inputsMatch(mapping(workflow.env, "CI workflow environment"), {
+    CARGO_TERM_COLOR: "always",
+    RUST_BACKTRACE: "1",
+    CARGO_INCREMENTAL: "0",
+  }, "CI workflow environment");
 }
 
 function directRunStep(steps: Mapping[], name: string, expectedRun: string, label: string): void {
@@ -706,22 +763,52 @@ export function checkWorkflowSecurity(source: string): void {
   const required = stepsByJob.get("required");
   if (!required) fail("CI required job must exist.");
   const requiredJob = mapping(jobs.required, "jobs.required");
+  if (requiredJob.if !== "${{ always() }}") {
+    fail("CI required must use exact always() condition so failed dependencies cannot skip merge admission.");
+  }
+  if (Object.hasOwn(requiredJob, "env")) {
+    fail("CI required job must not set env; its evaluator has only reviewed result bindings.");
+  }
   if (Object.hasOwn(requiredJob, "continue-on-error")) {
     fail("CI required must not tolerate failures.");
   }
-  if (!Array.isArray(requiredJob.needs)
-      || requiredJob.needs.filter(value => value === "router-contracts").length !== 1) {
-    fail("CI required must independently need the mandatory router contract regression job.");
+  exactKeys(requiredJob, ["name", "if", "needs", "runs-on", "timeout-minutes", "steps"],
+    "CI required job");
+  if (requiredJob.name !== "CI required" || requiredJob["runs-on"] !== "ubuntu-latest"
+      || scalar(requiredJob["timeout-minutes"]) !== "10") {
+    fail("CI required job must use the reviewed name, hosted Ubuntu runner and 10-minute bound.");
   }
+  const requiredNeeds = [
+    "changes", "router-contracts", "fmt", "check", "bun-test", "linux-gui-smoke",
+    "msrv", "deny", "secrets", "hygiene", "mermaid", "codeql-rust",
+    "codeql-javascript-typescript", "codeql-actions", "dependency-review",
+    "workspace-contracts", "doctest", "windows-media",
+  ];
+  const actualNeeds = requiredJob.needs;
+  if (!Array.isArray(actualNeeds) || actualNeeds.length !== requiredNeeds.length
+      || requiredNeeds.some((name, index) => actualNeeds[index] !== name)) {
+    fail("CI required must depend on every reviewed routed and unconditional job, exactly once.");
+  }
+  if (required.length !== 2) {
+    fail("CI required must retain exactly two ordered steps: event checkout and result evaluator.");
+  }
+  const checkout = required[0]!;
+  exactKeys(checkout, ["uses", "with"], "CI required checkout");
+  if (actionName(actionRef(checkout.uses, "CI required checkout")) !== "actions/checkout") {
+    fail("CI required checkout must read the event-owned source with the reviewed action.");
+  }
+  inputsMatch(mapping(checkout.with, "CI required checkout inputs"),
+    { "persist-credentials": "false" }, "CI required checkout");
   const evaluator = namedStep(required, "Verify required CI results");
-  if (Object.keys(evaluator).length !== 3 || !Object.hasOwn(evaluator, "name")
+  if (required[1] !== evaluator || Object.keys(evaluator).length !== 3
+      || !Object.hasOwn(evaluator, "name")
       || !Object.hasOwn(evaluator, "env") || typeof evaluator.run !== "string") {
     fail("CI required evaluator must execute directly without shell, condition or failure swallowing.");
   }
-  if (mapping(evaluator.env, "CI required evaluator environment")["KELD_RESULT_ROUTER_CONTRACTS"]
-      !== "${{ needs['router-contracts'].result }}"
-      || evaluator.run.trimEnd().split("\n").at(-1)?.trim() !== '"$KELD_RESULT_ROUTER_CONTRACTS"') {
-    fail("CI required must pass the exact independent router contracts result into its final blocking check.");
+  inputsMatch(mapping(evaluator.env, "CI required evaluator environment"),
+    reviewedRequiredResultBindings, "CI required evaluator environment");
+  if (evaluator.run !== reviewedRequiredRun) {
+    fail("CI required evaluator must run exact reviewed script with all 35 results and no injected commands.");
   }
   const review = requiredAction(dependencies, "Review dependency vulnerabilities", "actions/dependency-review-action", {
     "base-ref": baseRef, "head-ref": headRef, "fail-on-severity": "low",

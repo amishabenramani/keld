@@ -269,6 +269,113 @@ test("inherited custom shells cannot false-green terminal required results", () 
   }
 });
 
+test("required job must still run when an upstream required lane fails", () => {
+  const valid = fixture();
+  expect(valid.jobs.required!.if).toBe("${{ always() }}");
+  for (const condition of [
+    undefined, null, false, true, "always()", "${{ false }}",
+    "${{ success() }}", "${{ !cancelled() }}",
+    "${{ always() && false }}",
+  ]) {
+    const workflow = fixture();
+    if (condition === undefined) delete workflow.jobs.required!.if;
+    else workflow.jobs.required!.if = condition;
+    expect(() => check(workflow), String(condition)).toThrow(
+      "CI required must use exact always() condition",
+    );
+  }
+});
+
+test("required evaluator runs exactly the reviewed 35-argument blocking script", () => {
+  const original = String(step(fixture(), "required", "Verify required CI results").run);
+  expect(original.startsWith("tools/ci_required.sh test\ntools/ci_required.sh check \\\n")).toBe(true);
+  for (const [label, changed] of [
+    ["early exit bypass", "exit 0\n" + original],
+    ["early no-op", "true\n" + original],
+    ["prepended diagnostics", "echo start\n" + original],
+    ["test command echoed", original.replace("tools/ci_required.sh test", "echo tools/ci_required.sh test")],
+    ["gate command echoed", original.replace("tools/ci_required.sh check", "echo tools/ci_required.sh check")],
+    ["first result spoofed", original.replace('"$KELD_RESULT_CHANGES"', '"success"')],
+    ["shell failure disabled", "set +e\n" + original],
+    ["final command appended", original + "exit 0\n"],
+  ] as const) {
+    expect(changed, label + " mutation applied").not.toBe(original);
+    const workflow = fixture();
+    step(workflow, "required", "Verify required CI results").run = changed;
+    expect(() => check(workflow), label).toThrow("CI required evaluator must run exact reviewed script");
+  }
+});
+
+test("required evaluator rejects injected shell startup and command search overrides", () => {
+  for (const [name, value] of [
+    ["BASH_ENV", "tools/ci_required.sh"],
+    ["PATH", "/tmp/other-bin"],
+    ["GITHUB_ENV", "/tmp/other-env"],
+    ["SHELLOPTS", "errexit"],
+    ["BASHOPTS", "expand_aliases"],
+    ["IFS", "/"],
+    ["ENV", "/tmp/other-env"],
+  ] as const) {
+    const workflow = fixture();
+    const env = step(workflow, "required", "Verify required CI results").env as Step;
+    env[name] = value;
+    expect(() => check(workflow), name).toThrow("CI required evaluator environment");
+  }
+  const spoofed = fixture();
+  (step(spoofed, "required", "Verify required CI results").env as Step)
+    .KELD_RESULT_CHANGES = "success";
+  expect(() => check(spoofed)).toThrow("CI required evaluator environment");
+});
+
+test("required evaluator cannot inherit unreviewed workflow or job environments", () => {
+  for (const [name, value] of [
+    ["BASH_ENV", "tools/ci_required.sh"],
+    ["PATH", "/tmp/other-bin"],
+    ["GITHUB_ENV", "/tmp/other-env"],
+  ] as const) {
+    const workflow = fixture();
+    (workflow.env as Step)[name] = value;
+    expect(() => check(workflow), "workflow " + name).toThrow("CI workflow environment");
+
+    const required = fixture();
+    required.jobs.required!.env = { [name]: value };
+    expect(() => check(required), "required job " + name).toThrow("CI required job must not set env");
+  }
+  const changedDefault = fixture();
+  (changedDefault.env as Step).CARGO_INCREMENTAL = "1";
+  expect(() => check(changedDefault)).toThrow("CI workflow environment");
+});
+
+test("required job keeps its hosted runner, full dependency set and exact two-step order", () => {
+  const mutations: Array<[string, (workflow: Fixture) => void]> = [
+    ["self-hosted runner", f => { f.jobs.required!["runs-on"] = "self-hosted"; }],
+    ["wrong runner", f => { f.jobs.required!["runs-on"] = "windows-latest"; }],
+    ["extended deadline", f => { f.jobs.required!["timeout-minutes"] = 45; }],
+    ["missing required lane", f => {
+      f.jobs.required!.needs = (f.jobs.required!.needs as string[]).filter(name => name !== "fmt");
+    }],
+    ["missing gitleaks", f => {
+      f.jobs.required!.needs = (f.jobs.required!.needs as string[]).filter(name => name !== "secrets");
+    }],
+    ["extra unreviewed dependency", f => {
+      (f.jobs.required!.needs as string[]).push("irrelevant");
+    }],
+    ["prepended environment mutation step", f => {
+      f.jobs.required!.steps.splice(1, 0, {
+        run: "echo BASH_ENV=tools/other.sh >> \"$GITHUB_ENV\"",
+      });
+    }],
+    ["checkout dropped", f => { f.jobs.required!.steps.shift(); }],
+    ["required steps reversed", f => { f.jobs.required!.steps.reverse(); }],
+    ["extra job strategy", f => { (f.jobs.required as Step).strategy = { matrix: { os: ["ubuntu-latest"] } }; }],
+  ];
+  for (const [label, mutate] of mutations) {
+    const workflow = fixture();
+    mutate(workflow);
+    expect(() => check(workflow), label).toThrow("CI required");
+  }
+});
+
 test("every Rust installer agrees with the exact pin and immutable action commit", () => {
   expect(() => checkRustToolchainPins(source, selectedRustToolchain)).not.toThrow();
   const workflow = fixture();
