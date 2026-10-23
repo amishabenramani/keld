@@ -869,7 +869,11 @@ fn check_independent_router_contract_job(text: &str) -> Result<(), String> {
         || workflow_job_level_property(&block, "continue-on-error").is_some()
         || workflow_job_level_property(&block, "runs-on").as_deref() != Some("ubuntu-latest")
         || !workflow_has_checkout_fetch_depth_zero(&block)
-        || !workflow_has_unconditional_named_step(&block, "Router contract tests", "tools/ci_changes_test.sh")
+        || !workflow_has_unconditional_named_step(
+            &block,
+            "Router contract tests",
+            "tools/ci_changes_test.sh",
+        )
     {
         return Err(format!(
             "CI-HYGIENE: `{WORKFLOW}` `router-contracts` must run the exact unconditional `tools/ci_changes_test.sh` on its own full-history Ubuntu runner, never behind changes."
@@ -1437,7 +1441,63 @@ fn check_linux_media_guard_step(text: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// The required gate inherits workflow-level environment, including Bash's
+/// startup-file authority. Admit only the three reviewed non-executable values.
+fn check_required_workflow_env(text: &str) -> Result<(), String> {
+    let expected = [
+        ("CARGO_TERM_COLOR", "always"),
+        ("RUST_BACKTRACE", "1"),
+        ("CARGO_INCREMENTAL", "0"),
+    ];
+    let mut found = false;
+    let mut within_env = false;
+    let mut actual = Vec::new();
+    for line in text.lines() {
+        let Some((indent, content)) = yaml_content(line) else {
+            continue;
+        };
+        if indent == 0 {
+            if yaml_mapping_key(content).is_some_and(|(key, _)| key == "env") {
+                if found || content != "env:" {
+                    return Err(format!(
+                        "CI-HYGIENE: {WORKFLOW} workflow env must have one reviewed block mapping, never a duplicate or override."
+                    ));
+                }
+                found = true;
+                within_env = true;
+            } else {
+                within_env = false;
+            }
+            continue;
+        }
+        if !within_env {
+            continue;
+        }
+        if indent != 2 {
+            return Err(format!(
+                "CI-HYGIENE: {WORKFLOW} workflow env must contain only reviewed scalar bindings."
+            ));
+        }
+        let (key, value) = yaml_mapping_key(content).ok_or_else(|| {
+            format!("CI-HYGIENE: {WORKFLOW} workflow env has a malformed binding.")
+        })?;
+        actual.push((key, value.trim_matches(['\'', '"']).to_owned()));
+    }
+    if !found
+        || actual.len() != expected.len()
+        || expected
+            .iter()
+            .any(|(key, value)| !actual.iter().any(|(name, got)| name == key && got == value))
+    {
+        return Err(format!(
+            "CI-HYGIENE: {WORKFLOW} workflow env must contain only the reviewed CARGO_TERM_COLOR, RUST_BACKTRACE, and CARGO_INCREMENTAL values. Extra BASH_ENV, PATH, or GITHUB_ENV can bypass the required gate."
+        ));
+    }
+    Ok(())
+}
+
 fn check_required_job(text: &str) -> Result<(), String> {
+    check_required_workflow_env(text)?;
     let Some(block) = workflow_job_block(text, "required") else {
         return Err(format!(
             "CI-HYGIENE: `{WORKFLOW}` has no `required` job. Add one always-created merge-admission result that consumes every conditional lane plus unconditional gitleaks."
@@ -1456,6 +1516,11 @@ fn check_required_job(text: &str) -> Result<(), String> {
     if workflow_job_level_property(&block, "continue-on-error").is_some() {
         return Err(format!(
             "CI-HYGIENE: `{WORKFLOW}` `required` must not set `continue-on-error`; the merge decision must preserve a failing exit status."
+        ));
+    }
+    if workflow_job_level_property(&block, "env").is_some() {
+        return Err(format!(
+            "CI-HYGIENE: `{WORKFLOW}` `required` must not set job-level env; inherited BASH_ENV or PATH could bypass the evaluator."
         ));
     }
     let evaluator_keys =
@@ -1496,9 +1561,12 @@ fn check_required_job(text: &str) -> Result<(), String> {
             actual_needs.join(", ")
         ));
     }
-    for (key, expression) in [
+    let expected_evaluator_env = [
         ("KELD_RESULT_CHANGES", "${{ needs.changes.result }}"),
-        ("KELD_RESULT_ROUTER_CONTRACTS", "${{ needs['router-contracts'].result }}"),
+        (
+            "KELD_RESULT_ROUTER_CONTRACTS",
+            "${{ needs['router-contracts'].result }}",
+        ),
         ("KELD_RESULT_FMT", "${{ needs.fmt.result }}"),
         ("KELD_RESULT_CHECK", "${{ needs.check.result }}"),
         ("KELD_RESULT_BUN", "${{ needs['bun-test'].result }}"),
@@ -1568,18 +1636,25 @@ fn check_required_job(text: &str) -> Result<(), String> {
             "KELD_ROUTE_MEDIA",
             "${{ needs.changes.outputs.rust == 'true' && contains(needs.changes.outputs.packages, 'keld-wv') }}",
         ),
-    ] {
-        if !workflow_named_step_mapping(&block, "Verify required CI results", "env").is_some_and(
-            |entries| {
-                entries
-                    .iter()
-                    .any(|(name, value)| name == key && value == expression)
-            },
-        ) {
+    ];
+    let actual_evaluator_env =
+        workflow_named_step_mapping(&block, "Verify required CI results", "env").ok_or_else(
+            || format!("CI-HYGIENE: `{WORKFLOW}` required evaluator env mapping must be a reviewed block mapping."),
+        )?;
+    for &(key, expression) in &expected_evaluator_env {
+        if !actual_evaluator_env
+            .iter()
+            .any(|(name, value)| name == key && value == expression)
+        {
             return Err(format!(
                 "CI-HYGIENE: `{WORKFLOW}` `required` must bind `{key}: {expression}` in the evaluator step's `env` mapping. Do not let a missing or spoofed handoff erase the merge gate."
             ));
         }
+    }
+    if actual_evaluator_env.len() != expected_evaluator_env.len() {
+        return Err(format!(
+            "CI-HYGIENE: `{WORKFLOW}` required evaluator env mapping must contain only the reviewed result and route bindings. Extra BASH_ENV, PATH, or GITHUB_ENV can bypass its exact run script."
+        ));
     }
     let expected_check_command = concat!(
         "tools/ci_required.sh check ",

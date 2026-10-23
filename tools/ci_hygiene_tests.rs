@@ -109,6 +109,10 @@ fn valid_workflow() -> String {
     let deny_job = live_deny_job();
     [
             "name: CI",
+            "env:",
+            "  CARGO_TERM_COLOR: always",
+            "  RUST_BACKTRACE: 1",
+            "  CARGO_INCREMENTAL: \"0\"",
             "jobs:",
             "  changes:",
             "    name: change router",
@@ -1467,6 +1471,89 @@ fn required_evaluator_rejects_false_green_shell_shapes() {
     );
     let error = check(temp.path()).expect_err("result reassignment must fail");
     assert!(error.contains("run block"), "{error}");
+}
+
+#[test]
+fn required_evaluator_refuses_unreviewed_step_environment() {
+    let baseline = valid_workflow();
+    check_required_job(&baseline).expect("reviewed required result baseline");
+    let needle = "      - name: Verify required CI results\n        env:\n";
+    assert!(baseline.contains(needle));
+    for (label, injection) in [
+        (
+            "shell startup override",
+            "          BASH_ENV: ./tools/ignored.sh",
+        ),
+        ("path shadow", "          PATH: ./untrusted/bin"),
+        (
+            "GitHub environment file",
+            "          GITHUB_ENV: ./untrusted/out",
+        ),
+        ("ordinary unreviewed binding", "          UNREVIEWED: value"),
+    ] {
+        let mutated = baseline.replacen(needle, &format!("{needle}{injection}\n"), 1);
+        let error = check_required_job(&mutated).expect_err(label);
+        assert!(error.contains("env"), "{label}: {error}");
+    }
+}
+
+#[test]
+fn required_job_refuses_inherited_environment() {
+    let baseline = valid_workflow();
+    check_required_job(&baseline).expect("reviewed required job baseline");
+    let needle = "  required:\n    name: CI required\n";
+    assert!(baseline.contains(needle));
+    for (label, injection) in [
+        (
+            "shell startup override",
+            "    env:\n      BASH_ENV: ./tools/ignored.sh\n",
+        ),
+        ("path shadow", "    env:\n      PATH: ./untrusted/bin\n"),
+        ("flow mapping", "    env: {BASH_ENV: ./tools/ignored.sh}\n"),
+    ] {
+        let mutated = baseline.replacen(needle, &format!("{needle}{injection}"), 1);
+        let error = check_required_job(&mutated).expect_err(label);
+        assert!(error.contains("env"), "{label}: {error}");
+    }
+}
+
+#[test]
+fn required_job_preserves_only_reviewed_workflow_environment() {
+    let baseline = valid_workflow();
+    check_required_job(&baseline).expect("reviewed workflow environment baseline");
+    for (label, old, replacement) in [
+        (
+            "additional Bash startup authority",
+            "env:\n",
+            "env:\n  BASH_ENV: ./tools/ignored.sh\n",
+        ),
+        (
+            "additional GitHub environment writer",
+            "env:\n",
+            "env:\n  GITHUB_ENV: ./untrusted/out\n",
+        ),
+        ("mutable PATH", "env:\n", "env:\n  PATH: ./untrusted/bin\n"),
+        (
+            "missing reviewed compiler environment",
+            "  CARGO_INCREMENTAL: \"0\"\n",
+            "",
+        ),
+        (
+            "changed reviewed compiler environment",
+            "  CARGO_INCREMENTAL: \"0\"\n",
+            "  CARGO_INCREMENTAL: \"1\"\n",
+        ),
+        (
+            "duplicate workflow environment overrides the reviewed map",
+            "jobs:\n",
+            "env:\n  BASH_ENV: ./tools/ignored.sh\njobs:\n",
+        ),
+    ] {
+        assert!(baseline.contains(old), "{label}: mutation input must exist");
+        let mutated = baseline.replacen(old, replacement, 1);
+        let error = check_required_job(&mutated).expect_err(label);
+        assert!(error.contains("env"), "{label}: {error}");
+    }
 }
 
 #[test]
