@@ -40,7 +40,9 @@ fn vectors(family: &str) -> BTreeMap<&str, Vec<u8>> {
         assert_eq!(fields[2].len() % 2, 0, "odd hex length: {line}");
         let bytes = fields[2]
             .as_bytes()
-            .chunks_exact(2)
+            .as_chunks::<2>()
+            .0
+            .iter()
             .map(|pair| {
                 u8::from_str_radix(std::str::from_utf8(pair).expect("ASCII hex"), 16)
                     .expect("literal hex byte")
