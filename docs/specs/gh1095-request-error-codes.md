@@ -1,6 +1,7 @@
 # Spec: request error codes split by dispatch proof (KEL-142 §7 revision)
 
-Status: draft
+Status: draft — **revision r2, pending fresh owner approval.** The owner approved
+the content at `d1801f97`. r2 changes only the two items in "Revision r2" below.
 Linear: GH-1095 (#517; tracker of record; linked from KEL-143) · Revises: KEL-142 §7 ·
 Owner: repository owner · Updated: 2026-10-23
 
@@ -8,6 +9,25 @@ Code citations are at `origin/main` `516644b0`. Evidence for the current
 behaviour comes from the never-merge experiment PR #1082 (issue #1081). This
 draft authorizes no production change. Implementation starts only after the
 exact content is approved.
+
+## Revision r2 (2026-10-23, docs only; needs a new owner approval)
+
+The implementation review of PR #1105 found two defects in the approved
+content. Owner decision 3 authorized drafting this revision.
+
+1. **§4.7's premise was unreachable.** A host `navigate()` cannot run while
+   the app runs. `run_app_until_quit` holds `&mut self` and moves the views
+   and bridges into the event loop (`wkwebview/mod.rs:302`, `:391` on #1105),
+   and `AppWindowCommand` has no navigate command. So "a bridge reset without a
+   commit" cannot happen today. r2 revises criterion 7, §4.7 and AT-S arm (d)
+   to match. Exactly-once now applies to every navigation that can actually
+   occur, and the uncommitted host-navigation case is deferred to its future
+   owner (#459).
+2. **Criteria 10 and 13 conflicted.** The host prefixing rule
+   (`app_session.rs:5789` on #1105) changes the message bytes when a Bun
+   message starts with its code but not with `"<code>: "`. r2 picks one
+   precise prefix rule with one owner (§4.9). It states exactly which messages
+   keep their bytes and which gain the prefix.
 
 ## 1. Goal & non-goals
 
@@ -114,9 +134,15 @@ The design deviates from no architecture section.
    A hostile envelope that skips the facade can get none (§4.2, S3a). A later
    reply or retirement for the same call is discarded. No Keld layer re-sends a
    CALL frame.
-   - This includes a document whose bridge state was reset by a host
-     `navigate()` whose load never committed. That document stays live, and
-     its admitted call settles once with `KELD-WV-013` (§4.7).
+   - The guarantee covers every navigation that can occur today: a
+     page-initiated main-frame navigation, which resets the bridge only when it
+     commits (§4.7). In that case the old document settles once with
+     `KELD-WV-013` on `pagehide`, and the successor never settles the old
+     call.
+   - A host-initiated navigation while the app runs does not exist today
+     (§4.7). When #459 adds one, it MUST keep this criterion: a reset whose
+     load never commits settles the live document's call once with
+     `KELD-WV-013`.
 8. **One resend after WV-012 or API-002 runs once.** The page resends once,
    as a new invoke, and the handler census for the logical action is exactly 1.
    The trigger depends on the code:
@@ -133,9 +159,15 @@ The design deviates from no architecture section.
    - The receiver-side refusals `KELD-IPC-024` and `KELD-IPC-005` (capacity)
      keep "not executed".
 10. **Existing error shape is kept.**
-    - A page rejection is still an `Error` whose message starts with
-      `"<code>: "`, byte for byte as today. The only addition is the `code`
-      property of criterion 13.
+    - A page rejection is still an `Error`. Its message keeps today's bytes
+      whenever the detail already starts with `"<code>: "`. That covers every
+      message Keld itself emits: facade refusals, host refusals and
+      retirements, the fixed `KELD-API-001` text, and `@keld/kipc`
+      `codedError` text.
+    - A Bun-supplied detail that does not start with `"<code>: "` gains that
+      prefix under the single rule in §4.9. This is the only byte change, and
+      it is deliberate: it is what makes criterion 13 hold.
+    - The only other addition is the `code` property of criterion 13.
     - A Bun ERR still carries the code in `CallError.code`.
     - The wv-link result still carries it in `code`. The only addition is the
       private `document` field of criterion 12, which never reaches the page.
@@ -158,8 +190,8 @@ The design deviates from no architecture section.
       successor's pending call.
 13. **The page can read the code without parsing the message.** Every
     `window.keld.invoke` rejection is an `Error` with an own, enumerable,
-    string `code` property. That property equals the code prefix of its
-    unchanged `message` (§4.9).
+    string `code` property. Its `message` always starts with
+    `code + ": "` under the §4.9 prefix rule.
 
 ## 4. Design
 
@@ -535,38 +567,42 @@ its `Quit`. Owner decision Q3 (§10) applies:
 - **The resulting gap:** a stale invoke whose document is gone gets no
   terminal. That is correct, because its own `pagehide` already settled it
   with WV-013 (S16).
-- **Bridge reset without a commit (host `navigate()` whose load never
-  commits):**
-  - **When the reset happens:**
-    - In wry 0.56.1, `Started` fires only when a navigation commits
-      (wry `src/wkwebview/navigation.rs:17-25`, `did_commit_navigation`), so a navigation the page cancels never resets
-      the bridge.
-    - The only reset that comes before a commit is the eager
-      `navigation_started()` in host `navigate()` (`wkwebview/mod.rs:687-690`).
-      It runs before `load_html`/`load_url`.
-    - Main has no navigation-policy handler.
-  - **Today:** that reset (`BridgeState::navigation_started`, `:357-361`)
-    clears the native `pending` entry. The host outcome that arrives later is
-    then dropped by `settle`. If the load never commits (for example a URL
-    that never responds, or a load that fails before it commits), the original
-    document stays live and its call never settles. That breaks criterion 7.
-  - **Fix (T3):** `navigation_started` returns the `PendingRequest` it clears.
-    The bridge wrapper (`:443`) then delivers one `PageOutcome { request,
-    document, ok: false, code: "KELD-WV-013", detail: "renderer navigation
-    started before reply" }` into the WebView's isolated world. The code is
-    WV-013 because the call may already have been dispatched.
-  - **If the navigation commits,** the result reaches either the old document,
-    which settles once (its later `pagehide` finds `pending` empty), or the
-    successor, which drops it on the `document` check.
-  - **If the load never commits,** the original document settles once with
-    WV-013. The later host outcome finds no native entry and is dropped, as
-    today.
+- **Navigation and bridge reset (r2).** A navigation can reach the bridge
+  in two ways:
+  - **Page-initiated main-frame navigation.** This is the only kind that can
+    occur while the app runs.
+    - In wry 0.56.1, `Started` fires only when a navigation commits (wry
+      `src/wkwebview/navigation.rs:17-25`, `did_commit_navigation`). So the
+      bridge resets only on commit, and a navigation the page cancels never
+      resets it.
+    - On commit, the old document has already rejected its pending call with
+      WV-013 on `pagehide` (S16).
+    - Any later result for that call is dropped: either by native `settle`,
+      because the entry was cleared, or by the successor's `document` check.
+    - Exactly once holds.
+    - Main has no navigation-policy handler. #460 owns that policy, and it MUST
+      keep this property.
+  - **Host-initiated navigation (`WebEngine::navigate`).** It resets the bridge
+    eagerly, before `load_html`/`load_url` (`wkwebview/mod.rs:687-690`). But
+    it is **unreachable while the app runs**:
+    - `run_app_until_quit` holds `&mut self` and moves the views and bridges
+      into the event loop (`wkwebview/mod.rs:302`, `:391`);
+    - `AppWindowCommand` has no navigate command.
+
+    A reset without a commit therefore cannot occur today, and nothing in this
+    spec requires a delivery for it.
+  - **Future owner:** #459 (the webContents facade with host `loadURL`). It
+    adds the first running-app host navigation. When it does, it MUST settle a
+    call cleared by a reset whose load never commits: exactly once,
+    `KELD-WV-013`, to the original document, scoped by `document`. It MUST
+    also add AT-S arm (d) with that oracle and a committing-load control. It
+    MAY reuse a reset-delivery helper, or it MAY reset only on commit; either
+    way it MUST NOT leave a live document's call pending.
+  - **Code that cannot be reached today.** A reset-delivery path in keld-wv
+    cannot be exercised end to end until #459 exists. T3 MUST NOT claim
+    end-to-end coverage for it. It may keep the path only behind a unit test
+    that calls `navigation_started` directly, and it must say so.
   - `destroy()` needs nothing, because the document dies with the view.
-  - **Not covered:** the uncommitted document keeps a stale nonce, so its later
-    invokes settle once with WV-011 (S3b) until a new navigation binds. Making
-    it rebind is a usability matter for the navigation-boundary work, not a
-    settlement gap.
-  - T1 pins today's hang (AT-S arm d); T3 flips it.
 - The dispatch thread sends exactly one outcome per renderer request.
 - A reply that arrives after a retirement is refused by the correlation and
   attempt check, and the reader that would deliver it is already inert.
@@ -634,11 +670,32 @@ justified here.
 
 **Design: an additive `code` property (T3, keld-wv only).**
 
+- **Prefix rule (r2, one rule, one owner).** For a rejection with code `c`
+  and detail `d`:
+
+  ```text
+  message = d               if d starts with c + ": "
+          = c + ": " + d    otherwise
+  ```
+
+  - The rule is idempotent. It is applied **once**, by the page facade's
+    coded-error helper, which is the rule's single owner.
+  - The host forwards a Bun ERR's `CallError.message` as the detail
+    **unchanged**. It MUST NOT prefix it, so the prefix logic at
+    `app_session.rs:5789` on #1105 is removed.
+  - The host's own refusals and retirements send a bare detail, and the
+    facade prefixes it.
+  - Today the facade's test is `detail.startsWith(code)`. r2 tightens it to
+    `startsWith(code + ": ")`. Every message Keld emits already has that form,
+    so their bytes are unchanged (criterion 10).
+  - A Bun-supplied detail like `"KELD-API-001 failed"` (code but no `": "`)
+    becomes `"KELD-API-001: KELD-API-001 failed"`. That is the only byte
+    change.
 - The page facade gets one coded-error helper. It is the only place in
-  `PAGE_FACADE_SCRIPT` that constructs an `Error`. It builds the `message`
-  exactly as today:
-  - `fail(detail)` gives `"KELD-WV-011: " + detail`;
-  - a result gives the existing `detail.startsWith(code) ? detail : code + ": " + detail`;
+  `PAGE_FACADE_SCRIPT` that constructs an `Error`. It builds the `message` by
+  the prefix rule:
+  - `fail(detail)` gives `"KELD-WV-011: " + detail`, unchanged;
+  - a result goes through the rule;
   - `pagehide` gives its existing text under its §4.2 code.
 - The helper then defines an own `code` property with the same attributes
   `@keld/kipc` `codedError` uses (`enumerable`, `writable` and `configurable`
@@ -710,7 +767,7 @@ created by another worker; no number exists yet. It covers:
 - [ ] T1: test-only characterisation. It pins today's codes at S8–S16 and
   S10b with negative controls, writing the AT-12a/12d/13a/13b/13c arms against
   today's strings. It also pins the cross-document settlement today (AT-S arm
-  c) and the hang after a host `navigate()` that never commits (AT-S arm d).
+  c). Arm (d) is deferred to #459 (r2).
 - [ ] T2: keld-core. It includes:
   - the typed refusal;
   - the S8 → WV-012, S9/S10 → WV-013 and S10b rewrite;
@@ -718,8 +775,8 @@ created by another worker; no number exists yet. It covers:
   - T1's assertions flipped to the target codes.
 - [ ] T3: keld-wv. It includes:
   - `pagehide` → WV-013;
-  - the document-scoped result, and settlement after an uncommitted host
-    `navigate()` (§4.7), which flip T1's AT-S arms c and d;
+  - the document-scoped result (§4.7), which flips T1's AT-S arm c. The
+    uncommitted host-navigation settlement belongs to #459 (r2);
   - the `WvError::RendererBridge` fix text;
   - the narrowed WV-011 registry text;
   - the `code` property on every invoke rejection (§4.9, AT-EC).
@@ -764,9 +821,9 @@ Every hosted arm prints its raw census with `--success-output immediate`.
 | AT-B1 | 9 | `#throwIfTerminal` | `@keld/kipc` unit, 3 OSes | deterministic | link already ended → `call()` rejects IPC-022; host fixture read 0 frames | remove `#throwIfTerminal` → frame posted (the check is the proof, but the code stays Unknown) |
 | AT-B2 | 9 | pending at close | `@keld/kipc` unit, 3 OSes | deterministic | pending, then host close → IPC-022; host read 1 frame; same code as AT-B1 | host writes the REPLY before closing → the call resolves with the reply, not IPC-022 (the close produces 022, not the harness) |
 | AT-B3 | 9 | written before Quit, pending at close | keld-core unit | deterministic | host census for that CALL recorded; only a census of 0 in every arm could reverse Q3's Unknown | written after Quit → IPC-024, census 0 (existing `guarded_router_and_quit.rs`) |
-| AT-S | 7, 12 | settlement | macOS unit (keld-wv, keld-core) + hosted macOS | deterministic (unit); 10 (hosted) | (a) late reply after retirement refused; (b) facade result after `pagehide` ignored, and native result for a stale `(navigation, request)` dropped; (c) a stale-document invoke refused after the successor binds, while the successor has a pending call with the same request id → the successor's call settles only from its own result; (d) handler held at `entered`; the test calls host `navigate()` (`WebEngine::navigate`) to a URL whose load never commits (the observer accepts the connection and never responds); then the handler is released → the **original document** receives exactly one settlement, `KELD-WV-013` (counted by a page-side beacon that carries the original document's own nonce); census 1; the later host outcome is dropped. T1 pins today's behaviour (c may cross; d: 0 settlements); T3 flips both to the target | (a) remove the corr/attempt check → second settlement observed; (c) remove the `document` check in `__keldBridgeNativeResult` → the successor settles with the stale WV-011; (d) the same host `navigate()` to a URL that loads and commits → the original document settles once with WV-013 (by `pagehide` or the delivered result, never both), and the successor document records 0 settlements |
+| AT-S | 7, 12 | settlement | macOS unit (keld-wv, keld-core) + hosted macOS | deterministic (unit); 10 (hosted) | (a) late reply after retirement refused; (b) facade result after `pagehide` ignored, and native result for a stale `(navigation, request)` dropped; (c) a stale-document invoke refused after the successor binds, while the successor has a pending call with the same request id → the successor's call settles only from its own result; (d, r2) handler held at `entered`, then a **page-initiated** main-frame navigation that commits (`location.href` to a fixture page) → the original document settles exactly once with `KELD-WV-013` (from `pagehide`, counted by a beacon carrying the original document's nonce); census 1; the successor records 0 settlements; the later host outcome is dropped. The uncommitted host-`navigate()` arm moves to #459. T1 pins today's behaviour (c may cross); T3 flips c to the target | (a) remove the corr/attempt check → second settlement observed; (c) remove the `document` check in `__keldBridgeNativeResult` → the successor settles with the stale WV-011; (d) the same harness with no navigation → the call settles once with its real reply, census 1 (the WV-013 comes from the navigation); mutation: make the successor accept a result without the `document` check → the successor records a settlement and the arm fails |
 | AT-SP | 11 | S10b | macOS unit (keld-core; fake Bun peer on `socketpair`) | deterministic | Bun ERR `code = "KELD-WV-012"` (and `"KELD-WV-011"`) → renderer outcome `KELD-WV-013`; the frame was written (`KIPC_CALL` emitted) | Bun ERR `code = "KELD-API-002"` → forwarded unchanged (the rewrite is scoped to `KELD-WV-*`); mutation: remove the rewrite → the page sees `KELD-WV-012` and the test fails |
-| AT-EC | 10, 13 | every invoke rejection | macOS keld-wv unit + hosted macOS | deterministic (unit); 10 per code (hosted) | the hosted page reports `{code: err.code, message: err.message}` for WV-011 (`opts` given), WV-012 (AT-12a), WV-013 (AT-13b) and API-002 (AT-API2b): `err.code` is a string equal to the message prefix; `message` is byte-equal to today's format; `err instanceof Error`; `Object.keys(err)` includes `"code"` (intended, §4.9). Unit: `PAGE_FACADE_SCRIPT` builds every rejection through its one coded-error helper (exactly one `new Error(` in the script) | the observer run against a plain `new Error("KELD-WV-011: x")` reports `code` undefined (the oracle detects absence); mutation: drop the `code` definition in the helper → every hosted arm fails |
+| AT-EC | 10, 13 | every invoke rejection | macOS keld-wv unit + hosted macOS | deterministic (unit); 10 per code (hosted) | the hosted page reports `{code: err.code, message: err.message}` for WV-011 (`opts` given), WV-012 (AT-12a), WV-013 (AT-13b) and API-002 (AT-API2b): `err.code` is a string equal to the message prefix; `message` is byte-equal to today's format; `err instanceof Error`; `Object.keys(err)` includes `"code"` (intended, §4.9). Prefix rule (r2), keld-core and keld-wv units: the host forwards `CallError.message` unchanged; a Bun ERR message `KELD-API-001: x` → page message unchanged; `KELD-API-001 failed` → `KELD-API-001: KELD-API-001 failed`; a host refusal with a bare detail → prefixed once (the rule is idempotent). Unit: `PAGE_FACADE_SCRIPT` builds every rejection through its one coded-error helper (exactly one `new Error(` in the script) | the observer run against a plain `new Error("KELD-WV-011: x")` reports `code` undefined (the oracle detects absence); mutation: drop the `code` definition in the helper → every hosted arm fails |
 
 Anti-flake:
 
