@@ -367,7 +367,7 @@
         "crates/keld-host/tests/no_flag/macos/public_fs/project.rs",
         "crates/keld-host/tests/no_flag/macos/public_fs.rs"
       ],
-      "sha256": "be8674374d8533d7b0ad670e2eefb3bf01d496ce8c923d3b397178f0d0f87ba7"
+      "sha256": "7e4440fd730a3bfe68ef4920399eaee739863cd3dd381c2785b6249d628105e4"
     },
     "bun-readers": {
       "patterns": [
