@@ -367,14 +367,14 @@
         "crates/keld-host/tests/no_flag/macos/public_fs/project.rs",
         "crates/keld-host/tests/no_flag/macos/public_fs.rs"
       ],
-      "sha256": "9e40ec9290bec0e3147493a7e62105ee716c7f1176710bc2f21525d814038502"
+      "sha256": "6143a438ade19c2fe34db696d21dbe1d86611d3d82f8dd509bde3581b172626f"
     },
     "bun-readers": {
       "patterns": [
         "packages/*",
         "justfile"
       ],
-      "sha256": "3b37773eb46aa0e458f2ecbf20c267288baae0064dca43eaa84117dab27d5bb1"
+      "sha256": "7751cb490b9a670616a811835a14823797b563f8097ae6e5c84e1d8ec96b81e2"
     },
     "policy-readers": {
       "patterns": [
@@ -384,14 +384,14 @@
         ".githooks/*",
         "rust-toolchain.toml"
       ],
-      "sha256": "95de2eab6138457dfc43673efcc6c1f4f77289727b2b57257cf1a22e8f12f724"
+      "sha256": "380af109c50cd8d725c49e28084ade35b2139d407edcb0c2c5c9eace31afd394"
     },
     "audit-readers": {
       "patterns": [
         "docs/audits/*.py",
         "justfile"
       ],
-      "sha256": "63d7f076c979c97ef7dc6f4d220c3c52efeaca648bedbebbcc965e6decc3dfc8"
+      "sha256": "ac477b1cf7aefe1c2131231db885e857c1191caa36c2bbb2dce47205a17df5c9"
     },
     "rustdoc-readers": {
       "patterns": [
@@ -401,13 +401,13 @@
         "rust-toolchain.toml",
         ".cargo/*"
       ],
-      "sha256": "74ddeaf6ce8e098ce30d52fdfa93e67785b67613f10cdc7dfbb020b9ad767bc3"
+      "sha256": "98269072ac24cd8a02ff08319d242f6c5a09cd88f829d0cf8f415486d2b8d952"
     },
     "dependency-command": {
       "patterns": [
         "justfile"
       ],
-      "sha256": "c8f72d58f6cadd9a061e9deca4b1626898f6919dd428dc69ee8c24220db9cb31"
+      "sha256": "4de9cca302f9902b87557634896de7a9396fa32d05a83b04e0a47ededba77e11"
     },
     "status-test-readers": {
       "patterns": [
@@ -417,7 +417,7 @@
         "rust-toolchain.toml",
         "justfile"
       ],
-      "sha256": "b0212fceb77e8d35f167449c12e732224b5c5b278f24b3380cd4b66d3cf09330"
+      "sha256": "c78df7f63f79d63c92dea708f4e1dc852aca939c8386ff8e240c54c29686266e"
     }
   },
   "live_inputs": {
