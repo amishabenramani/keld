@@ -1,7 +1,7 @@
 # Spec: Bun 1.4.4 and native JavaScript tooling
 
 Status: draft
-Linear: GH-1091 (user-requested combined PR; internal reference reconciliation pending) · Owner: GYLDLAB · Updated: 2026-10-23
+Linear: KEL-177 · Public: GH-1091 (user-requested combined PR) · Owner: GYLDLAB · Updated: 2026-10-23
 
 ## 1. Goal & non-goals
 
@@ -137,3 +137,6 @@ Upstream evidence (retrieved 2026-10-23):
 [lint availability](https://bun.sh/docs/lint).
 Local checksum-verified Windows binary: `1.4.4+38afee6c8`; `bun fmt --help` exits0,
 `bun lint --help` exits1 with `error: Script not found "lint"`.
+The immutable [1.4.4 lint command source](https://github.com/oven-sh/bun/blob/bun-v1.4.4/src/runtime/cli/lint_command.rs)
+sets `IS_ENABLED` to `bun_core::Environment::IS_CANARY`; the command is disabled in
+stable builds, rather than hidden behind a supported runtime flag.
