@@ -86,3 +86,31 @@ test("native formatter stays within the JS/TS family and honors native ignore fi
     rmSync(root, { recursive: true, force: true });
   }
 });
+
+test("tracked filenames are literal paths rather than native formatter options", () => {
+  const root = mkdtempSync(join(tmpdir(), "keld-js-format-options-"));
+  try {
+    const files = ["--ignore-pattern=target.ts", "target.ts"];
+    const original = "export const value={answer:42};\n";
+    for (const file of files) writeFileSync(join(root, file), original);
+    for (const args of [
+      ["init", "--quiet"],
+      ["config", "maintenance.auto", "false"],
+      ["add", "--", ...files],
+    ]) {
+      expect(Bun.spawnSync(["git", ...args], { cwd: root }).exitCode).toBe(0);
+    }
+    expect(trackedSources(root)).toEqual(files);
+    expect(formatTrackedSources(root, true)).toBe(1);
+    for (const file of files) {
+      expect(readFileSync(join(root, file), "utf8")).toBe(original);
+    }
+    expect(formatTrackedSources(root, false)).toBe(0);
+    for (const file of files) {
+      expect(readFileSync(join(root, file), "utf8")).not.toBe(original);
+    }
+    expect(formatTrackedSources(root, true)).toBe(0);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});

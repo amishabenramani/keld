@@ -35,13 +35,15 @@ export function formatTrackedSources(root: string, check: boolean): number {
     return result.exitCode;
   };
   for (const file of files) {
+    // Keep a tracked name beginning with "--" from becoming a formatter option.
+    const argument = `./${file}`;
     // Bound the escaped argv below Windows' command-line limit, including quotes.
-    const cost = file.length * 2 + 3;
+    const cost = argument.length * 2 + 3;
     if (size + cost > 16_000 && batch.length > 0) {
       const code = flush();
       if (code !== 0) return code;
     }
-    batch.push(file);
+    batch.push(argument);
     size += cost;
   }
   return flush();
