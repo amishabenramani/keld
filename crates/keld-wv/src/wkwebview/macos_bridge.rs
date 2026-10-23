@@ -1087,6 +1087,10 @@ mod tests {
                 {"ok": false, "code": "KELD-WV-013", "detail": "application link ended before the renderer reply"},
                 {"ok": false, "code": "KELD-API-001", "detail": "KELD-API-001: application channel call failed"},
                 {"ok": false},
+                {"ok": false, "code": "KELD-API-001", "detail": "KELD-API-001 failed"},
+                {"ok": false, "code": "KELD-WV-013", "detail": "KELD-API-001: x"},
+                {"ok": false, "code": "KELD-API-002", "detail": "KELD-API-001: x"},
+                {"ok": false, "code": "KELD-WV-011", "detail": "KELD-WV-011: already prefixed"},
             ],
         }));
         for (local, message) in [
@@ -1115,11 +1119,19 @@ mod tests {
                 "KELD-API-001: application channel call failed",
             ),
             ("KELD-WV-011", "KELD-WV-011: renderer bridge request failed"),
+            // r2 §4.9: a detail with the code but no ": " gains the prefix.
+            ("KELD-API-001", "KELD-API-001: KELD-API-001 failed"),
+            // A detail that starts with a different code is prefixed, never
+            // re-coded: err.code comes only from the code field.
+            ("KELD-WV-013", "KELD-WV-013: KELD-API-001: x"),
+            ("KELD-API-002", "KELD-API-002: KELD-API-001: x"),
+            // Idempotent: an already prefixed detail is not prefixed twice.
+            ("KELD-WV-011", "KELD-WV-011: already prefixed"),
         ]) {
             assert_eq!(settled.as_array().expect("one call").len(), 1);
             assert_coded_rejection(&settled[0], code, message);
         }
-        assert_eq!(results.len(), 4);
+        assert_eq!(results.len(), 8);
         assert_eq!(out["pagehide"].as_array().expect("pagehide").len(), 1);
         assert_coded_rejection(
             &out["pagehide"][0],

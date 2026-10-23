@@ -976,37 +976,26 @@ fn only_the_no_generation_refusal_is_not_dispatched() {
     }
 }
 
-/// Criteria 11 and 13 for a malformed Bun ERR: a forwarded detail always
-/// starts with its own code, so the page's message prefix equals `err.code`
-/// and a host-only code can never lead the message. A well-formed message is
-/// forwarded byte for byte.
+/// Spec r2 §4.9 (one prefix rule, one owner): the host forwards a Bun ERR's
+/// message as the detail unchanged, whatever its shape; only the page facade
+/// applies the prefix rule. `code` comes only from the code field.
 #[test]
-fn forwarded_bun_details_lead_with_their_own_code() {
-    for (code, message, detail) in [
-        (
-            "KELD-API-002",
-            "KELD-API-002: no handler",
-            "KELD-API-002: no handler",
-        ),
-        (
-            "KELD-API-001",
-            "application failed",
-            "KELD-API-001: application failed",
-        ),
+fn forwarded_bun_details_are_unchanged() {
+    for (code, message) in [
+        ("KELD-API-002", "KELD-API-002: no handler"),
+        ("KELD-API-001", "application failed"),
+        ("KELD-API-001", "KELD-API-001 failed"),
+        ("KELD-API-002", "KELD-API-001: x"),
         // A code that is only a prefix of the host-only family, with a
-        // message that claims a host-only code.
-        (
-            "KELD-WV",
-            "KELD-WV-012: not sent",
-            "KELD-WV: KELD-WV-012: not sent",
-        ),
+        // message that claims a host-only code: not rewritten, not prefixed.
+        ("KELD-WV", "KELD-WV-012: not sent"),
     ] {
         assert_eq!(
             dispatched_echo_terminal(Some(Ok(PrimaryEchoReply::Err(CallError {
                 code: code.to_owned(),
                 message: message.to_owned(),
             })))),
-            RendererEchoTerminal::error(code, detail),
+            RendererEchoTerminal::error(code, message),
             "Bun ERR {code} {message:?}"
         );
     }
