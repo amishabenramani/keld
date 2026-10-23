@@ -620,6 +620,27 @@ export function checkWorkflowSecurity(source: string): void {
     }
   }
   if (checkouts === 0) fail("workflow must contain its audited checkout steps.");
+  // Every selected native test runner must install its reviewed executables.
+  // Inspecting only the inputs of an existing action is insufficient: deleting
+  // that action could fall back to an ambient, unreviewed Nextest/just binary.
+  for (const [jobName, consumers] of [
+    ["check", ["Worktree cache tool provenance test", "test"]],
+    ["windows-media", ["Windows media guard acceptance (KEL-132)"]],
+  ] as const) {
+    const steps = stepsByJob.get(jobName);
+    if (!steps) fail(`jobs.${jobName} must exist to run its native tests.`);
+    const installers = steps.flatMap((step, index) =>
+      typeof step.uses === "string" && actionName(step.uses) === "taiki-e/install-action"
+        ? [index] : []);
+    if (installers.length !== 1) {
+      fail(`jobs.${jobName} must contain exactly one reviewed taiki installer, never runner-default native tools.`);
+    }
+    for (const consumer of consumers) {
+      if (steps.indexOf(namedStep(steps, consumer)) <= installers[0]!) {
+        fail(`jobs.${jobName} reviewed taiki installer must precede ${consumer}.`);
+      }
+    }
+  }
   checkCodeqlJobs(jobs, stepsByJob);
   checkWebkitgtkAptCache(jobs, stepsByJob);
   checkCargoDenyJob(jobs, stepsByJob);

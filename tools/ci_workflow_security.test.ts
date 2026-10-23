@@ -442,6 +442,29 @@ test("both Nextest installers refuse unreviewed tools and integrity overrides", 
   }
 });
 
+test("native jobs reject missing, duplicate or delayed reviewed Nextest installers", () => {
+  for (const jobName of ["check", "windows-media"] as const) {
+    for (const kind of ["missing", "duplicate", "delayed"] as const) {
+      const altered = fixture();
+      const steps = altered.jobs[jobName]!.steps;
+      const index = steps.findIndex(candidate =>
+        String(candidate.uses ?? "").startsWith("taiki-e/install-action@"));
+      expect(index).toBeGreaterThan(0);
+      const installer = steps[index]!;
+      if (kind === "missing") steps.splice(index, 1);
+      if (kind === "duplicate") steps.splice(index, 0, structuredClone(installer));
+      if (kind === "delayed") {
+        steps.splice(index, 1);
+        steps.push(installer);
+      }
+      const reason = kind === "delayed"
+        ? "reviewed taiki installer must precede"
+        : "must contain exactly one reviewed taiki installer";
+      expect(() => check(altered), `${jobName}: ${kind}`).toThrow(reason);
+    }
+  }
+});
+
 test("Windows media oracle matches its reviewed full-file digest", () => {
   expect(() => checkWindowsMediaOracle(windowsMediaOracle)).not.toThrow();
   const mutated = Buffer.concat([windowsMediaOracle, Buffer.from("\n# inert override\n")]);
