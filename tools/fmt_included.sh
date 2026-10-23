@@ -128,6 +128,7 @@ if [[ "${1:-}" == test ]]; then
     cp rustfmt.toml "$temp/" 2>/dev/null || cp "$(dirname "$self")/../rustfmt.toml" "$temp/"
     cd "$temp"
     git init -q .
+    git config maintenance.auto false
     git config core.autocrlf false
     mkdir -p crates/demo/src/tests crates/demo/src/native tools
     cp "$self" tools/fmt_included.sh
