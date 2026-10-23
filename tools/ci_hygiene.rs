@@ -1342,7 +1342,11 @@ fn check_bun_test_job(text: &str) -> Result<(), String> {
             .flatten()
     });
     let format_lines = format_block.as_deref().map(|block| {
-        block.lines().map(str::trim).filter(|line| !line.is_empty()).collect::<Vec<_>>()
+        block
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty() && !line.starts_with('#'))
+            .collect::<Vec<_>>()
     });
     if format_lines != Some(vec![
         "- name: Native JavaScript formatting",

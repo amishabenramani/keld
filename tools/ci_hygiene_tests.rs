@@ -1914,6 +1914,19 @@ fn native_js_formatting_cannot_be_removed_or_skipped() {
 }
 
 #[test]
+fn native_js_formatting_allows_explanatory_comments() {
+    let temp = complete_fixture();
+    temp.write(
+        WORKFLOW,
+        &valid_workflow().replace(
+            "        run: bun tools/js_format.ts --check\n",
+            "        run: bun tools/js_format.ts --check\n      # Explain the next check.\n",
+        ),
+    );
+    check(temp.path()).expect("comments do not disable a native check");
+}
+
+#[test]
 fn local_native_js_formatting_cannot_leave_the_ci_inventory() {
     for recipe in ["ci", "ci-full"] {
         let temp = complete_fixture();
