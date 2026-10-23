@@ -690,6 +690,30 @@ export interface MirrorSource<Fact> {
 export function attachMirror<Fact>(link: WorkerLink, source: MirrorSource<Fact>): void;
 ```
 
+**Scoped mirror amendment approved — 2026-10-24:** [GH-1142's exact-content
+owner approval](https://github.com/gyldlab/keld/issues/1142#issuecomment-6374810328)
+binds [technical proposal `ad857aa3`](https://github.com/gyldlab/keld/blob/ad857aa3e26b42ff9ffc7d22c6449d8ebe99c588/docs/specs/gh1142-mirror-fact-retention.md),
+file SHA-256 `5fa690e57feafdf238ca16240b86242c9ab1ecdb76df65aab41b841f4d63fdd1`.
+The following retention/source-failure correction preserves the existing ring,
+terminal-cause and earlier-answer owners; production sources still need heap/alias qualification.
+
+For each admitted event, the helper calls `decode` exactly once in the state-applier
+phase and calls `apply` with that value. Only after apply succeeds does it retain
+that exact value for the same record. The ordinary event-dispatch callback removes
+the retained entry before calling `source.dispatch` with the applied value; it does
+not decode again. Object identity is preserved; primitives, including undefined,
+are valid values. The helper neither admits frames nor schedules listeners.
+
+This permits physical heap storage outside the ring for derived facts. Pending and
+in-flight helper-held facts correspond one-for-one to still-retained same-channel
+event records; their aggregate count is no greater than the matching retained event
+count. Storage metadata and consumed slots do not grow independently of this bound.
+After the transport's earlier-record drain, the helper holds no values at terminal
+finalization. Ordinary consumption may establish this; any additional residual
+clearing needs a reachable lifetime proof. The helper does not retain released payload copies or add an
+independent frame/byte backlog. Each production source needs reviewed maximum shape,
+heap budget and alias/lifetime accounting before attachment; count is not a byte cap.
+
 `attachMirror` registers `apply` through gh527's `setStateApplier` (at most one per
 channel) and `dispatch` on the same channel's event delivery. The contract:
 
@@ -701,13 +725,16 @@ channel) and `dispatch` on the same channel's event delivery. The contract:
    before `callBlocking` returns; listeners run after resume (criterion 19). A read is
    never fresher than the last applied host fact. ▲ divergence: Electron reads native
    state synchronously, so a user resize in progress is visible to Electron sooner.
-4. **Terminal on failure.** A throwing `apply` or `decode` closes the link with the
-   cause `KELD-IPC-005` (gh527 §4.4 and §4.6; criterion 11), and parked or pending
-   calls throw `KELD-IPC-022` naming that cause. keld-ipc's meanings are kept:
-   `KELD-IPC-003` is the codec failure inside `decode` and is never surfaced, and
-   `KELD-IPC-005` ("unexpected kipc frame or session state") is the link-close cause,
-   the same layering 02 §2 uses for an undecodable `ERR` payload. gh527's other wake
-   codes pass through unchanged. A mirror that missed a fact must not serve state.
+4. **Terminal on source failure.** Decode and apply run only in the framework state
+   phase. When a source failure wins the existing first-terminal-recorder transition,
+   its close cause is normalized to `KELD-IPC-005`; an internal codec `KELD-IPC-003`
+   does not escape as that cause. The existing transport ends delivery at the failing
+   record and drains earlier records, including earlier answers to pending calls.
+   Parked and still-unanswered pending callers report `KELD-IPC-022` naming the
+   recorded cause. A prior terminal cause and other transport wake codes keep their
+   existing priority. No failed fact is retained or dispatched. User dispatch exceptions remain
+   isolated listener failures; they do not become source failures or retain the
+   consumed entry. A mirror that missed a source fact cannot continue serving state.
 5. **Admission.** Facts reach only roles the host admits (criterion 20). For the first
    proof, that is the current primary RoleInstance generation.
 6. **Writes.** Setters are non-blocking `CALL`s, legal in `Open` and in
