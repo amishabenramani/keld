@@ -198,6 +198,11 @@ function checkWebkitgtkAptCache(jobs: Mapping, stepsByJob: Map<string, Mapping[]
 /** The CodeQL languages, each analysed by its own job `codeql-<language>`. */
 export const codeqlLanguages = ["rust", "javascript-typescript", "actions"] as const;
 
+// Both actions must use the same *reviewed* immutable revision. Merely
+// requiring equal 40-hex SHAs would allow all six init/analyze uses to drift
+// together to an unreviewed action while the security admission stays green.
+const approvedCodeqlActionSha = "24c54180a607b1449ed407dd24f251e4e9147c8d"; // v4.38.3
+
 /**
  * One language's job condition: its router output (tools/ci_changes.sh), or a
  * push whose router job did not succeed and so published no outputs. The push
@@ -248,6 +253,9 @@ function checkCodeqlJobs(jobs: Mapping, stepsByJob: Map<string, Mapping[]>): voi
     });
     if (String(init.uses).split("@")[1] !== String(analyze.uses).split("@")[1]) {
       fail("CodeQL init and analyze must use the same pinned commit.");
+    }
+    if (String(init.uses).split("@")[1] !== approvedCodeqlActionSha) {
+      fail("CodeQL init and analyze must use the reviewed pinned commit.");
     }
     if (steps.indexOf(init) >= steps.indexOf(analyze)) fail("CodeQL initialization must precede analysis.");
   }
@@ -428,6 +436,36 @@ function refuseInheritedCustomShell(owner: Mapping, label: string): void {
   }
 }
 
+/** Preserve the branch-protection entry points and the default token scope. */
+function checkWorkflowAdmission(workflow: Mapping): void {
+  const events = workflow.on;
+  if (events === null || typeof events !== "object" || Array.isArray(events)) {
+    fail("CI workflow must run on main pushes and all pull requests without filters.");
+  }
+  const triggers = mapping(events, "workflow.on");
+  const push = triggers.push;
+  if (push === null || typeof push !== "object" || Array.isArray(push)) {
+    fail("CI workflow must run on main pushes and all pull requests without filters.");
+  }
+  const pushTrigger = mapping(push, "workflow.on.push");
+  if (Object.keys(triggers).length !== 2 || !Object.hasOwn(triggers, "push")
+      || !Object.hasOwn(triggers, "pull_request") || triggers.pull_request !== null
+      || Object.keys(pushTrigger).length !== 1 || !Object.hasOwn(pushTrigger, "branches")
+      || !Array.isArray(pushTrigger.branches) || pushTrigger.branches.length !== 1
+      || pushTrigger.branches[0] !== "main") {
+    fail("CI workflow must run on main pushes and all pull requests without filters.");
+  }
+
+  const rawPermissions = workflow.permissions;
+  if (rawPermissions === null || typeof rawPermissions !== "object" || Array.isArray(rawPermissions)) {
+    fail("CI workflow permissions must remain read-only.");
+  }
+  const permissions = mapping(rawPermissions, "workflow.permissions");
+  if (Object.keys(permissions).length !== 1 || permissions.contents !== "read") {
+    fail("CI workflow permissions must remain read-only.");
+  }
+}
+
 function directRunStep(steps: Mapping[], name: string, expectedRun: string, label: string): void {
   const step = namedStep(steps, name);
   // No condition, custom shell, or failure-tolerant wrapper may shadow this
@@ -509,6 +547,7 @@ export function checkWorkflowSecurity(source: string): void {
   catch (error) { fail(`cannot parse workflow YAML: ${error instanceof Error ? error.message : String(error)}`); }
   finiteGraph(parsed);
   const workflow = mapping(parsed, "workflow (one YAML document)");
+  checkWorkflowAdmission(workflow);
   refuseInheritedCustomShell(workflow, "workflow");
   const jobs = mapping(workflow.jobs, "workflow.jobs");
   if (Object.keys(jobs).length === 0) fail("workflow.jobs must not be empty.");

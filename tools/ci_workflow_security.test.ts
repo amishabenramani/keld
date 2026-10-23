@@ -17,7 +17,13 @@ type FixtureJob = {
   "continue-on-error"?: unknown;
   "timeout-minutes"?: unknown;
 };
-type Fixture = { jobs: Record<string, FixtureJob>; env?: Record<string, unknown>; defaults?: { run: { shell: string } } };
+type Fixture = {
+  jobs: Record<string, FixtureJob>;
+  on?: Record<string, unknown>;
+  permissions?: Record<string, unknown>;
+  env?: Record<string, unknown>;
+  defaults?: { run: { shell: string } };
+};
 const source = readFileSync(join(import.meta.dir, "../.github/workflows/ci.yml"), "utf8");
 const windowsMediaOracle = readFileSync(join(import.meta.dir, "../crates/keld-wv/tests/windows_media_guard.ps1"));
 const selectedRustToolchain = readFileSync(join(import.meta.dir, "../rust-toolchain.toml"), "utf8");
@@ -53,6 +59,36 @@ function check(f: Fixture): void { checkWorkflowSecurity(Bun.YAML.stringify(f, n
 
 test("actual workflow passes parsed security admission", () => {
   expect(() => checkWorkflowSecurity(source)).not.toThrow();
+});
+
+test("CI retains main push and every pull request without trigger filters", () => {
+  const mutants: Array<[string, (f: Fixture) => void]> = [
+    ["missing push", f => { delete f.on!.push; }],
+    ["wrong push branch", f => { f.on!.push = { branches: ["no-ci-push"] }; }],
+    ["limited push path", f => { f.on!.push = { branches: ["main"], paths: ["docs/**"] }; }],
+    ["missing pull request", f => { delete f.on!.pull_request; }],
+    ["limited pull request", f => { f.on!.pull_request = { paths: ["docs/**"] }; }],
+    ["unexpected privileged trigger", f => { f.on!.pull_request_target = null; }],
+  ];
+  for (const [name, mutate] of mutants) {
+    const f = fixture();
+    mutate(f);
+    expect(() => check(f), name).toThrow("CI workflow must run on main pushes and all pull requests");
+  }
+});
+
+test("CI workflow-wide token privileges stay read-only", () => {
+  const mutants: Array<[string, (f: Fixture) => void]> = [
+    ["missing permissions", f => { delete f.permissions; }],
+    ["contents write", f => { f.permissions!.contents = "write"; }],
+    ["extra actions write", f => { f.permissions!.actions = "write"; }],
+    ["extra security events write", f => { f.permissions!["security-events"] = "write"; }],
+  ];
+  for (const [name, mutate] of mutants) {
+    const f = fixture();
+    mutate(f);
+    expect(() => check(f), name).toThrow("CI workflow permissions must remain read-only");
+  }
 });
 
 function executableFmtLines(run: unknown): Set<string> {
@@ -378,6 +414,16 @@ for (const language of codeqlLanguages) {
     expect(String(analyze.uses)).toBe(String(init.uses).replace("/init@", "/analyze@"));
     analyze.uses = `github/codeql-action/analyze@${"0".repeat(40)}`;
     expect(() => check(f)).toThrow("CodeQL init and analyze must use the same pinned commit");
+  });
+
+  test(`CodeQL ${language} rejects uniformly changed unreviewed pinned actions`, () => {
+    const f = fixture();
+    const init = step(f, job, "Initialize CodeQL");
+    const analyze = step(f, job, "Analyze and upload CodeQL results");
+    const unreviewedSha = "0".repeat(40);
+    init.uses = `github/codeql-action/init@${unreviewedSha}`;
+    analyze.uses = `github/codeql-action/analyze@${unreviewedSha}`;
+    expect(() => check(f)).toThrow("CodeQL init and analyze must use the reviewed pinned commit");
   });
 
   test(`CodeQL cannot omit the ${language} job`, () => {

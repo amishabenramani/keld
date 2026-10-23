@@ -257,39 +257,60 @@ EOF
     grep -q 'rejected 1' "$temp/out" || { cat "$temp/out" >&2; fail "self-test: a hostile file name was not rejected"; }
     echo "ok: a hostile planned file name is rejected"
 
-    # Negative control: a planted cache symlink is never staged, and the refresh
-    # replaces it instead of writing the downloaded package through it.
-    write_plan
-    rm -f "$cache/liba_1.0_amd64.deb"
-    printf 'outside target\n' >"$temp/c/outside/target"
-    ln -s "$temp/c/outside/target" "$cache/liba_1.0_amd64.deb"
-    run_install || { cat "$temp/out" >&2; fail "self-test 'symlink' failed"; }
-    expect_downloads "a planted cache symlink is not staged" "liba_1.0_amd64.deb"
-    [[ "$(cat "$temp/c/outside/target")" == "outside target" ]] ||
-        fail "self-test: the cache refresh wrote through a planted symlink"
-    [[ -f "$cache/liba_1.0_amd64.deb" && ! -L "$cache/liba_1.0_amd64.deb" ]] ||
-        fail "self-test: the planted symlink was not replaced by the verified package"
-    echo "ok: a planted cache symlink is replaced, never written through"
-
-    # The symlink target holds exact valid package bytes. Hash validation
-    # cannot reject this alone; the explicit -L guard must prevent staging
-    # an archive that is actually a link outside the cache directory.
-    rm -f "$cache/liba_1.0_amd64.deb"
-    ln -s "$temp/mirror/liba_1.0_amd64.deb" "$cache/liba_1.0_amd64.deb"
-    run_install || { cat "$temp/out" >&2; fail "self-test 'valid-package symlink' failed"; }
-    expect_downloads "a valid-hash symlink is never staged" "liba_1.0_amd64.deb"
-    grep -q 'staged 1 verified from the cache' "$temp/out" ||
-        fail "self-test: a valid-hash symlink was incorrectly staged"
-    [[ -f "$cache/liba_1.0_amd64.deb" && ! -L "$cache/liba_1.0_amd64.deb" ]] ||
-        fail "self-test: the valid-hash symlink was not replaced by an ordinary cache file"
-
-    # A symlinked cache directory is refused outright.
-    ln -s "$cache" "$temp/c/linked-cache"
-    if PATH="$temp/bin:$PATH" KELD_WEBKITGTK_PACKAGES="liba libb" "$self" install "$temp/c/linked-cache" >"$temp/out" 2>&1; then
-        fail "self-test: a symlinked cache directory was accepted"
+    # The file and directory symlink controls need POSIX symlinks. Windows Git
+    # Bash's default `ln -s` copies instead, which would make them vacuous or
+    # false failures; only there are they skipped, and the Ubuntu change-router
+    # job still runs them. Anywhere else a missing symlink fails the self-test.
+    mkdir "$temp/probe-dir"
+    : >"$temp/probe-file"
+    ln -s "$temp/probe-file" "$temp/probe-file-link" 2>/dev/null || true
+    ln -s "$temp/probe-dir" "$temp/probe-dir-link" 2>/dev/null || true
+    local symlinks=yes
+    [[ -L "$temp/probe-file-link" && -L "$temp/probe-dir-link" ]] || symlinks=no
+    if [[ "$symlinks" == no ]]; then
+        case "$(uname -s)" in
+            MINGW* | MSYS* | CYGWIN*)
+                echo "info: skipped the symlink controls: this Windows shell's ln -s makes no POSIX symlink (Ubuntu CI runs them)"
+                ;;
+            *)
+                fail "self-test: ln -s did not create a symlink, so the symlink controls cannot run"
+                ;;
+        esac
     fi
-    grep -q "is a symlink" "$temp/out" || fail "self-test: a symlinked cache directory did not report the refusal"
-    echo "ok: a symlinked cache directory is refused"
+    if [[ "$symlinks" == yes ]]; then
+        # Negative control: a planted cache symlink is never staged, and the refresh
+        # replaces it instead of writing the downloaded package through it.
+        write_plan
+        rm -f "$cache/liba_1.0_amd64.deb"
+        printf 'outside target\n' >"$temp/c/outside/target"
+        ln -s "$temp/c/outside/target" "$cache/liba_1.0_amd64.deb"
+        run_install || { cat "$temp/out" >&2; fail "self-test 'symlink' failed"; }
+        expect_downloads "a planted cache symlink is not staged" "liba_1.0_amd64.deb"
+        [[ "$(cat "$temp/c/outside/target")" == "outside target" ]] ||
+            fail "self-test: the cache refresh wrote through a planted symlink"
+        [[ -f "$cache/liba_1.0_amd64.deb" && ! -L "$cache/liba_1.0_amd64.deb" ]] ||
+            fail "self-test: the planted symlink was not replaced by the verified package"
+        echo "ok: a planted cache symlink is replaced, never written through"
+
+        # A symlink can contain exact valid archive bytes. The SHA256 check
+        # alone would accept it; the -L guard must reject this link anyway.
+        rm -f "$cache/liba_1.0_amd64.deb"
+        ln -s "$temp/mirror/liba_1.0_amd64.deb" "$cache/liba_1.0_amd64.deb"
+        run_install || { cat "$temp/out" >&2; fail "self-test 'valid-package symlink' failed"; }
+        expect_downloads "a valid-hash symlink is never staged" "liba_1.0_amd64.deb"
+        grep -q 'staged 1 verified from the cache' "$temp/out" ||
+            fail "self-test: a valid-hash symlink was incorrectly staged"
+        [[ -f "$cache/liba_1.0_amd64.deb" && ! -L "$cache/liba_1.0_amd64.deb" ]] ||
+            fail "self-test: the valid-hash symlink was not replaced by an ordinary cache file"
+
+        # A symlinked cache directory is refused outright.
+        ln -s "$cache" "$temp/c/linked-cache"
+        if PATH="$temp/bin:$PATH" KELD_WEBKITGTK_PACKAGES="liba libb" "$self" install "$temp/c/linked-cache" >"$temp/out" 2>&1; then
+            fail "self-test: a symlinked cache directory was accepted"
+        fi
+        grep -q "is a symlink" "$temp/out" || fail "self-test: a symlinked cache directory did not report the refusal"
+        echo "ok: a symlinked cache directory is refused"
+    fi
 
     # A failed index refresh stops before any install.
     write_plan
