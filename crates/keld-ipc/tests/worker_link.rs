@@ -12,6 +12,7 @@
 //! internal decode/apply/dispatch primitive. The `mirror_*` scenarios below
 //! assert that actual helper's identity, order, retention and failure behavior
 //! through this same BootstrapListener/host-writer harness.
+//! Its narrow cold heap-edge observer is `packages/@keld/kipc/test/mirror-retention.ts`.
 //!
 //! Anti-flake (spec §7): the only sleep is the arm-B 100 EVENT/s pacing, which is
 //! load generation. Every wait is on an observable (a frame, a role line, a
@@ -602,6 +603,44 @@ fn mirror_reentrant_dispatch_keeps_facts_subordinate_to_retained_records() {
 #[test]
 fn mirror_duplicate_attachment_preserves_the_first_source() {
     mirror_values("mirror-duplicate", false, true);
+}
+
+/// All facts stay intentionally alive in plain-object anchors; only the actual
+/// mirror's pending Array edges disappear after consumption. Correct-order
+/// append-only/read-head history must fail this physical-reference oracle.
+#[test]
+fn mirror_releases_consumed_fact_array_references() {
+    let (mut stream, role) = start("mirror-release");
+    long_reads(&stream);
+    let call = read_call_named(&mut stream, "mirror-release");
+    for seq in 0..3 {
+        host_event(&mut stream, seq, 8);
+    }
+    host_reply(&mut stream, call, b"release-reply");
+    let healthy = read_call_named(&mut stream, "mirror-release-healthy");
+    host_reply(&mut stream, healthy, b"healthy-reply");
+    let output = role.finish();
+    expect_report(
+        &output,
+        &[
+            ("mirror-release-reply", "release-reply"),
+            ("mirror-release-getter", "2"),
+            ("mirror-release-listeners-at-return", "0"),
+            ("mirror-release-before-facts", "3"),
+            ("mirror-release-before-indexed", "3"),
+            ("mirror-release-after-facts", "3"),
+            ("mirror-release-after-indexed", "0"),
+            ("mirror-release-anchors", "0,1,2"),
+            ("mirror-release-decodes", "3"),
+            ("mirror-release-applies", "3"),
+            ("mirror-release-events", "3"),
+            ("mirror-release-in-order", "true"),
+            ("mirror-release-gaps", "0"),
+            ("mirror-release-dups", "0"),
+            ("mirror-release-healthy", "healthy-reply"),
+            ("done", "true"),
+        ],
+    );
 }
 
 fn mirror_source_failure(scenario: &str, earlier_answer: bool, prior_close: bool) {

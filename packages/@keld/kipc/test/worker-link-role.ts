@@ -28,6 +28,7 @@ import {
 } from "../src/transport.ts";
 import { openWorkerLinkForTest, type WorkerLinkTestHooks } from "../src/test-hooks.ts";
 import { attachMirror, type MirrorSource } from "../../api/src/mirror.ts";
+import { MIRROR_FACT_MARKER, mirrorRetention } from "./mirror-retention.ts";
 
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
@@ -299,6 +300,46 @@ function mirrorValues(mode: "identity" | "primitives" | "reentrant" | "duplicate
     report("mirror-bound-checked", boundChecks > 0);
     report("mirror-second-dispatches", secondDispatches);
   };
+}
+
+// AC4 observes physical Array slot relations, independently of logical counts.
+async function mirrorRelease(): Promise<void> {
+  const { link } = await open();
+  type Fact = { [MIRROR_FACT_MARKER]: object; seq: number };
+  // Plain named properties intentionally keep all facts alive, while creating
+  // no Array Index edges. No fact-valued observer arrays/maps are introduced.
+  const anchors: Record<string, Fact> = {};
+  const events = collector(3);
+  let decodes = 0, applies = 0, getter = -1;
+  attachMirror(link, {
+    channel: LIFECYCLE_CHANNEL,
+    decode(payload): Fact {
+      const seq = seqOf(payload);
+      const fact = { [MIRROR_FACT_MARKER]: {}, seq };
+      anchors[String(seq)] = fact;
+      decodes += 1;
+      return fact;
+    },
+    apply(fact) { getter = fact.seq; applies += 1; },
+    dispatch(fact) { events.accept(fact.seq); },
+  });
+  report("mirror-release-reply", decoder.decode(link.callBlocking(ECHO_CHANNEL, text("mirror-release"), 30_000)));
+  report("mirror-release-getter", getter);
+  report("mirror-release-listeners-at-return", events.seqs.length);
+  const before = mirrorRetention(Bun.generateHeapSnapshot());
+  report("mirror-release-before-facts", before.facts);
+  report("mirror-release-before-indexed", before.indexedEdges);
+  await events.all;
+  // Finish actual callbacks and their task; this is no GC/time deadline.
+  await nextTask();
+  const after = mirrorRetention(Bun.generateHeapSnapshot());
+  report("mirror-release-after-facts", after.facts);
+  report("mirror-release-after-indexed", after.indexedEdges);
+  report("mirror-release-anchors", Object.keys(anchors).map((key) => anchors[key].seq).join(","));
+  report("mirror-release-decodes", decodes);
+  report("mirror-release-applies", applies);
+  reportOrder("mirror-release", events.seqs);
+  report("mirror-release-healthy", decoder.decode(await link.call(ECHO_CHANNEL, text("mirror-release-healthy"), 30_000)));
 }
 
 function mirrorFailure(mode: "decode" | "apply" | "earlier-answer" | "prior-close"): () => Promise<void> {
@@ -1111,6 +1152,7 @@ const SCENARIOS: Record<string, () => Promise<void>> = {
   "malformed-err": malformedErr,
   "arm-b": armB,
   "wake-rule": wakeRule,
+  "mirror-release": mirrorRelease,
   "mirror-identity": mirrorValues("identity"),
   "mirror-primitives": mirrorValues("primitives"),
   "mirror-reentrant": mirrorValues("reentrant"),
