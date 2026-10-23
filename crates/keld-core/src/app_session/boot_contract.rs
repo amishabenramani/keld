@@ -104,7 +104,7 @@ pub(super) fn parse_boot_bytes(bytes: &[u8]) -> Result<ParsedBoot, HostAppError>
     if !matches!(document.schema, 1 | 3) {
         return Err(boot_error(
             format!("unsupported schema {}", document.schema),
-            "Use schema 1 without a profile or schema 3 with an explicit profile; facade boot is not implemented here.",
+            "Regenerate the renderer boot with schema 1 without a profile or schema 3 with an explicit profile; facade boot is not implemented here.",
         ));
     }
     if document.name.is_empty() {
