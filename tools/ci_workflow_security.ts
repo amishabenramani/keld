@@ -539,6 +539,33 @@ export function checkRustToolchainPins(source: string, toolchainToml: string): v
   }
 }
 
+// Only these source-reviewed, immutable Actions may execute in the privileged
+// CI workflow. An arbitrary 40-hex action or mutable docker://image:tag is
+// still unreviewed code; the SHA syntax check alone is not an allowlist.
+const reviewedWorkflowActionRefs = new Set([
+  "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
+  approvedRustToolchainAction,
+  "Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6",
+  "actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9",
+  "actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9",
+  "oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6",
+  "taiki-e/install-action@ab6895351a88b908e96a4697860d4ffea5e57dbe",
+  `github/codeql-action/init@${approvedCodeqlActionSha}`,
+  `github/codeql-action/analyze@${approvedCodeqlActionSha}`,
+  "actions/dependency-review-action@a1d282b36b6f3519aa1f3fc636f609c47dddb294",
+]);
+
+function reviewedWorkflowActionUse(value: string): boolean {
+  if (reviewedWorkflowActionRefs.has(value)) return true;
+  // GitHub repository identity is case-insensitive. A harmless "/." suffix
+  // at checkout's own pinned repo root must not defeat its existing checkout
+  // credentials policy or be treated as a new third-party action.
+  const revision = value.split("@");
+  return revision.length === 2
+    && revision[1] === "3d3c42e5aac5ba805825da76410c181273ba90b1"
+    && ["actions/checkout", "actions/checkout/."].includes(actionName(value));
+}
+
 /** Validate security effects over parsed workflow objects, never YAML line shapes. */
 export function checkWorkflowSecurity(source: string): void {
   if (Buffer.byteLength(source) > 1024 * 1024) fail("workflow exceeds the 1 MiB parsing budget.");
@@ -645,6 +672,25 @@ export function checkWorkflowSecurity(source: string): void {
   ];
   if (JSON.stringify(commands) !== JSON.stringify(expectedCommands)) fail("dependency metadata admission must execute its exact checks without wrappers.");
   if (dependencies.indexOf(metadata) >= dependencies.indexOf(review)) fail("metadata admission must precede dependency review.");
+
+  // Parsed traversal catches flow-style YAML (e.g. "- {run: 'exit 1',
+  // continue-on-error: true}") that the separate line-oriented Rust hygiene
+  // scanner cannot interpret. A selected failed step must never pass CI required.
+  for (const [jobName, value] of Object.entries(jobs)) {
+    const job = mapping(value, `jobs.${jobName}`);
+    if (Object.hasOwn(job, "continue-on-error")) {
+      fail("CI workflow jobs and steps must not tolerate failures.");
+    }
+    for (const [index, step] of (stepsByJob.get(jobName) ?? []).entries()) {
+      if (Object.hasOwn(step, "continue-on-error")) {
+        fail("CI workflow jobs and steps must not tolerate failures.");
+      }
+      if (Object.hasOwn(step, "uses")
+          && !reviewedWorkflowActionUse(String(step.uses))) {
+        fail(`CI workflow steps must use only reviewed immutable action refs: jobs.${jobName}.steps[${index}].`);
+      }
+    }
+  }
 }
 
 if (import.meta.main) {

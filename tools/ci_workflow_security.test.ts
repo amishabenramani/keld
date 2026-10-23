@@ -91,6 +91,49 @@ test("CI workflow-wide token privileges stay read-only", () => {
   }
 });
 
+test("CI rejects unreviewed external actions, including mutable Docker image tags", () => {
+  const unreviewed = [
+    "docker://alpine:latest",
+    `docker://ghcr.io/example/unknown@sha256:${"0".repeat(64)}`,
+    `unreviewed/third-party-action@${"0".repeat(40)}`,
+    `oven-sh/setup-bun@${"0".repeat(40)}`,
+  ];
+  for (const uses of unreviewed) {
+    const f = fixture();
+    // The CodeQL JS job has the power to publish code-scanning results.
+    // An extra action before analysis must not inherit that privilege.
+    f.jobs["codeql-javascript-typescript"]!.steps.splice(2, 0, { uses });
+    expect(() => check(f), uses).toThrow("CI workflow steps must use only reviewed immutable action refs");
+  }
+});
+
+test("selected native and MSRV checks cannot become false-green via continue-on-error", () => {
+  const msrv = fixture();
+  const selected = step(msrv, "msrv", "cargo check on MSRV toolchain");
+  selected.run = "exit 1";
+  selected["continue-on-error"] = true;
+  expect(() => check(msrv)).toThrow("CI workflow jobs and steps must not tolerate failures");
+
+  const job = fixture();
+  job.jobs.msrv!["continue-on-error"] = true;
+  expect(() => check(job)).toThrow("CI workflow jobs and steps must not tolerate failures");
+
+  const harmlessLookingFalse = fixture();
+  step(harmlessLookingFalse, "msrv", "cargo check on MSRV toolchain")["continue-on-error"] = false;
+  expect(() => check(harmlessLookingFalse)).toThrow("CI workflow jobs and steps must not tolerate failures");
+
+  // GitHub YAML accepts inline flow mappings, which the older line-oriented
+  // Rust scanner missed. This must fail against parsed effects, not styling.
+  const start = source.indexOf("      - name: cargo check on MSRV toolchain\n");
+  const end = source.indexOf("\n  deny:\n", start);
+  expect(start).toBeGreaterThan(0);
+  expect(end).toBeGreaterThan(start);
+  const flow = source.slice(0, start)
+    + "      - {name: cargo check on MSRV toolchain, run: 'exit 1', continue-on-error: true}\n"
+    + source.slice(end);
+  expect(() => checkWorkflowSecurity(flow)).toThrow("CI workflow jobs and steps must not tolerate failures");
+});
+
 function executableFmtLines(run: unknown): Set<string> {
   // This CI step contains literal commands, not a generated shell program.
   // Match entire executable lines; echoed text and comments must not satisfy

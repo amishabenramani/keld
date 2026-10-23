@@ -257,27 +257,32 @@ EOF
     grep -q 'rejected 1' "$temp/out" || { cat "$temp/out" >&2; fail "self-test: a hostile file name was not rejected"; }
     echo "ok: a hostile planned file name is rejected"
 
-    # The file and directory symlink controls need POSIX symlinks. Windows Git
-    # Bash's default `ln -s` copies instead, which would make them vacuous or
-    # false failures; only there are they skipped, and the Ubuntu change-router
-    # job still runs them. Anywhere else a missing symlink fails the self-test.
+    # The file and directory controls need real POSIX symlinks. Windows Git
+    # Bash may copy one or both kinds instead; skip only the unsupported kind
+    # there. Ubuntu must run all three controls or fail closed.
     mkdir "$temp/probe-dir"
     : >"$temp/probe-file"
     ln -s "$temp/probe-file" "$temp/probe-file-link" 2>/dev/null || true
     ln -s "$temp/probe-dir" "$temp/probe-dir-link" 2>/dev/null || true
-    local symlinks=yes
-    [[ -L "$temp/probe-file-link" && -L "$temp/probe-dir-link" ]] || symlinks=no
-    if [[ "$symlinks" == no ]]; then
+    local file_symlinks=yes dir_symlinks=yes
+    [[ -L "$temp/probe-file-link" ]] || file_symlinks=no
+    [[ -L "$temp/probe-dir-link" ]] || dir_symlinks=no
+    if [[ "$file_symlinks" == no || "$dir_symlinks" == no ]]; then
         case "$(uname -s)" in
             MINGW* | MSYS* | CYGWIN*)
-                echo "info: skipped the symlink controls: this Windows shell's ln -s makes no POSIX symlink (Ubuntu CI runs them)"
+                if [[ "$file_symlinks" == no ]]; then
+                    echo "info: skipped the two file-symlink controls: Windows ln -s makes no POSIX file link (Ubuntu CI runs them)"
+                fi
+                if [[ "$dir_symlinks" == no ]]; then
+                    echo "info: skipped the directory-symlink control: Windows ln -s makes no POSIX directory link (Ubuntu CI runs it)"
+                fi
                 ;;
             *)
-                fail "self-test: ln -s did not create a symlink, so the symlink controls cannot run"
+                fail "self-test: ln -s did not create both POSIX symlink kinds, so all controls cannot run"
                 ;;
         esac
     fi
-    if [[ "$symlinks" == yes ]]; then
+    if [[ "$file_symlinks" == yes ]]; then
         # Negative control: a planted cache symlink is never staged, and the refresh
         # replaces it instead of writing the downloaded package through it.
         write_plan
@@ -302,7 +307,9 @@ EOF
             fail "self-test: a valid-hash symlink was incorrectly staged"
         [[ -f "$cache/liba_1.0_amd64.deb" && ! -L "$cache/liba_1.0_amd64.deb" ]] ||
             fail "self-test: the valid-hash symlink was not replaced by an ordinary cache file"
+    fi
 
+    if [[ "$dir_symlinks" == yes ]]; then
         # A symlinked cache directory is refused outright.
         ln -s "$cache" "$temp/c/linked-cache"
         if PATH="$temp/bin:$PATH" KELD_WEBKITGTK_PACKAGES="liba libb" "$self" install "$temp/c/linked-cache" >"$temp/out" 2>&1; then
