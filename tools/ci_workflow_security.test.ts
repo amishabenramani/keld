@@ -192,7 +192,7 @@ test("rustfmt Cargo command and changed-Rust routing preserve executable failure
   expect(() => check(skipped)).toThrow("rustfmt job must preserve");
   const hiddenCache = fixture();
   hiddenCache.jobs.fmt!.steps.splice(2, 0, {
-    uses: "sWatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6",
+    uses: "sWatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0",
   });
   expect(() => check(hiddenCache)).toThrow("rustfmt must not restore or save a compiled Cargo cache");
 });
@@ -418,6 +418,28 @@ test("Windows media runner avoids unused Bun and rustfmt installation", () => {
     typeof candidate.uses === "string" && candidate.uses.startsWith("dtolnay/rust-toolchain@"));
   expect(installers).toHaveLength(1);
   expect((installers[0]!.with as Record<string, unknown>).components).toBe("clippy");
+});
+
+test("both Nextest installers refuse unreviewed tools and integrity overrides", () => {
+  for (const jobName of ["check", "windows-media"] as const) {
+    const clean = fixture();
+    const actual = clean.jobs[jobName]!.steps.find(candidate =>
+      String(candidate.uses ?? "").startsWith("taiki-e/install-action@"));
+    expect(actual).toBeDefined();
+    expect(() => check(clean)).not.toThrow();
+    for (const [name, edit] of [
+      ["checksum disabled", (inputs: Record<string, unknown>) => { inputs.checksum = false; }],
+      ["fallback to cargo-install", (inputs: Record<string, unknown>) => { inputs.fallback = "cargo-install"; }],
+      ["unreviewed tool", (inputs: Record<string, unknown>) => { inputs.tool = "cargo-hack"; }],
+    ] as const) {
+      const altered = fixture();
+      const installer = altered.jobs[jobName]!.steps.find(candidate =>
+        String(candidate.uses ?? "").startsWith("taiki-e/install-action@"))!;
+      edit(installer.with as Record<string, unknown>);
+      expect(() => check(altered), `${jobName}: ${name}`)
+        .toThrow("reviewed taiki installer inputs");
+    }
+  }
 });
 
 test("Windows media oracle matches its reviewed full-file digest", () => {
@@ -705,7 +727,10 @@ test("the deny job admits no Docker action, including the former cargo-deny-acti
     const f = fixture();
     const steps = f.jobs.deny!.steps;
     steps.splice(steps.findIndex(candidate => candidate.name === cargoDenyMain), 0, { uses, with: { command: "check" } });
-    expect(() => check(f), uses).toThrow("jobs.deny must run exactly");
+    const reason = uses.startsWith("taiki-e/")
+      ? "taiki installer is not approved in jobs.deny"
+      : "jobs.deny must run exactly";
+    expect(() => check(f), uses).toThrow(reason);
   }
   const missing = fixture();
   delete missing.jobs.deny;

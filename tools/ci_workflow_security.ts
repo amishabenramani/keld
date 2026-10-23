@@ -545,7 +545,7 @@ export function checkRustToolchainPins(source: string, toolchainToml: string): v
 const reviewedWorkflowActionRefs = new Set([
   "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
   approvedRustToolchainAction,
-  "Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6",
+  "Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0",
   "actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9",
   "actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9",
   "oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6",
@@ -605,6 +605,17 @@ export function checkWorkflowSecurity(source: string): void {
         if (scalar(inputs["persist-credentials"]) !== "false") {
           fail(`${label} actions/checkout must set persist-credentials: false; every checkout is checked.`);
         }
+      }
+      if (identity === "taiki-e/install-action") {
+        // An approved action SHA alone cannot protect its binary trust policy:
+        // checksum:false or fallback:cargo-install bypasses reviewed defaults.
+        // These are the only two reviewed invocations and tool selections.
+        const tool = jobName === "check" ? "nextest,just@1.58.0"
+          : jobName === "windows-media" ? "nextest" : undefined;
+        if (!tool) fail(`${label} taiki installer is not approved in jobs.${jobName}.`);
+        exactKeys(step, ["uses", "with"], `${label} reviewed taiki installer step`);
+        inputsMatch(mapping(step.with, `${label}.with`), { tool },
+          `${label} reviewed taiki installer inputs`);
       }
     }
   }
