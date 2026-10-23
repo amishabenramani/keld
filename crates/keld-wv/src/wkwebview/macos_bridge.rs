@@ -17,7 +17,6 @@ use objc2_web_kit::{
     WKContentWorld, WKFrameInfo, WKScriptMessage, WKScriptMessageHandler, WKUserContentController,
     WKUserScript, WKUserScriptInjectionTime, WKWebView, WKWebViewConfiguration,
 };
-use serde::Serialize;
 use sha2::{Digest as _, Sha256};
 
 use crate::WebviewId;
@@ -661,50 +660,43 @@ impl MacRendererBridge {
     /// call this reset clears settles here once, as outcome unknown (GH-1095
     /// §4.7). If it commits, the old document already settled the call on
     /// `pagehide`, and the successor drops this result by its document.
-    pub(super) fn navigation_started(
-        &self,
-        webview: Option<&wry::WryWebView>,
-    ) -> Result<(), WvError> {
-        let Some(cleared) = lock_state(&self.state).navigation_started() else {
-            return Ok(());
-        };
-        let Some(webview) = webview else {
-            return Ok(());
-        };
-        let script = page_result_script(&PageOutcome::navigation_reset(cleared))?;
-        evaluate_in_world(webview, &self.world, &script);
-        Ok(())
+    /// Nothing here can fail after the call was cleared.
+    pub(super) fn navigation_started(&self, webview: Option<&wry::WryWebView>) {
+        if let Some(script) = navigation_reset_script(&self.state)
+            && let Some(webview) = webview
+        {
+            evaluate_in_world(webview, &self.world, &script);
+        }
     }
 
-    pub(super) fn deliver(
-        &self,
-        webview: &wry::WryWebView,
-        outcome: RendererBridgeOutcome,
-    ) -> Result<(), WvError> {
+    pub(super) fn deliver(&self, webview: &wry::WryWebView, outcome: RendererBridgeOutcome) {
         let request = outcome.request();
         let navigation = outcome.navigation();
         let Some(document) = lock_state(&self.state).settle(navigation, request) else {
-            return Ok(());
+            return;
         };
-        let script = page_result_script(&PageOutcome::settled(outcome, document))?;
+        let script = page_result_script(&PageOutcome::settled(outcome, document));
         evaluate_in_world(webview, &self.world, &script);
-        Ok(())
     }
+}
+
+/// Resets the bridge for a host `navigate()` and returns the script that
+/// settles the call the reset cleared, or `None` when no call was pending.
+fn navigation_reset_script(state: &Arc<Mutex<BridgeState>>) -> Option<String> {
+    let cleared = lock_state(state).navigation_started()?;
+    Some(page_result_script(&PageOutcome::navigation_reset(cleared)))
 }
 
 /// One native→isolated result (`keld.wv-link/v1`). `document` names the
 /// document nonce of the request it answers; the isolated world never relays
 /// it to the page (GH-1095 §4.7).
-#[derive(Debug, Serialize)]
+#[derive(Debug)]
 struct PageOutcome {
     request: u32,
     document: Option<String>,
     ok: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
     payload: Option<Vec<u8>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     code: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     detail: Option<String>,
 }
 
@@ -767,11 +759,37 @@ impl PageOutcome {
     }
 }
 
-/// The isolated-world script that delivers one native result.
-fn page_result_script(outcome: &PageOutcome) -> Result<String, WvError> {
-    let json = serde_json::to_string(outcome)
-        .map_err(|error| bridge_error(format!("failed to encode renderer reply: {error}")))?;
-    Ok(format!("globalThis.__keldBridgeNativeResult({json});"))
+impl PageOutcome {
+    /// The result as JSON. Every field is a number, a bool, a string or a
+    /// byte list, so building it cannot fail; an absent field is omitted.
+    fn to_json(&self) -> serde_json::Value {
+        let mut fields = serde_json::Map::new();
+        fields.insert(String::from("request"), self.request.into());
+        if let Some(document) = &self.document {
+            fields.insert(String::from("document"), document.as_str().into());
+        }
+        fields.insert(String::from("ok"), self.ok.into());
+        if let Some(payload) = &self.payload {
+            fields.insert(String::from("payload"), payload.clone().into());
+        }
+        if let Some(code) = &self.code {
+            fields.insert(String::from("code"), code.as_str().into());
+        }
+        if let Some(detail) = &self.detail {
+            fields.insert(String::from("detail"), detail.as_str().into());
+        }
+        serde_json::Value::Object(fields)
+    }
+}
+
+/// The isolated-world script that delivers one native result. It has no
+/// failure path, so a result whose pending entry was already removed is
+/// always delivered.
+fn page_result_script(outcome: &PageOutcome) -> String {
+    format!(
+        "globalThis.__keldBridgeNativeResult({});",
+        outcome.to_json()
+    )
 }
 
 fn handle_message(
@@ -889,10 +907,7 @@ fn reply_immediate_error(message: &WKScriptMessage, world: &WKContentWorld, refu
     let Some(webview) = (unsafe { message.webView() }) else {
         return;
     };
-    let Ok(script) = page_result_script(refused) else {
-        return;
-    };
-    evaluate_in_world(&webview, world, &script);
+    evaluate_in_world(&webview, world, &page_result_script(refused));
 }
 
 fn evaluate_in_world(webview: &WKWebView, world: &WKContentWorld, script: &str) {
@@ -1140,8 +1155,8 @@ mod tests {
             "predecessor": NONCE_A,
             "successor": NONCE_B,
             "channel": ADMITTED,
-            "staleRefusal": serde_json::to_value(&stale).expect("encode refusal"),
-            "ownReply": serde_json::to_value(&own).expect("encode reply"),
+            "staleRefusal": stale.to_json(),
+            "ownReply": own.to_json(),
         }));
         assert_eq!(out["sent"]["document"], NONCE_B);
         assert_eq!(
@@ -1198,7 +1213,7 @@ mod tests {
             "nonce": NONCE_A,
             "successor": NONCE_B,
             "channel": ADMITTED,
-            "reset": serde_json::to_value(&reset).expect("encode reset"),
+            "reset": reset.to_json(),
         }));
         assert_eq!(out["afterReset"].as_array().expect("settled").len(), 1);
         assert_coded_rejection(
@@ -1345,13 +1360,20 @@ mod tests {
             9,
             NONCE_A,
             "renderer document is stale or forged",
-        ))
-        .expect("refusal script");
+        ));
+        let json = refused
+            .strip_prefix("globalThis.__keldBridgeNativeResult(")
+            .and_then(|rest| rest.strip_suffix(");"))
+            .expect("one native result call");
         assert_eq!(
-            refused,
-            format!(
-                "globalThis.__keldBridgeNativeResult({{\"request\":9,\"document\":\"{NONCE_A}\",\"ok\":false,\"code\":\"KELD-WV-011\",\"detail\":\"renderer document is stale or forged\"}});"
-            )
+            serde_json::from_str::<Value>(json).expect("result JSON"),
+            json!({
+                "request": 9,
+                "document": NONCE_A,
+                "ok": false,
+                "code": "KELD-WV-011",
+                "detail": "renderer document is stale or forged",
+            })
         );
         let settled = PageOutcome::settled(
             RendererBridgeOutcome::Reply {
@@ -1363,7 +1385,7 @@ mod tests {
             NONCE_B.to_owned(),
         );
         assert_eq!(
-            serde_json::to_value(&settled).expect("encode"),
+            settled.to_json(),
             json!({"request": 5, "document": NONCE_B, "ok": true, "payload": [7]})
         );
     }
@@ -1383,7 +1405,7 @@ mod tests {
             .navigation_started()
             .expect("the reset clears the call");
         assert_eq!(
-            serde_json::to_value(PageOutcome::navigation_reset(cleared)).expect("encode"),
+            PageOutcome::navigation_reset(cleared).to_json(),
             json!({
                 "request": 4,
                 "document": nonce,
