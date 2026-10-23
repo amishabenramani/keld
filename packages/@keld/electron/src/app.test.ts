@@ -50,14 +50,23 @@ async function waitChildOrKill(
 }
 
 describe("app.quit vs Electron void", () => {
-  test("returns Promise<void> so unset KELD_APP_LINK is KELD-IPC-007, not silent void", async () => {
+  test("returns Promise<void> so unset KELD_APP_LINK is KELD-CLI-010, not silent void", async () => {
     const prev = process.env.KELD_APP_LINK;
     delete process.env.KELD_APP_LINK;
     try {
       const { app } = await import("./app");
       const result = app.quit();
       expect(result).toBeInstanceOf(Promise);
-      await expect(result).rejects.toThrow("KELD-IPC-007");
+      const rejection: unknown = await result.then(
+        () => undefined,
+        (err: unknown) => err,
+      );
+      expect(rejection).toBeInstanceOf(Error);
+      const message = (rejection as Error).message;
+      // GH-1118: the shared @keld/api owner reports the unset link under KELD-CLI-010.
+      expect(message).toContain("KELD-CLI-010");
+      // Negative control: KELD-IPC-007 is reserved for a rejected HELLO session token.
+      expect(message).not.toContain("KELD-IPC-007");
     } finally {
       if (prev === undefined) {
         delete process.env.KELD_APP_LINK;
