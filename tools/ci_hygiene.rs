@@ -1089,6 +1089,9 @@ fn check_doctest_job(text: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// The hosted runner set for lanes whose contracts differ per OS.
+const THREE_OS_MATRIX: &str = "os: [ubuntu-latest, macos-latest, windows-latest]";
+
 const WORKSPACE_JOB: &str = "workspace-contracts";
 const WORKSPACE_STEP: &str = "Local workspace path and process contracts";
 
@@ -1113,11 +1116,9 @@ fn check_workspace_contracts_job(text: &str) -> Result<(), String> {
             "CI-HYGIENE: `{WORKFLOW}` `{WORKSPACE_JOB}` must declare `needs: changes` and job-level `if: needs.changes.outputs.workspace == 'true'`; the router owns which diffs reach it."
         ));
     }
-    if workflow_job_matrix_os_lines(text, WORKSPACE_JOB)
-        != ["os: [ubuntu-latest, macos-latest, windows-latest]"]
-    {
+    if workflow_job_matrix_os_lines(text, WORKSPACE_JOB) != [THREE_OS_MATRIX] {
         return Err(format!(
-            "CI-HYGIENE: `{WORKFLOW}` `{WORKSPACE_JOB}` must run on `os: [ubuntu-latest, macos-latest, windows-latest]`; its path and process contracts differ per OS."
+            "CI-HYGIENE: `{WORKFLOW}` `{WORKSPACE_JOB}` must run on `{THREE_OS_MATRIX}`; its path and process contracts differ per OS."
         ));
     }
     if workflow_named_step_direct_keys(&block, WORKSPACE_STEP).unwrap_or_default()
@@ -1331,6 +1332,13 @@ fn check_bun_test_job(text: &str) -> Result<(), String> {
     if !uncommented_line_contains(&block, "if: needs.changes.outputs.ts == 'true'") {
         return Err(format!(
             "CI-HYGIENE: `{WORKFLOW}` `bun-test` must be gated on `if: needs.changes.outputs.ts == 'true'`. The router owns which diffs reach this lane; an ungated job wastes runners and a gate on another output silently never runs (contexts: needs, github, vars, inputs only — never `matrix`)."
+        ));
+    }
+    if workflow_job_level_property(&block, "runs-on").as_deref() != Some("${{ matrix.os }}")
+        || workflow_job_matrix_os_lines(text, "bun-test") != [THREE_OS_MATRIX]
+    {
+        return Err(format!(
+            "CI-HYGIENE: `{WORKFLOW}` `bun-test` must use `runs-on: ${{{{ matrix.os }}}}` over `{THREE_OS_MATRIX}`. Bun roles run on every OS, and the GH-1095 three-OS rows (AT-B1, AT-B2, AT-API2a) are proven only there (#1111)."
         ));
     }
     for job in ["bun-test", "check", "hygiene"] {

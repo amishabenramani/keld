@@ -172,7 +172,12 @@ fn valid_workflow() -> String {
             windows_media_step.as_str(),
             &release_helper_step(),
             "  bun-test:",
+            "    runs-on: ${{ matrix.os }}",
             "    if: needs.changes.outputs.ts == 'true'",
+            "    strategy:",
+            "      fail-fast: false",
+            "      matrix:",
+            "        os: [ubuntu-latest, macos-latest, windows-latest]",
             "    steps:",
             "      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0",
             "        with:",
@@ -1873,6 +1878,38 @@ fn deleting_the_bun_lane_fails() {
     temp.write(WORKFLOW, &without_lane);
     let error = check(temp.path()).expect_err("removing the only bun test lane must fail");
     assert!(error.contains("bun-test"), "{error}");
+}
+
+#[test]
+fn bun_lane_runs_on_every_os() {
+    let workflow = valid_workflow();
+    check_bun_test_job(&workflow).expect("the three-OS Bun lane passes");
+    let lane = "    if: needs.changes.outputs.ts == 'true'\n    strategy:\n      fail-fast: false\n      matrix:\n";
+    for (old, new, label) in [
+        (
+            format!("{lane}        os: [ubuntu-latest, macos-latest, windows-latest]\n"),
+            format!("{lane}        os: [ubuntu-latest]\n"),
+            "Ubuntu only",
+        ),
+        (
+            format!("{lane}        os: [ubuntu-latest, macos-latest, windows-latest]\n"),
+            format!("{lane}        os: [ubuntu-latest, macos-latest]\n"),
+            "no Windows",
+        ),
+        (
+            String::from("  bun-test:\n    runs-on: ${{ matrix.os }}\n"),
+            String::from("  bun-test:\n    runs-on: ubuntu-latest\n"),
+            "fixed runner",
+        ),
+    ] {
+        assert!(
+            workflow.contains(&old),
+            "fixture lacks the {label} mutation target"
+        );
+        let changed = workflow.replace(&old, &new);
+        let error = check_bun_test_job(&changed).expect_err(label);
+        assert!(error.contains("bun-test"), "{label}: {error}");
+    }
 }
 
 #[test]
