@@ -11,7 +11,7 @@ wrapper or packaged application release to install yet.
 - Git and Rust installed through rustup. The checked-in
   [rust-toolchain.toml](../../rust-toolchain.toml) selects the compiler and components;
   Cargo uses the committed lockfile in the commands below.
-- Bun on `PATH`. **Use CI-pinned Bun 1.4.2 for `just ci` and the full workspace test
+- Bun on `PATH`. **Use CI-pinned Bun 1.4.4 for `just ci` and the full workspace test
   gate.** The [Linux strict fixture](../../crates/keld-runtime/tests/linux_strict_boundary.rs)
   asserts that exact version. Record `bun --version` and `bun --revision` before a
   run. Some earlier demo observations used Bun 1.4.2; the newer
@@ -192,11 +192,11 @@ the same output directory. A successful `doctor` alone is not a desktop acceptan
 Start with [CONTRIBUTING.md](../../CONTRIBUTING.md). Install the verification tools
 listed in the [development guide](05-development-guide.md#1-prerequisites), including
 Python and a running Docker-compatible engine. The exact gate inventory belongs to the
-[justfile](../../justfile). Put the CI-pinned Bun 1.4.2 binary on this shell's `PATH`
+[justfile](../../justfile). Put the CI-pinned Bun 1.4.4 binary on this shell's `PATH`
 without replacing another project's global runtime, then verify the selected version:
 
 ```bash
-bun --version   # must report 1.4.2 for the full gate
+bun --version   # must report 1.4.4 for the full gate
 bun --revision
 just ci
 ```

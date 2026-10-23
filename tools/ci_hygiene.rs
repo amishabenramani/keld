@@ -1203,7 +1203,7 @@ fn check_msrv_avoids_apt(text: &str) -> Result<(), String> {
 fn check_bun_setup_steps(text: &str, job: &str) -> Result<(), String> {
     let invalid = || {
         format!(
-            "CI-HYGIENE: `{WORKFLOW}` `{job}` must have at least one `oven-sh/setup-bun` step, and every such step must pin its own `with.bun-version` to `1.4.2`. Use direct block-style steps and inputs; unrelated job text is not a runtime pin."
+            "CI-HYGIENE: `{WORKFLOW}` `{job}` must have at least one `oven-sh/setup-bun` step, and every such step must pin its own `with.bun-version` to `1.4.4`. Use direct block-style steps and inputs; unrelated job text is not a runtime pin."
         )
     };
     let literal_key = |key: &str| {
@@ -1304,7 +1304,7 @@ fn check_bun_setup_steps(text: &str, job: &str) -> Result<(), String> {
             .iter()
             .filter(|(key, _)| key == "bun-version")
             .collect();
-        if pins.len() != 1 || pins[0].1.trim_matches(['\'', '"']) != "1.4.2" {
+        if pins.len() != 1 || pins[0].1.trim_matches(['\'', '"']) != "1.4.4" {
             return Err(invalid());
         }
     }

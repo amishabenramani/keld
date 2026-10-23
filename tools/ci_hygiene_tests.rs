@@ -139,7 +139,7 @@ fn valid_workflow() -> String {
             "    steps:",
             "      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6",
             "        with:",
-            "          bun-version: '1.4.2'",
+            "          bun-version: '1.4.4'",
             "      - name: Check keld-ipc fuzz workspace",
             "        if: matrix.os == 'ubuntu-latest' && needs.changes.outputs.rust == 'true'",
             "        run: |",
@@ -176,7 +176,7 @@ fn valid_workflow() -> String {
             "    steps:",
             "      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0",
             "        with:",
-            "          bun-version: \"1.4.2\"",
+            "          bun-version: \"1.4.4\"",
             "      - name: bun test",
             "        shell: bash",
             "        env:",
@@ -214,7 +214,7 @@ fn valid_workflow() -> String {
             "          persist-credentials: false",
             "      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0",
             "        with:",
-            "          bun-version: \"1.4.2\"",
+            "          bun-version: \"1.4.4\"",
             "      - name: Documentation placeholder contracts",
             "        run: |",
             "          mkdir -p target/doc-placeholders",
@@ -1876,12 +1876,12 @@ fn deleting_the_bun_lane_fails() {
 }
 
 #[test]
-fn bun_ci_accepts_requested_142_and_rejects_other_versions() {
+fn bun_ci_accepts_requested_144_and_rejects_other_versions() {
     let requested = valid_workflow();
-    assert!(requested.contains("bun-version: \"1.4.2\""));
+    assert!(requested.contains("bun-version: \"1.4.4\""));
     check_bun_test_job(&requested).expect("the requested stable CI pin must pass");
-    for version in ["1.4.0", "latest", "1.4.2-canary.1", "1.4.20"] {
-        let changed = requested.replace("\"1.4.2\"", &format!("\"{version}\""));
+    for version in ["1.4.0", "1.4.2", "latest", "1.4.4-canary.1", "1.4.40"] {
+        let changed = requested.replace("\"1.4.4\"", &format!("\"{version}\""));
         assert!(
             check_bun_test_job(&changed).is_err(),
             "unexpected runtime {version} must not satisfy the CI pin"
@@ -1901,21 +1901,21 @@ fn bun_step_pins_accept_named_actions_and_ignore_job_strategy() {
 
 #[test]
 fn bun_pin_is_bound_to_the_action_input_not_job_text() {
-    let correct = "          bun-version: \"1.4.2\"\n";
+    let correct = "          bun-version: \"1.4.4\"\n";
     for replacement in [
         "          bun-version: latest\n",
         "          # missing bun-version\n",
-        "        env:\n          bun-version: \"1.4.2\"\n",
+        "        env:\n          bun-version: \"1.4.4\"\n",
     ] {
         let workflow = valid_workflow().replace(correct, replacement).replace(
             "      - name: bun test\n",
-            "      - run: |\n          echo 'bun-version: \"1.4.2\"'\n      - name: bun test\n",
+            "      - run: |\n          echo 'bun-version: \"1.4.4\"'\n      - name: bun test\n",
         );
         let temp = complete_fixture();
         temp.write(WORKFLOW, &workflow);
         let error = check(temp.path()).expect_err("unrelated text cannot pin an action");
         assert!(error.contains("bun-test"), "{error}");
-        assert!(error.contains("1.4.2"), "{error}");
+        assert!(error.contains("1.4.4"), "{error}");
     }
 }
 
@@ -1929,7 +1929,7 @@ fn every_bun_setup_in_each_bun_consumer_requires_its_own_pin() {
             "      - name: another Bun setup\n        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6\n",
             "      - name: folded Bun action\n        'uses': >-\n          oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6\n        with:\n          bun-version: latest\n",
             "      - uses: \"oven-sh/setup-b\\u0075n@0c5077e51419868618aeaa5fe8019c62421857d6\"\n        with:\n          bun-version: latest\n",
-            "      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6\n        with:\n          bun-version: '1.4.2'\n          \"bun-\\u0076ersion\": latest\n",
+            "      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6\n        with:\n          bun-version: '1.4.4'\n          \"bun-\\u0076ersion\": latest\n",
             "      - ? uses\n        : oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6\n        with:\n          bun-version: latest\n",
         ] {
             let temp = complete_fixture();
@@ -1939,7 +1939,7 @@ fn every_bun_setup_in_each_bun_consumer_requires_its_own_pin() {
             );
             let error = check(temp.path()).expect_err("every actual setup must be pinned");
             assert!(error.contains(job), "{error}");
-            assert!(error.contains("1.4.2"), "{error}");
+            assert!(error.contains("1.4.4"), "{error}");
         }
     }
 }
@@ -1962,11 +1962,11 @@ fn floating_bun_version_in_bun_lane_fails() {
     let temp = complete_fixture();
     temp.write(
         WORKFLOW,
-        &valid_workflow().replacen("bun-version: \"1.4.2\"", "bun-version: latest", 1),
+        &valid_workflow().replacen("bun-version: \"1.4.4\"", "bun-version: latest", 1),
     );
     let error = check(temp.path()).expect_err("an unpinned Bun runtime must fail");
     assert!(error.contains("bun-test"), "{error}");
-    assert!(error.contains("1.4.2"), "{error}");
+    assert!(error.contains("1.4.4"), "{error}");
 }
 
 #[test]
