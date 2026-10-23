@@ -27,6 +27,7 @@ pub mod link;
 pub mod receive;
 pub mod session;
 pub mod token;
+pub mod window;
 #[cfg(windows)]
 mod windows_named_pipe;
 
