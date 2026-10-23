@@ -1106,6 +1106,10 @@ test("equivalent scalar quotes and scope order preserve effects", () => {
 test("existing Rust CLI invokes semantic admission and preserves its refusal", () => {
   const repository = join(import.meta.dir, "..");
   const temporary = mkdtempSync(join(tmpdir(), "keld-workflow-security-"));
+  const started = performance.now();
+  let phase = "list tracked snapshot sources";
+  let sourceFiles = 0;
+  let cliInvocations = 0;
   try {
     const checkoutRoot = join(temporary, "checkout");
     mkdirSync(checkoutRoot);
@@ -1115,6 +1119,8 @@ test("existing Rust CLI invokes semantic admission and preserves its refusal", (
       new TextDecoder().decode(listing.stdout).split("\0").filter(Boolean),
     );
     files.add("tools/ci_workflow_security.ts");
+    sourceFiles = files.size;
+    phase = "copy tracked snapshot sources";
     for (const relative of files) {
       const destination = join(checkoutRoot, relative);
       mkdirSync(dirname(destination), { recursive: true });
@@ -1122,8 +1128,9 @@ test("existing Rust CLI invokes semantic admission and preserves its refusal", (
     }
     // `ci-hygiene check` compares the GH-508 channel allocation baseline with a
     // merge base, so the copied checkout is a git repository compared to its HEAD.
-    const git = (...args: string[]) =>
-      Bun.spawnSync([
+    const git = (...args: string[]) => {
+      phase = `fixture git ${args[0]}`;
+      return Bun.spawnSync([
         "git",
         "-C",
         checkoutRoot,
@@ -1139,6 +1146,7 @@ test("existing Rust CLI invokes semantic admission and preserves its refusal", (
         "init.defaultBranch=main",
         ...args,
       ]);
+    };
     expect(git("init", "--quiet").exitCode).toBe(0);
     // No detached `git maintenance` repack may outlive the commit and race cleanup (#670).
     expect(git("config", "maintenance.auto", "false").exitCode).toBe(0);
@@ -1150,6 +1158,7 @@ test("existing Rust CLI invokes semantic admission and preserves its refusal", (
       temporary,
       process.platform === "win32" ? "ci-hygiene.exe" : "ci-hygiene",
     );
+    phase = "compile Rust CLI";
     const compilation = Bun.spawnSync([
       "rustc",
       "--edition=2024",
@@ -1167,6 +1176,7 @@ test("existing Rust CLI invokes semantic admission and preserves its refusal", (
       PATH: `${dirname(process.execPath)}${delimiter}${process.env.PATH ?? ""}`,
     };
     const run = (yaml: string, env = runtimeEnv) => {
+      phase = `semantic CLI invocation ${++cliInvocations}`;
       writeFileSync(join(checkoutRoot, ".github/workflows/ci.yml"), yaml);
       return Bun.spawnSync([binary, "check", checkoutRoot], {
         cwd: repository,
@@ -1242,7 +1252,21 @@ test("existing Rust CLI invokes semantic admission and preserves its refusal", (
     );
     rmSync(join(checkoutRoot, "tools/ci_workflow_security.ts"));
     expect(run(source).exitCode).not.toBe(0);
+  } catch (error) {
+    console.error(
+      "workflow security fixture failed:",
+      JSON.stringify({
+        phase,
+        elapsedMs: Math.round(performance.now() - started),
+        sourceFiles,
+        cliInvocations,
+      }),
+    );
+    throw error;
   } finally {
     rmSync(temporary, { recursive: true, force: true });
   }
-}, 30000);
+  // Snapshot/Git setup and rustc precede all semantic checks. The original 30s
+  // kill switch expired during Git staging in full CI (GH1091); bound the full
+  // cold-tool fixture while retaining every acceptance and refusal assertion.
+}, 120_000);
