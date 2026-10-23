@@ -223,6 +223,9 @@ fn assert_unreaped_native_member_remains_denied(
         nix::unistd::getpgid(Some(Pid::from_raw(raw))),
         Err(Errno::ESRCH)
     );
+    // Reaping the leader does not prove the SIGKILLed member has finished
+    // exiting: await the kernel's zombie-only state before the oracles.
+    await_zombie_only_group(raw);
     assert_eq!(
         kill(Pid::from_raw(-raw), None),
         Err(Errno::EPERM),
