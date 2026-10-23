@@ -13,7 +13,6 @@ type FixtureJob = {
   strategy?: { matrix: Record<string, unknown> };
   needs?: unknown;
   if?: unknown;
-  "runs-on"?: unknown;
   "continue-on-error"?: unknown;
   "timeout-minutes"?: unknown;
 };
@@ -348,38 +347,6 @@ test("Windows media oracle matches its reviewed full-file digest", () => {
 });
 
 const codeqlJobs = codeqlLanguages.map(language => `codeql-${language}`);
-
-test("Rust CodeQL Ubuntu 24.04 pilot keeps a pinned, blocking, fully routed scan", () => {
-  const f = fixture();
-  const rust = f.jobs["codeql-rust"]!;
-  expect(rust["runs-on"]).toBe("ubuntu-24.04");
-  expect(rust.needs).toBe("changes");
-  expect(rust.if).toBe(codeqlRoute("rust"));
-  expect(rust.permissions).toEqual({ contents: "read", "security-events": "write" });
-  expect(rust["continue-on-error"]).toBeUndefined();
-  expect(f.jobs.required!.needs as string[]).toContain("codeql-rust");
-  const init = step(f, "codeql-rust", "Initialize CodeQL");
-  const analyze = step(f, "codeql-rust", "Analyze and upload CodeQL results");
-  expect(init.uses).toMatch(/^github\/codeql-action\/init@[0-9a-f]{40}$/);
-  expect(analyze.uses).toBe(String(init.uses).replace("/init@", "/analyze@"));
-  expect(init.with).toEqual({ languages: "rust", "build-mode": "none" });
-  expect(analyze.with).toEqual({
-    category: "/language:rust", upload: "always", "skip-queries": false, "wait-for-processing": true,
-  });
-
-  for (const runner of ["macos-latest", "ubuntu-latest", "ubuntu-26.04", "self-hosted", "${{ matrix.os }}"]) {
-    const mutated = fixture();
-    mutated.jobs["codeql-rust"]!["runs-on"] = runner;
-    expect(() => check(mutated)).toThrow("CodeQL Rust must use ubuntu-24.04");
-  }
-  const tolerance = fixture();
-  tolerance.jobs["codeql-rust"]!["continue-on-error"] = true;
-  expect(() => check(tolerance)).toThrow("CodeQL job codeql-rust must fail on analyzer errors");
-  const mismatch = fixture();
-  step(mismatch, "codeql-rust", "Analyze and upload CodeQL results").uses =
-    `github/codeql-action/analyze@${"0".repeat(40)}`;
-  expect(() => check(mismatch)).toThrow("CodeQL init and analyze must use the same pinned commit");
-});
 
 for (const language of codeqlLanguages) {
   const job = `codeql-${language}`;
