@@ -384,14 +384,17 @@
         ".githooks/*",
         "rust-toolchain.toml"
       ],
-      "sha256": "bcfc4a27a7333737a3f665938d148eb3ab63f3277b0e98037cb504e4aaf84884"
+      "sha256": "ce0aa8067387429fe3723793e140649993faff9bda882685345756bbf76245bb"
     },
     "audit-readers": {
       "patterns": [
         "docs/audits/*.py",
+        "tools/windows_architecture_closeout.py",
+        "tools/test_windows_architecture_closeout.py",
+        "tools/windows_architecture_ledger.py",
         "justfile"
       ],
-      "sha256": "a01bc355d85e95483f3a5d05b324fb3d54ff8c2bc03325ad194e772466933616"
+      "sha256": "ca691c5d5c93df0f58071127c2a3aa66c924ca29dd2278cd9d2187d33a9905fc"
     },
     "rustdoc-readers": {
       "patterns": [
