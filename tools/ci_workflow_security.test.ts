@@ -13,6 +13,7 @@ type FixtureJob = {
   strategy?: { matrix: Record<string, unknown> };
   needs?: unknown;
   if?: unknown;
+  "runs-on"?: unknown;
   "continue-on-error"?: unknown;
   "timeout-minutes"?: unknown;
 };
@@ -348,9 +349,36 @@ test("Windows media oracle matches its reviewed full-file digest", () => {
 
 const codeqlJobs = codeqlLanguages.map(language => `codeql-${language}`);
 
+test("CodeQL Rust stays on hosted macOS for platform-specific semantic coverage", () => {
+  expect(fixture().jobs["codeql-rust"]!["runs-on"]).toBe("macos-latest");
+  for (const runner of ["ubuntu-24.04", "ubuntu-latest", "self-hosted", "${{ matrix.os }}"]) {
+    const f = fixture();
+    f.jobs["codeql-rust"]!["runs-on"] = runner;
+    expect(() => check(f)).toThrow("CodeQL Rust must use macos-latest");
+  }
+});
+
 for (const language of codeqlLanguages) {
   const job = `codeql-${language}`;
   const other = codeqlLanguages.find(candidate => candidate !== language)!;
+
+  test(`CodeQL ${language} cannot tolerate job-level analysis failures`, () => {
+    for (const value of [true, false, "${{ true }}"]) {
+      const f = fixture();
+      f.jobs[job]!["continue-on-error"] = value;
+      expect(() => check(f)).toThrow(`CodeQL job ${job} must fail on analyzer errors`);
+    }
+  });
+
+  test(`CodeQL ${language} init and analyze must use an identical immutable SHA`, () => {
+    const f = fixture();
+    const init = step(f, job, "Initialize CodeQL");
+    const analyze = step(f, job, "Analyze and upload CodeQL results");
+    expect(String(init.uses)).toMatch(/^github\/codeql-action\/init@[0-9a-f]{40}$/);
+    expect(String(analyze.uses)).toBe(String(init.uses).replace("/init@", "/analyze@"));
+    analyze.uses = `github/codeql-action/analyze@${"0".repeat(40)}`;
+    expect(() => check(f)).toThrow("CodeQL init and analyze must use the same pinned commit");
+  });
 
   test(`CodeQL cannot omit the ${language} job`, () => {
     const f = fixture();

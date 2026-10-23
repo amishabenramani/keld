@@ -232,6 +232,10 @@ function checkCodeqlJobs(jobs: Mapping, stepsByJob: Map<string, Mapping[]>): voi
       contents: "read", "security-events": "write",
     }, "CodeQL job permissions");
     if (Object.hasOwn(job, "strategy")) fail(`CodeQL job ${jobName} must not set strategy; one job analyses exactly one language.`);
+    if (Object.hasOwn(job, "continue-on-error")) fail(`CodeQL job ${jobName} must fail on analyzer errors.`);
+    if (language === "rust" && scalar(job["runs-on"]) !== "macos-latest") {
+      fail("CodeQL Rust must use macos-latest for the reviewed macOS-specific semantic coverage.");
+    }
     const needs = Array.isArray(job.needs) && job.needs.length === 1 ? job.needs[0] : job.needs;
     if (needs !== "changes" || job.if !== codeqlRoute(language)) {
       fail(`CodeQL job ${jobName} must need changes and run only on \`${codeqlRoute(language)}\`; the router owns push and fallback selection.`);
@@ -242,6 +246,9 @@ function checkCodeqlJobs(jobs: Mapping, stepsByJob: Map<string, Mapping[]>): voi
     const analyze = requiredAction(steps, "Analyze and upload CodeQL results", "github/codeql-action/analyze", {
       category: `/language:${language}`, upload: "always", "skip-queries": "false", "wait-for-processing": "true",
     });
+    if (String(init.uses).split("@")[1] !== String(analyze.uses).split("@")[1]) {
+      fail("CodeQL init and analyze must use the same pinned commit.");
+    }
     if (steps.indexOf(init) >= steps.indexOf(analyze)) fail("CodeQL initialization must precede analysis.");
   }
 }
