@@ -1,4 +1,4 @@
-// @keld/kipc-transport sha256:f054baf639fd1b245248cc6f024cc53daa1d45e064687542d3932ed1ecf4cf95
+// @keld/kipc-transport sha256:566d45eff3dc569da43786461c72a041fd92adaccf39274f6d74b0a46e3bb13b
 /**
  * Canonical TypeScript kipc v2 app-link transport (KEL-136).
  *
@@ -978,7 +978,7 @@ export async function connectKipcSocket(
 /** Encodes a `u32` as an unsigned LEB128 varint. Rejects anything outside that range. */
 export function encodeVarint(n: number): Uint8Array {
   if (!Number.isInteger(n) || n < 0 || n > 0xffff_ffff) {
-    throw kipcError("KELD-IPC-003", `varint value must be an integer in [0, 4294967295], got ${n}`);
+    throw kipcError("KELD-IPC-003", "varint value must be an integer in [0, 4294967295]");
   }
   const bytes: number[] = [];
   let v = n;
@@ -988,6 +988,22 @@ export function encodeVarint(n: number): Uint8Array {
     if (v !== 0) byte |= 0x80;
     bytes.push(byte);
   } while (v !== 0);
+  return new Uint8Array(bytes);
+}
+
+/** Encodes an exact Rust u64 as an unsigned LEB128 varint without Number conversion. */
+export function encodeU64Varint(n: bigint): Uint8Array {
+  if (typeof n !== "bigint" || n < 0n || n > 0xffff_ffff_ffff_ffffn) {
+    throw kipcError("KELD-IPC-003", "u64 varint value must be a bigint in [0, 18446744073709551615]");
+  }
+  const bytes: number[] = [];
+  let value = n;
+  do {
+    let byte = Number(value & 0x7fn);
+    value >>= 7n;
+    if (value !== 0n) byte |= 0x80;
+    bytes.push(byte);
+  } while (value !== 0n);
   return new Uint8Array(bytes);
 }
 
