@@ -384,17 +384,14 @@
         ".githooks/*",
         "rust-toolchain.toml"
       ],
-      "sha256": "ce0aa8067387429fe3723793e140649993faff9bda882685345756bbf76245bb"
+      "sha256": "ef3cdc7b02b00e2989581cd266757324aa92f2baee1f0f03a01d3406699f6395"
     },
     "audit-readers": {
       "patterns": [
         "docs/audits/*.py",
-        "tools/windows_architecture_closeout.py",
-        "tools/test_windows_architecture_closeout.py",
-        "tools/windows_architecture_ledger.py",
         "justfile"
       ],
-      "sha256": "ca691c5d5c93df0f58071127c2a3aa66c924ca29dd2278cd9d2187d33a9905fc"
+      "sha256": "722fea0df758ae66a5af54ac7f7abff98325eaab980932922648b933466ab5ea"
     },
     "rustdoc-readers": {
       "patterns": [
@@ -404,7 +401,7 @@
         "rust-toolchain.toml",
         ".cargo/*"
       ],
-      "sha256": "4aa8fa2f211b747ba1ce303e1e72706dd99c69c78c8317e62d5801ad6021701c"
+      "sha256": "87c000796594e34c7cf5a5448fd1106750b4ddccf90f512e6e663ead50a46736"
     },
     "dependency-command": {
       "patterns": [
@@ -420,7 +417,7 @@
         "rust-toolchain.toml",
         "justfile"
       ],
-      "sha256": "531c9d29bb4df47211b20d43d47844ee793df4f4938ff4c4dccb002332c8ea9e"
+      "sha256": "cbe80221f6cabfe8a41ecec629a071e3c5541b473da66fecb7ae0d39139765d4"
     }
   },
   "live_inputs": {
