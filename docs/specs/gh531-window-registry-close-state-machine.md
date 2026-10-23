@@ -2,6 +2,17 @@
 Status: approved
 Linear: GH-531 (#517) · Owner: @0monish · Updated: 2026-10-07
 
+**Scoped amendment candidate — 2026-10-23:** pending independent technical review
+and exact-head approval. The status and date above preserve the approved baseline;
+they do not approve this amendment. The readiness/replay and recovery decisions below
+were selected by the agent under the repository owner's explicit delegation in the
+active user session. Their exact technical content will be bound to a separate
+approval record after independent review; no personal human review of these bytes is
+asserted. Carrier: [GH #446](https://github.com/gyldlab/keld/issues/446) /
+[PR #657](https://github.com/gyldlab/keld/pull/657); owning
+[claim](https://github.com/gyldlab/keld/issues/446#issuecomment-6370495240).
+The scoped recovery decision is recorded separately in §5.
+
 ## 1. Goal & non-goals
 
 draw.io's window path cannot run on Keld today. The host creates one primary window,
@@ -104,8 +115,15 @@ fail. "Owner" is the implementing ticket.
    `new BrowserWindow(opts)` returns, then `win.id` equals the `WindowId` in the host's
    `Created` event for that window, and the `Create` request schema has no identity
    field. *NC:* minting the id in the facade, so the id was never delivered by the host,
-   fails the id-equality assertion. **Snapshot source:** `Created.state` is always the
-   `WindowSnapshot` carried by keld-wv's `WindowBuilt`, read from the built native
+   fails the id-equality assertion. **Independent identity control (2026-10-23
+   amendment candidate):** the fixture advances and retires host registry entries
+   before starting the fresh facade, so its first host-supplied reference
+   (`HostWindowRef` in the facade, `WindowRef` on the wire) has WindowId 41 while the
+   facade's first local allocation would be 1. Assert the host pair in the mirror
+   and subsequent addressed calls as well as public `win.id`. Substituting the local
+   counter for either host-supplied identity component must fail; coincident counters
+   are not evidence of host ownership. **Snapshot source:** `Created.state` is always
+   the `WindowSnapshot` carried by keld-wv's `WindowBuilt`, read from the built native
    window (with any buffered facts overlaid, §4.e), including when `Create` has `x` and
    `y` as `None`. Given a fake UI port whose `WindowBuilt` snapshot is
    `(x 37, y 91, 800×600, focused, not maximized, not full-screen)` for a `Create` with
@@ -176,11 +194,14 @@ fail. "Owner" is the implementing ticket.
 
 ### (c) Window #1
 
-13. **No host window before the app asks.** Given a facade boot as F01-T2 declares it,
+13. **No host window before the app asks.** Given a fresh facade boot in its initial
+    RoleInstance generation, with no surviving windows, as F01-T2 declares it,
     when Ready is observed, then the host's native window count is 0. After the first
     `new BrowserWindow()` it is 1, and that window's WindowId is 1. *NC:* keeping
     `CreateInitialWindow` for facade boots makes the count 1 at Ready and 2 after the
-    constructor. Owner: F01-T2 (count at Ready); F02-T2 (after construction).
+    constructor. This zero/count-one assertion does not apply to a recovered
+    RoleInstance generation with surviving windows (criterion 46). Owner: F01-T2
+    (count at Ready); F02-T2 (after construction).
 14. **Registry is live at Ready.** Given a facade boot, when `Create` is sent in the
     same task that `whenReady()` resolves in, then it succeeds. *NC:* starting the
     registry after Ready is written makes this first `Create` fail with the registry's
@@ -223,18 +244,44 @@ fail. "Owner" is the implementing ticket.
     entry (`Authority::HostInternal`, #613 criterion 16). Window events for a window are
     written only to the app link of that window's `owner_role_generation`, which is
     always a `primary` role declared in KEL-75, and only after that link subscribed with
-    the X05-T2 `lifecycle` `Subscribe` call. The facade subscribes when its link binds
-    (at `LifecycleLink` construction over `WorkerLink.open`), before any user code can
-    call `new BrowserWindow`, so a successor's windows transfer as soon as its link is up
-    (amended by #657). A raw (non-facade) role that never subscribes leaves transferred
-    windows in the recovery gap until session end, and a native close stays held there
+    the X05-T2 `lifecycle` `Subscribe` call. The facade sends `Subscribe` when its link
+    binds (at `LifecycleLink` construction over `WorkerLink.open`). Sending the call
+    is not readiness. **Completion barrier (2026-10-23 amendment candidate):** on the
+    first accepted subscription, the host transfers the surviving windows and writes
+    the complete `Created` replay before the correlated lifecycle `Subscribed`
+    reply, through the same ordered writer (§4.b ordering rule 4). That reply marks
+    replay completion, including an empty replay. The facade must apply every
+    replayed window fact and accept that reply, as well as receive the host's `Ready`,
+    before it emits public `app` `ready`, resolves `whenReady()`, returns true from
+    `isReady()`, or permits the constructor to issue a usable `Create`. These
+    conditions may arrive in either order: successor g2 can receive raw `Ready`
+    during installation before its host reader processes `Subscribe`. That raw event
+    alone must not open any public readiness surface. A refused or incomplete
+    subscription cannot open the barrier. Repeating an accepted subscription is
+    idempotent under gh508 criterion 16: it neither replays the windows again nor
+    resets their `adoptable` marks. A raw (non-facade) role that never subscribes leaves
+    surviving windows in the recovery gap until session end, and a native close stays
+    held there
     (T2). That is a recorded limitation owned by F02-T3 (#450). `SubscribeRefused` applies, and changes no state, when the link's role is
     not the declared `primary` (`RoleNotAdmitted`), when the host has no window entry
     (`UnknownChannel`, a peer newer than its host), or for the reasons #613 defines.
     *NC 1:* broadcasting to every connected role fails, because a second authenticated
     `app-bound` role link that also sends `Subscribe` is refused `RoleNotAdmitted` and
     receives no window frame. *NC 2:* an unsubscribed primary link receives zero window
-    frames. Owner: F02-T2. F06-T5 reuses this rule for display and theme facts.
+    frames. **Barrier fixture:** deliver g2 raw `Ready` first, hold the subscription
+    replay/reply behind an explicit fence, and assert that all three public readiness
+    surfaces remain closed and no constructor `Create` is issued. Release the full
+    replay followed by the accepted reply; a `ready` listener and a `whenReady()`
+    continuation must observe the complete mirror and may construct immediately.
+    Repeat with zero survivors. Independently hold `Ready` after a completed
+    subscription and assert the same closed barrier. *NC 3:* publishing readiness on
+    raw `Ready` or merely sending `Subscribe` fails the first fence. *NC 4:* writing
+    `Subscribed` before the final replay event fails the host wire-order assertion;
+    skipping a replay applier fails the listener's mirror assertion. *NC 5:* repeating
+    `Subscribe` after adoption and re-arming the consumed mark fails the idempotence
+    assertion. Owner: F02-T2, coordinated with F01-T2's public readiness adapter.
+    F06-T5 reuses the admission rule, not this window-specific replay barrier, for
+    display and theme facts.
 
 ### (e) Close state machine (the #419 rules plus PANEL-D19)
 
@@ -433,13 +480,26 @@ fail. "Owner" is the implementing ticket.
 
 ### (i) Adoption after role loss (D6; amended by #657)
 
-46. **A successor `Create` adopts before it builds.** Given successor g2 subscribed,
-    windows 1 and 3 adoptable, 2 claimed by a setter: three `Create`s answer
-    `Adopted 1`, `Adopted 3`, `Created 4`, and the fake UI port builds exactly one
-    window. A `Create` before `Subscribe` answers `ERR 045`, builds nothing. *NC:*
-    deleting the adoption arm builds on the first `Create`; deleting the 045 check
-    builds before Subscribe. *Falsifier:* any sequence building a window while an
-    adoptable one exists. Owner: F02-T2.
+46. **A successor `Create` adopts before it builds.** Given successor g2 past
+    criterion 20's completion barrier, windows 41 and 43 adoptable, 42 claimed by a
+    setter: three `Create`s answer `Adopted 41`, `Adopted 43`, `Created 44`, and the fake
+    UI port builds exactly one window. The host fixture has advanced and retired its
+    earlier entries, while g2's fresh facade allocation counter would start at 1.
+    Each adopting constructor must return the same replayed facade object, retain its
+    host-supplied `HostWindowRef`/wire `WindowRef`, and address later calls with that
+    pair. The native identities of all three survivors, including already-claimed 42,
+    are unchanged; native retention does not depend on adoption eligibility.
+    A `Create` before `Subscribe` answers `ERR 045`, builds nothing. *NC 1:* deleting
+    the adoption arm builds on the first `Create`; deleting the 045 check builds before
+    `Subscribe`. *NC 2:* minting a facade id or substituting the fresh local allocation
+    counter fails the noncoincident host-reference assertions. **Independent positive
+    control:** with no eligible survivor, two intentional application `Create`s must
+    return two distinct windows and facade objects and cause two native builds.
+    *NC 3:* a one-window cap, returning the first object for every constructor, or
+    suppressing the second legitimate `Create` fails that control. *Falsifier:* a
+    native build when that `Create` has an eligible adoptable survivor (with T3's
+    renderer-authority matching once T3 lands), or a changed native identity of any
+    survivor. Owner: F02-T2.
 
 ## 4. Design
 
@@ -655,7 +715,11 @@ registers each code in `docs/engineering/keld-error-codes.md` with a fix sentenc
 4. Reply placement: a `REPLY` is written after every `EVENT` that its call caused
    (`Created` before `Created`; `Destroyed`, then any `LastWindowClosed`, before
    `Destroyed`, T11). With gh527 step 1, the
-   caller therefore sees host state as of the reply.
+   caller therefore sees host state as of the reply. The window `Subscribe` refinement
+   (2026-10-23 amendment candidate) uses this same rule across channels: the complete
+   window `Created` replay precedes the correlated lifecycle `Subscribed` reply.
+   Applying the replay and accepting that reply completes criterion 20's subscription
+   barrier; no new completion message or wire variant is introduced.
 5. Cross-channel: for the last window, `Destroyed` (window channel) is written before
    `LastWindowClosed` (lifecycle channel) on the same link (criterion 32).
 
@@ -684,9 +748,12 @@ pattern. The channel constant comes from the X05-T4 generated file. Rejected opt
 
 This spec consumes F01-T2's rule (#446) and adds no adoption shim.
 
-- Facade boot (the declaration F01-T2 chooses): the host writes Ready after
+- Fresh facade boot in the initial RoleInstance generation (the declaration F01-T2
+  chooses): the host writes Ready after
   authenticated `HELLO` and creates no window. The registry is constructed before Ready
   is written (criterion 14). Window #1 is the first `Create`, so its WindowId is 1.
+  Public facade readiness additionally waits for criterion 20's accepted subscription
+  and applied complete replay; host Ready alone is not that barrier.
 - Renderer-declared boot: unchanged. The host-created initial window is not entered in
   the registry, no window-channel frame is written, and its `CloseRequested` keeps
   today's teardown and `LastWindowClosed` behaviour (criterion 15).
@@ -762,7 +829,8 @@ Host registry, per window:
 | `Destroyed` | tombstone; pair retired for the session | none |
 
 Per-window registry state is `(WindowGeneration, WebviewId, owner_role_generation,
-state, last close_seq, adoptable)` (`adoptable` amended by #657). `Create` admission mints a new entry in `Opening` with
+state, last close_seq, adoptable)` (`adoptable` amended by #657). A non-adopting `Create`
+admission mints a new entry in `Opening` with
 `owner_role_generation` set to the calling link's RoleInstance generation.
 
 **Subscription before the table (amended by #657).** A `window` CALL from a link not
@@ -770,6 +838,9 @@ subscribed to `window` is refused `KELD-CORE-045` before any other check and cha
 state (criterion 46). `Subscribe` itself is accepted before Ready; the not-ready check
 (`KELD-CORE-040`, criterion 14) applies only to subscribed links. A supervised restart starts unsubscribed (gh508 c16), so a
 successor's transfer has one point, its `Subscribe`.
+The first accepted subscription's full replay precedes its `Subscribed` reply;
+criterion 20 defines when the facade can expose readiness. An idempotent repeat does
+not transfer or replay again and does not re-arm an `adoptable` mark.
 
 **Adoption before the table (amended by #657).** A `Create` from the owner while one or
 more of its windows are `adoptable` mints nothing. It answers `REPLY Adopted { window }`
@@ -1147,6 +1218,10 @@ reversible, and each names the observation that reopens it.
   and no state change; otherwise it creates. The constructor returns the replayed
   object. The app owns navigation of adopted windows. *Falsifier and NCs:* criterion
   46. (amended by #657)
+  *Approval history:* the 2026-10-07 decision above remains the historical owner
+  record. The scoped 2026-10-23 candidate in §5 explicitly qualifies the schema-2
+  document guarantee and requires its own exact-head approval; the earlier decision
+  is not approval of that new wording.
 - **D5. Channel id.** F02-T2 appends the window-state channel entry under #508's rule
   (draft PR #613). This spec fixes no number. *Falsifier:* #613's approved rule
   assigns ids by a mechanism other than an appended table entry.
@@ -1348,13 +1423,23 @@ there is no `PROTOCOL_VERSION` bump. Review gates: wire protocol and public API.
 - Must not touch: the `WebEngine` trait; frame layout, `PROTOCOL_VERSION`, `HELLO`;
   `keld-guard` evaluation; keld-runtime's `RoleRegistry`; the Windows and Linux
   backends beyond exhaustive-match arms; the workspace `Cargo.toml` (no dependency).
-- PROPOSED, awaiting the repository owner's exact-content approval (#657): "Adoption
-  (D6): no KEL-139 amendment. AC5's same-window half holds in every boot mode; its
-  same-document half holds where the host owns navigation (schema 1) and, in facade
-  boots, until the recovered main navigates." *Falsifier:* `NativeWindowObserver`
-  shows a new window identity after facade recovery. Until approved, the replaced
-  sentence "Adoption (D6): no KEL-139 amendment; AC5 holds for every boot mode."
-  stands.
+- **Scoped recovery decision — 2026-10-23 owner delegation; amendment candidate,
+  pending independent technical review and exact-head approval (GH #446 / PR #657).**
+  Schema 1 retains native-window and document identity under the existing KEL-139
+  AC5 contract. In schema 2, every surviving native window retains its identity across
+  Bun-role recovery, whether it is eligible for constructor adoption, already claimed,
+  or still unclaimed. Its document identity remains unchanged until the recovered
+  application explicitly navigates it. This is an explicit, scoped amendment to the
+  schema-2 document-continuity guarantee; it does not relabel the historical KEL-139 or D6
+  approval as approval of the new wording. Authentication, RoleInstance generation
+  fencing, navigation generation ownership, and the existing retired FsBroker
+  quiescence prerequisite remain unchanged. No close or shutdown behavior changes.
+  *Falsifiers:* an independent native observer finds any surviving window replaced;
+  a document identity changes before the recovered app's explicit navigation; a stale
+  RoleInstance generation gains authority; or successor Ready/privileged calls become
+  observable before retired FS work quiesces. The delegated choice and owning claim
+  are linked in the amendment provenance above. Until its exact technical candidate
+  is approved, the previously approved contract remains in force.
 - Re-slice (amended by #657): the D6 transfer, the `Created` replay at `Subscribe`
   without `pending_close`, `adoptable`, criterion 46, `WindowResponse::Adopted`,
   `KELD-CORE-045`, and the constructor returning the replayed object are in this
@@ -1410,7 +1495,8 @@ there is no `PROTOCOL_VERSION` bump. Review gates: wire protocol and public API.
 | Criteria | Test | Kind |
 |---|---|---|
 | 2–6, 21, 25–27, 30, 31, 33, 46 | pure registry state-machine tests in keld-core with a fake UI port and an injected clock; no AppKit; one test enumerates all 76 (state, input) rows of §4.e and asserts that an adopting `Create` changes no window's state | unit |
-| 20 | `lifecycle.rs` pinned `Subscribe` bytes; `app_session.rs` link tests for an unsubscribed primary, a subscribed primary and a refused `app-bound` role | unit, integration |
+| 20 | `lifecycle.rs` pinned `Subscribe` bytes; `app_session.rs` link tests for an unsubscribed primary, a subscribed primary and a refused `app-bound` role; host replay-before-accepted-reply ordering; facade fences for g2 raw Ready before replay/reply, completed subscription before Ready, empty replay, and idempotent repeat | unit, integration |
+| 1, 46 | facade identity/adoption fixtures whose host references differ from the fresh facade allocation counter; all-survivor native identity checks; two legitimate Creates with no eligible survivor produce two windows | unit, integration |
 | 8, 10, 11 | the golden-vector file replayed by `cargo test -p keld-ipc` and `bun test`; existing vectors and the KEL-133 corpus unmodified | unit, cross-language |
 | 9, 43 | the X05-T4 drift check and table validation | unit |
 | 1, 13, 14, 16, 17, 20, 22–24, 32, 36–38 | real-Mac host + Bun fixture (macOS GUI session); the frame counter is read from the host link | integration |
@@ -1435,6 +1521,12 @@ Counts, not durations, are the oracle.
 
 - **Wire protocol:** yes. A new app-link channel, payloads and receive-policy rows; no
   `PROTOCOL_VERSION` bump (§4.b).
+  The 2026-10-23 amendment additionally requires named independent wire-order review
+  of the complete replay before the existing correlated `Subscribed` reply and the
+  facade's replay-application barrier (criterion 20, §4.b rule 4), on the exact final
+  diff. This refines the window consumer of gh508 criterion 16 / §4.4 step 6 without
+  changing its admission rules, idempotence, payloads, discriminants or subscription
+  owner; no new wire variant is added.
 - **Public API:** yes. `@keld/electron` `BrowserWindow`, `WebContents`,
   `BrowserWindowOptions`, `WebPreferences` and the event maps ("Public surface"); the
   `@keld/api` internal mirror; keld-ipc public wire types and the lifecycle
@@ -1461,3 +1553,6 @@ there (gh527 §10 Q1).
 
 None. The questions raised in the first draft were decided under the orchestrator's
 delegation, and D6 by the owner; all are recorded, with falsifiers, in §4.i.
+This records the approved baseline. The separately identified 2026-10-23 amendment
+candidate still needs independent technical review and exact-head approval; its owner
+choice has been made under the explicit delegation recorded above.
