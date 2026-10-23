@@ -266,6 +266,7 @@
       ],
       "inputs": [
         "bunfig.toml",
+        "crates/keld-cli/templates/hello/.gitignore",
         ".github/*",
         ".gitignore",
         ".config/*",
@@ -336,6 +337,7 @@
       ],
       "inputs": [
         ".gitignore",
+        "*/.gitignore",
         "*.js",
         "*.jsx",
         "*.mjs",
@@ -412,7 +414,7 @@
         ".githooks/*",
         "rust-toolchain.toml"
       ],
-      "sha256": "21522e711ef207d3a6c3d328ba23747d9712f8b9195c407b8b1d9391913ae272"
+      "sha256": "351d99a6f54e41b8982239ac7068187dbd7ed53a1b2e3db9bf98651b6dedf7c8"
     },
     "audit-readers": {
       "patterns": [

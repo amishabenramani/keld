@@ -101,6 +101,34 @@ test("direct native formatter selects JS/TS, honors ignores and checks without w
     expect(readFileSync(join(root, "ignored.ts"), "utf8")).toBe(original);
     expect(native().exitCode).toBe(0);
     expect(native("--check").exitCode).toBe(0);
+    const nestedIgnore = "crates/keld-cli/templates/hello/.gitignore";
+    const nestedSource = "crates/keld-cli/templates/hello/keld.config.ts";
+    mkdirSync(dirname(join(root, nestedSource)), { recursive: true });
+    const templateIgnore = readFileSync(
+      join(import.meta.dir, "../", nestedIgnore),
+      "utf8",
+    );
+    writeFileSync(join(root, nestedSource), original);
+    writeFileSync(
+      join(root, nestedIgnore),
+      templateIgnore + "\nkeld.config.ts\n",
+    );
+    expect(
+      Bun.spawnSync(["git", "add", "-f", nestedSource], { cwd: root }).exitCode,
+    ).toBe(0);
+    expect(Bun.spawnSync(["git", "add", "."], { cwd: root }).exitCode).toBe(0);
+    expect(native("--check").exitCode).toBe(0);
+    // Only the real nested ignore path changes; the tracked TS bytes do not.
+    writeFileSync(join(root, nestedIgnore), templateIgnore);
+    const changed = Bun.spawnSync(["git", "diff", "--name-only"], {
+      cwd: root,
+    });
+    expect(changed.exitCode).toBe(0);
+    expect(changed.stdout.toString().trim()).toBe(nestedIgnore);
+    expect(native("--check").exitCode).toBe(1);
+    expect(readFileSync(join(root, nestedSource), "utf8")).toBe(original);
+    expect(native().exitCode).toBe(0);
+    expect(native("--check").exitCode).toBe(0);
     const invalid = "export const broken={{{\n";
     writeFileSync(join(root, "syntax-error.ts"), invalid);
     expect(native("--check").exitCode).toBe(2);

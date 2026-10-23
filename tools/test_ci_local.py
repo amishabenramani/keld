@@ -628,6 +628,16 @@ class RouterFailureBoundaryTests(unittest.TestCase):
 
 
 class ProductionConsumerTests(unittest.TestCase):
+    def test_nested_template_ignore_changes_select_native_formatter(self):
+        source = Path(__file__).resolve().parent.parent
+        with tempfile.TemporaryDirectory(prefix="keld-native-nested-ignore-route-") as temporary:
+            root = Path(temporary)
+            tracked_snapshot(source, root)
+            selected = ci_inputs.classify(
+                root, ["crates/keld-cli/templates/hello/.gitignore"], paths_only=True)
+            self.assertFalse(selected["input_all"])
+            self.assertTrue(selected["local_js-fmt-check"])
+
     def test_root_ignore_changes_select_native_formatter(self):
         source = Path(__file__).resolve().parent.parent
         with tempfile.TemporaryDirectory(prefix="keld-native-ignore-route-") as temporary:
