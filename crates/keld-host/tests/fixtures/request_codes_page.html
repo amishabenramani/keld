@@ -96,15 +96,17 @@ async function invoke(label) {
   }
 }
 // The app's own resend rule (spec gh1095 §4.4): one resend, as a new invoke,
-// only after KELD-WV-012 and only on a later user action; never a timer and
-// never a second resend. Keld itself never resends.
+// only after KELD-WV-012 (not dispatched) or KELD-API-002 (no app code ran),
+// and only on a later user action; never a timer and never a second resend.
+// Keld itself never resends.
+const RESENDABLE = new Set(["KELD-WV-012", "KELD-API-002"]);
 const pendingCalls = [];
 let resendLabel = null;
 let resent = false;
 document.getElementById("resend").addEventListener("click", event => {
   const target = resendLabel;
   const previous = outcomes.find(outcome => outcome.label === target);
-  if (!event.isTrusted || target === null || resent || previous?.code !== "KELD-WV-012") {
+  if (!event.isTrusted || target === null || resent || !RESENDABLE.has(previous?.code)) {
     post({ phase: "click", trusted: event.isTrusted, resent: false, ...state() })
       .catch(error => post({ phase: "error", error: String(error) }));
     return;

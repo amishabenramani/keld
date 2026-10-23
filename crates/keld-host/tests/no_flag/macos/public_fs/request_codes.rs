@@ -1,7 +1,9 @@
 //! GH-1095 (`docs/specs/gh1095-request-error-codes.md`) on the real no-flag
 //! host, its supervised Bun and the real `WKWebView` page: which code the page
-//! gets for its own call when Bun dies at each request stage, when the page
-//! navigates while a call is pending, and what one user-driven resend does.
+//! gets for its own call before the first generation is admitted, when Bun
+//! dies at each request stage (including as its reply leaves), when the page
+//! navigates while a call is pending, when the restarted generation has no
+//! handler yet, and what one user-driven resend does.
 //!
 //! The harness is promoted from the GH-1081 experiments (never-merged PR
 //! #1082). No production hook: every hold is an ordinary fixture HTTP wait
@@ -31,6 +33,11 @@ use std::time::Instant;
 
 const NOT_DISPATCHED: &str = "KELD-WV-012";
 const OUTCOME_UNKNOWN: &str = "KELD-WV-013";
+/// Bun's own code for a CALL that found no handler (S11): asserted by
+/// `@keld/api`, passed through by the host unchanged.
+const NO_HANDLER: &str = "KELD-API-002";
+const NO_HANDLER_DETAIL: &str =
+    "KELD-API-002: application channel has no registered handler; no application code ran";
 const NO_GENERATION_DETAIL: &str = "no application generation is admitted; the call was not sent";
 const LINK_DETAIL: &str = "application link ended before the renderer reply";
 const PAGEHIDE_MESSAGE: &str = "KELD-WV-013: renderer document navigated before reply";
@@ -38,6 +45,53 @@ const PAGEHIDE_MESSAGE: &str = "KELD-WV-013: renderer document navigated before 
 /// a renderer CALL: the dispatch point.
 const KIPC_CALL: &str = "KELD_KEL142_KIPC_CALL ";
 const RENDERER_ADMIT: &str = "KELD_KEL142_RENDERER_ADMIT ";
+
+/// Where the fixture app registers its Echo handler (spec gh1095 §4.4).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Registration {
+    /// At module top, before the first lifecycle call opens the link: no
+    /// CALL can find the handler missing.
+    BeforeReady,
+    /// After `whenReady` resolved, behind a test-owned hold: the window in
+    /// which a CALL that reaches Bun gets `KELD-API-002`.
+    InsideReady,
+}
+
+impl Registration {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::BeforeReady => "before",
+            Self::InsideReady => "inside",
+        }
+    }
+}
+
+/// One launch's fixture inputs. `Scenario::new` is every arm before AT-12d.
+struct Scenario<'a> {
+    name: &'a str,
+    /// The page's scripted steps, one long-poll wait each.
+    steps: Value,
+    /// The steps of the page the observer serves at `/successor-page`, the
+    /// target of a `navigate` step.
+    successor_steps: Value,
+    registration: Registration,
+    /// Admit G1, wait for its Ready, and wait for the page and window before
+    /// `start` returns. The pre-admission check keeps G1 held before its first
+    /// lifecycle call and finishes the presentation itself.
+    admit_first: bool,
+}
+
+impl<'a> Scenario<'a> {
+    fn new(name: &'a str, steps: Value) -> Self {
+        Self {
+            name,
+            steps,
+            successor_steps: json!([]),
+            registration: Registration::BeforeReady,
+            admit_first: true,
+        }
+    }
+}
 
 /// One staged no-flag host launch and its ordinary observation journal.
 struct Launch {
@@ -53,6 +107,10 @@ struct Launch {
     boots: Vec<RecoveryBoot>,
     steps: usize,
     stderr: StderrTap,
+    /// The pre-armed CoreGraphics window observer, until `await_presentation`
+    /// consumes it.
+    presentation: Option<NativeWindowObserver>,
+    name: String,
 }
 
 /// Live host stderr: every line is both kept and offered to condition waits,
@@ -122,25 +180,20 @@ impl StderrTap {
 }
 
 impl Launch {
-    /// `successor_steps` drive the page the observer serves at
-    /// `/successor-page`, the target of a `navigate` step.
-    fn start(
-        fixture: &PublicFsProject,
-        name: &str,
-        steps: &Value,
-        reload_steps: &Value,
-        successor_steps: &Value,
-    ) -> Self {
+    fn start(fixture: &PublicFsProject, scenario: Scenario<'_>) -> Self {
         let observer = Observation::bind_recovery();
         let port = observer.port.to_string();
-        let app = include_str!("../../../fixtures/request_codes_app.ts").replace("__PORT__", &port);
+        let app = include_str!("../../../fixtures/request_codes_app.ts")
+            .replace("__PORT__", &port)
+            .replace("__REGISTRATION__", scenario.registration.as_str());
+        // A reloaded document runs no step of its own: it only reports ready.
         let template = include_str!("../../../fixtures/request_codes_page.html")
             .replace("__PORT__", &port)
-            .replace("__RELOAD_STEPS__", &reload_steps.to_string());
-        observer.serve_page(template.replace("__STEPS__", &successor_steps.to_string()));
-        let page = template.replace("__STEPS__", &steps.to_string());
-        let (stage, bun_image) = fixture.stage_app_body(name, &app, &page);
-        let mut presentation = NativeWindowObserver::arm_for_title(&fixture.census, TITLE);
+            .replace("__RELOAD_STEPS__", "[]");
+        observer.serve_page(template.replace("__STEPS__", &scenario.successor_steps.to_string()));
+        let page = template.replace("__STEPS__", &scenario.steps.to_string());
+        let (stage, bun_image) = fixture.stage_app_body(scenario.name, &app, &page);
+        let presentation = NativeWindowObserver::arm_for_title(&fixture.census, TITLE);
         let mut cleanup = spawn_shipping_host(&stage);
         let host = cleanup.cli.as_mut().expect("host custody");
         let host_pid = host.id();
@@ -159,14 +212,28 @@ impl Launch {
             boots: Vec::new(),
             steps: 0,
             stderr,
+            presentation: Some(presentation),
+            name: scenario.name.to_owned(),
         };
         let boot = launch.await_boot(1);
-        launch.admit(boot);
-        launch.adopt_ready(1, boot);
-        launch.await_count("page-ready", 1);
-        let windows = presentation.expect_initial(host_pid, name);
-        assert_eq!(windows.len(), 1, "one host-owned WKWebView window");
+        if scenario.admit_first {
+            launch.admit(boot);
+            launch.adopt_ready(1, boot);
+            launch.await_presentation();
+        }
         launch
+    }
+
+    /// The page reported ready and the host owns exactly one on-screen
+    /// window with the fixture title.
+    fn await_presentation(&mut self) {
+        self.await_count("page-ready", 1);
+        let windows = self
+            .presentation
+            .take()
+            .expect("the window observer is consumed once")
+            .expect_initial(self.host_pid, &self.name);
+        assert_eq!(windows.len(), 1, "one host-owned WKWebView window");
     }
 
     /// Receive one ordinary report. The host-minted possession token in a boot
@@ -270,6 +337,12 @@ impl Launch {
     fn crash_and_hold_successor(&mut self) -> u32 {
         let retired = self.bun;
         kill_pid(retired);
+        self.hold_successor(retired)
+    }
+
+    /// After `retired`, the admitted Bun, was killed: its successor, booted
+    /// and held before its admission, while the host and guardian live on.
+    fn hold_successor(&mut self, retired: u32) -> u32 {
         let successor = self.await_boot(self.boots.len() + 1);
         assert_ne!(successor, retired, "a fresh Bun generation");
         await_process_gone(retired);
@@ -279,6 +352,26 @@ impl Launch {
         );
         assert_eq!(parent_process(successor), self.guardian, "successor parent");
         successor
+    }
+
+    /// `Registration::InsideReady` only: `bun` holds inside `whenReady` with
+    /// no handler registered. Until the test releases it, a CALL that reaches
+    /// `bun` finds no handler.
+    fn await_registration_hold(&mut self, bun: u32) {
+        self.await_where("hold before registration", |report| {
+            report["phase"] == "recovery-registration-pending" && report["pid"] == bun
+        });
+    }
+
+    /// `Registration::InsideReady` only: release `bun`'s hold inside
+    /// `whenReady` and wait for its handler to exist.
+    fn release_registration(&mut self, bun: u32) {
+        self.await_registration_hold(bun);
+        self.observer
+            .send_recovery_command(RecoveryCommand::RetirePending(bun));
+        self.await_where("handler registered", |report| {
+            report["phase"] == "handler-registered" && report["pid"] == bun
+        });
     }
 
     /// One real OS pointer click on the page's full-window button, then the
@@ -461,13 +554,7 @@ fn gh1095_restart_gap_call_is_not_dispatched_and_never_replayed() {
         .iter()
         .map(|label| json!({"do":"invoke","label":label}))
         .collect();
-    let mut run = Launch::start(
-        &fixture,
-        "gh1095-gap",
-        &Value::from(steps),
-        &json!([]),
-        &json!([]),
-    );
+    let mut run = Launch::start(&fixture, Scenario::new("gh1095-gap", Value::from(steps)));
     let first = run.bun;
     let baseline = run.step();
     let successor = run.crash_and_hold_successor();
@@ -545,10 +632,7 @@ fn run_after_write(arm: AfterWrite) {
         .collect();
     let mut run = Launch::start(
         &fixture,
-        "gh1095-after-write",
-        &Value::from(steps),
-        &json!([]),
-        &json!([]),
+        Scenario::new("gh1095-after-write", Value::from(steps)),
     );
     let first = run.bun;
     let baseline = run.step();
@@ -618,13 +702,7 @@ fn run_reload(pending: bool) -> (Value, Vec<String>, String) {
         steps.push(json!({"do":"invoke-pending","label":"held-at-reload"}));
     }
     steps.push(json!({"do":"reload"}));
-    let mut run = Launch::start(
-        &fixture,
-        "gh1095-reload",
-        &Value::from(steps),
-        &json!([]),
-        &json!([]),
-    );
+    let mut run = Launch::start(&fixture, Scenario::new("gh1095-reload", Value::from(steps)));
     let bun = run.bun;
     let baseline = run.step();
     succeeded_on(&baseline, "g1-baseline", bun).expect("healthy call before the reload");
@@ -698,14 +776,9 @@ fn run_navigation(navigate: bool) -> (Value, Value, Vec<String>, u32) {
     } else {
         json!({"do":"await-pending"})
     });
-    let successor = json!([{"do":"invoke","label":"successor-call"}]);
-    let mut run = Launch::start(
-        &fixture,
-        "gh1095-navigation",
-        &Value::from(steps),
-        &json!([]),
-        &successor,
-    );
+    let mut scenario = Scenario::new("gh1095-navigation", Value::from(steps));
+    scenario.successor_steps = json!([{"do":"invoke","label":"successor-call"}]);
+    let mut run = Launch::start(&fixture, scenario);
     let bun = run.bun;
     let baseline = run.step();
     succeeded_on(&baseline, "g1-baseline", bun).expect("healthy call before the navigation");
@@ -877,7 +950,7 @@ fn run_resend(ready_first: bool) -> (Value, Value, ResendCensus) {
         {"do":"invoke","label":"gap"},
         {"do":"arm-resend","label":"gap"},
     ]);
-    let mut run = Launch::start(&fixture, "gh1095-resend", &steps, &json!([]), &json!([]));
+    let mut run = Launch::start(&fixture, Scenario::new("gh1095-resend", steps));
     let first = run.bun;
     let baseline = run.step();
     succeeded_on(&baseline, "g1-baseline", first).expect("healthy G1 call");
@@ -907,4 +980,323 @@ fn run_resend(ready_first: bool) -> (Value, Value, ResendCensus) {
         renderer_admits: marker_count(&stderr, RENDERER_ADMIT),
     };
     (first_click, second_click, census)
+}
+
+/// AT-12d's premise, checked on the shipping host. Spec gh1095 §7 asks for a
+/// page call before the first generation is admitted, with the page already
+/// loaded. While G1 holds before its first lifecycle call, so no HELLO has
+/// been sent and nothing is admitted, the host owns no on-screen window and
+/// no page has reported: the window is created only after the authenticated
+/// HELLO (architecture 01 §5; `run_app` awaits the bound generation before it
+/// creates the WebKit engine and the bridge window). No renderer call can
+/// exist in the startup gap, so criterion 1's startup clause is carried by the
+/// restart gap (AT-12a, AT-12c). This is the test that must fail before an
+/// AT-12d arm is needed. Control: after admission the same census sees one
+/// window, the page binds and its first call is served.
+#[test]
+fn gh1095_no_renderer_exists_before_the_first_admission() {
+    let fixture = PublicFsProject::new(Policy::Narrow);
+    let mut scenario = Scenario::new("gh1095-startup", json!([{"do":"invoke","label":"first"}]));
+    scenario.admit_first = false;
+    let mut run = Launch::start(&fixture, scenario);
+    let bun = run.boots[0].pid;
+    // Snapshots at the hold, not waits. The boot report is the positive
+    // event: a host that presented its window before spawning Bun would have
+    // it on screen before Bun could report.
+    let windows_at_hold = native_windows(run.host_pid, TITLE);
+    let pages_at_hold = run
+        .journal
+        .iter()
+        .filter(|report| report["phase"] == "page-ready")
+        .count();
+    run.admit(bun);
+    run.adopt_ready(1, bun);
+    run.await_presentation();
+    let first = run.step();
+    let journal = run.journal.clone();
+    let stderr = run.quit();
+    println!(
+        "KELD_GH1095_AT12D_PREMISE bun={bun} windows_at_hold={windows_at_hold:?} pages_at_hold={pages_at_hold} first={} handled={:?} renderer_admits={} kipc_calls={}",
+        outcome(&first, "first"),
+        handled_labels(&journal, bun),
+        marker_count(&stderr, RENDERER_ADMIT),
+        marker_count(&stderr, KIPC_CALL),
+    );
+    assert!(
+        windows_at_hold.is_empty(),
+        "a window existed before the first authenticated HELLO: the startup gap is reachable from a page and AT-12d needs its arm"
+    );
+    assert_eq!(
+        pages_at_hold, 0,
+        "a page reported before the first admission"
+    );
+    succeeded_on(&first, "first", bun).expect("the first call after admission is served");
+    assert!(
+        rejected_with(&first, "first", NOT_DISPATCHED, None).is_err(),
+        "control: a served call is not not-dispatched"
+    );
+    assert_settled_once(&first, &["first"]);
+    assert_eq!(handled_labels(&journal, bun), ["first"]);
+    assert_eq!(marker_count(&stderr, RENDERER_ADMIT), 1);
+    assert_eq!(marker_count(&stderr, KIPC_CALL), 1);
+}
+
+struct ReturningRun {
+    settled: Value,
+    last: Value,
+    first: u32,
+    successor: Option<u32>,
+    first_handled: Vec<String>,
+    successor_handled: Vec<String>,
+    kipc_calls: usize,
+}
+
+/// One call whose handler reports `returning` as the last thing it does.
+/// With `kill`, the test SIGKILLs Bun on that report, so the kill races the
+/// reply the host is about to read (S15); the successor is then admitted and
+/// serves a call. Without it (the control), the same report precedes a plain
+/// reply.
+fn run_returning(kill: bool) -> ReturningRun {
+    let fixture = PublicFsProject::new(Policy::Narrow);
+    let mut labels = vec!["g1-baseline", "returning"];
+    if kill {
+        labels.push("successor-ready");
+    }
+    let steps: Vec<Value> = labels
+        .iter()
+        .map(|label| json!({"do":"invoke","label":label}))
+        .collect();
+    let mut run = Launch::start(
+        &fixture,
+        Scenario::new("gh1095-returning", Value::from(steps)),
+    );
+    let first = run.bun;
+    let baseline = run.step();
+    succeeded_on(&baseline, "g1-baseline", first).expect("healthy G1 call");
+    run.send_step();
+    run.await_where("the handler's returning report", |report| {
+        report["phase"] == "returning" && report["pid"] == first
+    });
+    let mut successor = None;
+    if kill {
+        kill_pid(first);
+        let next = run.hold_successor(first);
+        run.admit(next);
+        run.adopt_ready(2, next);
+        successor = Some(next);
+    }
+    let settled = run.await_count("step", 2);
+    let last = if kill { run.step() } else { settled.clone() };
+    let journal = run.journal.clone();
+    let stderr = run.quit();
+    ReturningRun {
+        settled,
+        last,
+        first,
+        successor,
+        first_handled: handled_labels(&journal, first),
+        successor_handled: successor
+            .map(|next| handled_labels(&journal, next))
+            .unwrap_or_default(),
+        kipc_calls: marker_count(&stderr, KIPC_CALL),
+    }
+}
+
+/// Criterion 7 at S15 (AT-13d): Bun is killed as its reply leaves. The page
+/// gets the reply or `KELD-WV-013`, never `KELD-WV-012`; exactly one
+/// terminal; the successor never runs the call. Which of the two outcomes
+/// occurred is printed, not asserted (spec §7).
+#[test]
+fn gh1095_bun_killed_while_returning_settles_once_as_reply_or_outcome_unknown() {
+    let run = run_returning(true);
+    let successor = run.successor.expect("a successor was admitted");
+    let result = outcome(&run.settled, "returning");
+    let observed = if result["ok"] == true {
+        succeeded_on(&run.settled, "returning", run.first).expect("the reply left before the kill");
+        "reply"
+    } else {
+        rejected_with(
+            &run.settled,
+            "returning",
+            OUTCOME_UNKNOWN,
+            Some(LINK_DETAIL),
+        )
+        .expect("criterion 7 (S15): a reply in flight at the kill is outcome unknown");
+        "outcome-unknown"
+    };
+    println!(
+        "KELD_GH1095_AT13D outcome={observed} first_bun={} second_bun={successor} returning={result} first_handled={:?} successor_handled={:?} kipc_calls={}",
+        run.first, run.first_handled, run.successor_handled, run.kipc_calls,
+    );
+    assert!(
+        rejected_with(&run.settled, "returning", NOT_DISPATCHED, None).is_err(),
+        "a written call is never not-dispatched"
+    );
+    assert_eq!(
+        terminals(&run.settled, "returning").len(),
+        1,
+        "exactly one terminal"
+    );
+    succeeded_on(&run.last, "successor-ready", successor).expect("healthy successor call");
+    assert_settled_once(&run.last, &["g1-baseline", "returning", "successor-ready"]);
+    // Census 1 on G1, which was returning; 0 on the successor: no replay.
+    assert_eq!(run.first_handled, ["g1-baseline", "returning"]);
+    assert_eq!(run.successor_handled, ["successor-ready"]);
+    assert_eq!(run.kipc_calls, 3);
+}
+
+/// Control for AT-13d: the same `returning` report with the kill disabled
+/// precedes a plain reply, so an outcome-unknown result comes from the kill,
+/// not from the harness.
+#[test]
+fn gh1095_returning_report_without_a_kill_precedes_the_reply() {
+    let run = run_returning(false);
+    succeeded_on(&run.settled, "returning", run.first).expect("a plain reply");
+    assert_eq!(terminals(&run.settled, "returning").len(), 1);
+    assert_settled_once(&run.settled, &["g1-baseline", "returning"]);
+    assert_eq!(run.first_handled, ["g1-baseline", "returning"]);
+    assert_eq!(run.kipc_calls, 2);
+}
+
+struct LateRun {
+    late: Value,
+    first_click: Value,
+    second_click: Value,
+    first: u32,
+    successor: u32,
+    first_handled: Vec<String>,
+    successor_handled: Vec<String>,
+    kipc_calls: usize,
+    renderer_admits: usize,
+    registrations: usize,
+}
+
+/// A baseline call on G1, then G1 is killed and its successor admitted. With
+/// `Registration::InsideReady` the successor holds inside `whenReady` with no
+/// handler while the page's next call reaches it; the test releases the hold
+/// only after that call settled, then drives two real clicks. With
+/// `Registration::BeforeReady` (the control) the handler exists before the
+/// link opens, so the same call is served.
+fn run_late_registration(registration: Registration) -> LateRun {
+    let fixture = PublicFsProject::new(Policy::Narrow);
+    let steps = json!([
+        {"do":"invoke","label":"g1-baseline"},
+        {"do":"invoke","label":"late"},
+        {"do":"arm-resend","label":"late"},
+    ]);
+    let mut scenario = Scenario::new("gh1095-late-registration", steps);
+    scenario.registration = registration;
+    let mut run = Launch::start(&fixture, scenario);
+    let first = run.bun;
+    let inside = registration == Registration::InsideReady;
+    if inside {
+        run.release_registration(first);
+    }
+    let baseline = run.step();
+    succeeded_on(&baseline, "g1-baseline", first).expect("healthy G1 call");
+    let successor = run.crash_and_hold_successor();
+    run.admit(successor);
+    run.adopt_ready(2, successor);
+    if inside {
+        // Test-owned precondition: the successor is admitted and holds
+        // before registering, so the next call finds no handler.
+        run.await_registration_hold(successor);
+    }
+    let late = run.step();
+    run.step();
+    if inside {
+        run.release_registration(successor);
+    }
+    let first_click = run.click(1);
+    let second_click = run.click(2);
+    let journal = run.journal.clone();
+    let stderr = run.quit();
+    LateRun {
+        late,
+        first_click,
+        second_click,
+        first,
+        successor,
+        first_handled: handled_labels(&journal, first),
+        successor_handled: handled_labels(&journal, successor),
+        kipc_calls: marker_count(&stderr, KIPC_CALL),
+        renderer_admits: marker_count(&stderr, RENDERER_ADMIT),
+        registrations: journal
+            .iter()
+            .filter(|report| report["phase"] == "handler-registered")
+            .count(),
+    }
+}
+
+/// Criteria 5 and 8 across a restart (AT-API2b): a handler registered inside
+/// `whenReady` leaves a window after the restart in which the page's call
+/// reaches the successor, runs no app code and gets `KELD-API-002` with the
+/// coded `Error` shape; the host passes Bun's code through unchanged. Once the
+/// handler exists, one real OS click makes the one resend, which runs once on
+/// the successor; a second click resends nothing.
+#[test]
+fn gh1095_handler_registered_inside_when_ready_answers_api_002_after_restart() {
+    let run = run_late_registration(Registration::InsideReady);
+    println!(
+        "KELD_GH1095_ATAPI2B first_bun={} second_bun={} late={} first_click_resent={} second_click_resent={} first_handled={:?} successor_handled={:?} kipc_calls={} renderer_admits={} registrations={}",
+        run.first,
+        run.successor,
+        outcome(&run.late, "late"),
+        run.first_click["resent"],
+        run.second_click["resent"],
+        run.first_handled,
+        run.successor_handled,
+        run.kipc_calls,
+        run.renderer_admits,
+        run.registrations,
+    );
+    rejected_with(&run.late, "late", NO_HANDLER, Some(NO_HANDLER_DETAIL))
+        .expect("criterion 5: no handler, so no application code ran");
+    assert!(
+        rejected_with(&run.late, "late", NOT_DISPATCHED, None).is_err(),
+        "control: the call was written, so it is not not-dispatched"
+    );
+    assert!(
+        rejected_with(&run.late, "late", OUTCOME_UNKNOWN, None).is_err(),
+        "control: Bun's own API code is forwarded, not rewritten"
+    );
+    assert_eq!(run.first_click["resent"], true);
+    succeeded_on(&run.first_click, "late-resend", run.successor)
+        .expect("criterion 8: the one resend runs once the handler exists");
+    assert_ne!(
+        request_nonce(&run.first_click, "late"),
+        request_nonce(&run.first_click, "late-resend"),
+        "the resend is a new invoke, not a replay"
+    );
+    assert_eq!(run.second_click["resent"], false, "at most one resend");
+    assert_settled_once(&run.second_click, &["g1-baseline", "late", "late-resend"]);
+    // Census: 0 for the call that found no handler, 1 for the logical action.
+    assert_eq!(run.first_handled, ["g1-baseline"]);
+    assert_eq!(run.successor_handled, ["late-resend"]);
+    assert_eq!(
+        run.kipc_calls, 3,
+        "every call crossed kipc, including the one Bun refused"
+    );
+    assert_eq!(run.renderer_admits, 3);
+    assert_eq!(run.registrations, 2, "both generations registered late");
+}
+
+/// Control for AT-API2b: a handler registered before `whenReady` exists
+/// before the link opens, so the same call after the restart is served and no
+/// `KELD-API-002` occurs; a click after a served call resends nothing.
+#[test]
+fn gh1095_handler_registered_before_when_ready_is_served_after_restart() {
+    let run = run_late_registration(Registration::BeforeReady);
+    succeeded_on(&run.late, "late", run.successor).expect("the successor serves the call");
+    assert!(
+        rejected_with(&run.late, "late", NO_HANDLER, None).is_err(),
+        "no KELD-API-002 with the handler registered first"
+    );
+    assert_eq!(run.first_click["resent"], false);
+    assert_eq!(run.second_click["resent"], false);
+    assert_settled_once(&run.second_click, &["g1-baseline", "late"]);
+    assert_eq!(run.first_handled, ["g1-baseline"]);
+    assert_eq!(run.successor_handled, ["late"]);
+    assert_eq!(run.kipc_calls, 2);
+    assert_eq!(run.registrations, 0);
 }
