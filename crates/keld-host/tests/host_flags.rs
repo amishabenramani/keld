@@ -159,7 +159,8 @@ mod private_roles_windows {
         assert_eq!(output.status.code(), Some(1));
         // The sentinel reports on stdout: its stderr is the inherited Job handle.
         let stdout = String::from_utf8(output.stdout).expect("sentinel report is UTF-8");
-        assert!(stdout.contains("KELD-CORE-044"), "{stdout}");
+        // The sentinel's own report leads; nested causes may carry other crates' codes.
+        assert!(stdout.starts_with("KELD-CORE-044: "), "{stdout}");
         assert!(
             stdout.contains("cleanup invocation is malformed"),
             "{stdout}"
@@ -179,7 +180,12 @@ mod private_roles_windows {
             .expect("run host with a well-shaped private sentinel argv");
         assert_eq!(shaped.status.code(), Some(1));
         let shaped_stdout = String::from_utf8(shaped.stdout).expect("sentinel report is UTF-8");
-        assert!(shaped_stdout.contains("KELD-CORE-046"), "{shaped_stdout}");
+        // One sentinel, one leading code: the keld-core stage validate/delete steps and the
+        // host's own Job/readiness/release steps all report KELD-CORE-046.
+        assert!(
+            shaped_stdout.starts_with("KELD-CORE-046: "),
+            "{shaped_stdout}"
+        );
         assert!(
             shaped_stdout.contains("cleanup Job admission failed"),
             "{shaped_stdout}"

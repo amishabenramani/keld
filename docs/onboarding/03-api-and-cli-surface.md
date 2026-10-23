@@ -370,9 +370,9 @@ Every `KELD-*` code you can meet — its emitting crate, message, and fix — ha
 one home: [`docs/engineering/keld-error-codes.md`](../engineering/keld-error-codes.md).
 `crates/keld-cli/tests/error_registry.rs` keeps that registry in 1:1 agreement with the
 scanned sources, so this page keeps no second table (an earlier copy here drifted from
-the registry). Both spellings in use there (`KELD-CLI-020`, `KELD-MCP001`) are valid;
-match the crate that already emits the code. By convention every message states the fix
-([`AGENTS.md`](../../AGENTS.md) → `docs/architecture/07-agent-experience.md` §2).
+the registry). The registry also owns the spelling and allocation rules. By convention
+every message states the fix ([`AGENTS.md`](../../AGENTS.md) →
+`docs/architecture/07-agent-experience.md` §2).
 
 The `KELD-WV-*` messages are covered by a test that asserts both the code and the fix
 hint are present (`error::tests::display_messages_carry_error_codes_and_fix_guidance`) —

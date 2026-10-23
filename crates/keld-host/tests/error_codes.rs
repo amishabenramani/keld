@@ -8,7 +8,6 @@
 //!
 //! Mutation that must turn this red: put `KELD-CORE-037` back on a probe, sentinel or
 //! guardian-argv line, or `KELD-WV-009` back on a fixture line.
-#![allow(clippy::expect_used, clippy::panic)] // extra test crate: assertions are the oracle
 
 /// The host source as compiled; a moved emit site changes this text, not the test.
 const HOST_MAIN: &str = include_str!("../src/main.rs");
@@ -52,6 +51,14 @@ const EXPECTED: &[(&str, &str)] = &[
 const FOREIGN_OWNED: &[&str] = &["KELD-WV-009"];
 
 /// Pulls `KELD-AREA-001` / `KELD-AREA001` tokens (3+ digits), the registry grammar.
+///
+/// This mirrors `extract_keld_codes` in `crates/keld-cli/tests/error_registry.rs` on
+/// purpose: that function lives in another crate's integration test, which no crate can
+/// import, and the alternatives (a shared dev-dependency crate for fifteen lines, or a
+/// cross-crate `#[path]` include) are the include-based pseudo-extraction that
+/// `.agents/test-layout.md` forbids. Both copies pin the same grammar vector
+/// (`code_grammar_matches_the_registry_scanner` here,
+/// `extract_accepts_hyphenated_and_compact_forms` there), so a divergence fails one of them.
 fn keld_codes(line: &str) -> Vec<&str> {
     let bytes = line.as_bytes();
     let mut out = Vec::new();
