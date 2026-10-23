@@ -95,6 +95,12 @@ test("direct native formatter selects JS/TS, honors ignores and checks without w
     for (const name of untouched)
       expect(readFileSync(join(root, name), "utf8")).toBe(original);
     expect(readFileSync(join(root, "package.json"), "utf8")).toBe(packageBytes);
+    // An ignore-only edit can expose an existing tracked, unformatted source.
+    writeFileSync(join(root, ".gitignore"), "node_modules/\n");
+    expect(native("--check").exitCode).toBe(1);
+    expect(readFileSync(join(root, "ignored.ts"), "utf8")).toBe(original);
+    expect(native().exitCode).toBe(0);
+    expect(native("--check").exitCode).toBe(0);
     const invalid = "export const broken={{{\n";
     writeFileSync(join(root, "syntax-error.ts"), invalid);
     expect(native("--check").exitCode).toBe(2);

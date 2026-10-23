@@ -335,6 +335,7 @@
         "local_js-fmt-check"
       ],
       "inputs": [
+        ".gitignore",
         "*.js",
         "*.jsx",
         "*.mjs",
@@ -411,7 +412,7 @@
         ".githooks/*",
         "rust-toolchain.toml"
       ],
-      "sha256": "a6574a828311a70c5d225b8afd0f4319b9f1d55de6dd454d44cfbb288971b6eb"
+      "sha256": "21522e711ef207d3a6c3d328ba23747d9712f8b9195c407b8b1d9391913ae272"
     },
     "audit-readers": {
       "patterns": [

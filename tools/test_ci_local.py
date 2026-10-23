@@ -628,6 +628,17 @@ class RouterFailureBoundaryTests(unittest.TestCase):
 
 
 class ProductionConsumerTests(unittest.TestCase):
+    def test_root_ignore_changes_select_native_formatter(self):
+        source = Path(__file__).resolve().parent.parent
+        with tempfile.TemporaryDirectory(prefix="keld-native-ignore-route-") as temporary:
+            root = Path(temporary)
+            # Bind fixture readers so unrelated in-progress source drift cannot
+            # hide a missing input edge by conservatively selecting every gate.
+            tracked_snapshot(source, root)
+            selected = ci_inputs.classify(root, [".gitignore"], paths_only=True)
+            self.assertFalse(selected["input_all"])
+            self.assertTrue(selected["local_js-fmt-check"])
+
     def test_actual_template_edit_selects_runtime_reader_in_hosted_packages(self):
         source = Path(__file__).resolve().parent.parent
         with tempfile.TemporaryDirectory(prefix="keld-ci-package-reader-") as temporary:
