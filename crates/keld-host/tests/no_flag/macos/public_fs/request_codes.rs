@@ -180,7 +180,7 @@ impl StderrTap {
 }
 
 impl Launch {
-    fn start(fixture: &PublicFsProject, scenario: Scenario<'_>) -> Self {
+    fn start(fixture: &PublicFsProject, scenario: &Scenario<'_>) -> Self {
         let observer = Observation::bind_recovery();
         let port = observer.port.to_string();
         let app = include_str!("../../../fixtures/request_codes_app.ts")
@@ -554,7 +554,7 @@ fn gh1095_restart_gap_call_is_not_dispatched_and_never_replayed() {
         .iter()
         .map(|label| json!({"do":"invoke","label":label}))
         .collect();
-    let mut run = Launch::start(&fixture, Scenario::new("gh1095-gap", Value::from(steps)));
+    let mut run = Launch::start(&fixture, &Scenario::new("gh1095-gap", Value::from(steps)));
     let first = run.bun;
     let baseline = run.step();
     let successor = run.crash_and_hold_successor();
@@ -632,7 +632,7 @@ fn run_after_write(arm: AfterWrite) {
         .collect();
     let mut run = Launch::start(
         &fixture,
-        Scenario::new("gh1095-after-write", Value::from(steps)),
+        &Scenario::new("gh1095-after-write", Value::from(steps)),
     );
     let first = run.bun;
     let baseline = run.step();
@@ -702,7 +702,10 @@ fn run_reload(pending: bool) -> (Value, Vec<String>, String) {
         steps.push(json!({"do":"invoke-pending","label":"held-at-reload"}));
     }
     steps.push(json!({"do":"reload"}));
-    let mut run = Launch::start(&fixture, Scenario::new("gh1095-reload", Value::from(steps)));
+    let mut run = Launch::start(
+        &fixture,
+        &Scenario::new("gh1095-reload", Value::from(steps)),
+    );
     let bun = run.bun;
     let baseline = run.step();
     succeeded_on(&baseline, "g1-baseline", bun).expect("healthy call before the reload");
@@ -778,7 +781,7 @@ fn run_navigation(navigate: bool) -> (Value, Value, Vec<String>, u32) {
     });
     let mut scenario = Scenario::new("gh1095-navigation", Value::from(steps));
     scenario.successor_steps = json!([{"do":"invoke","label":"successor-call"}]);
-    let mut run = Launch::start(&fixture, scenario);
+    let mut run = Launch::start(&fixture, &scenario);
     let bun = run.bun;
     let baseline = run.step();
     succeeded_on(&baseline, "g1-baseline", bun).expect("healthy call before the navigation");
@@ -950,7 +953,7 @@ fn run_resend(ready_first: bool) -> (Value, Value, ResendCensus) {
         {"do":"invoke","label":"gap"},
         {"do":"arm-resend","label":"gap"},
     ]);
-    let mut run = Launch::start(&fixture, Scenario::new("gh1095-resend", steps));
+    let mut run = Launch::start(&fixture, &Scenario::new("gh1095-resend", steps));
     let first = run.bun;
     let baseline = run.step();
     succeeded_on(&baseline, "g1-baseline", first).expect("healthy G1 call");
@@ -988,7 +991,7 @@ fn run_resend(ready_first: bool) -> (Value, Value, ResendCensus) {
 /// been sent and nothing is admitted, the host owns no on-screen window and
 /// no page has reported: the window is created only after the authenticated
 /// HELLO (architecture 01 §5; `run_app` awaits the bound generation before it
-/// creates the WebKit engine and the bridge window). No renderer call can
+/// creates the `WebKit` engine and the bridge window). No renderer call can
 /// exist in the startup gap, so criterion 1's startup clause is carried by the
 /// restart gap (AT-12a, AT-12c). This is the test that must fail before an
 /// AT-12d arm is needed. Control: after admission the same census sees one
@@ -998,7 +1001,7 @@ fn gh1095_no_renderer_exists_before_the_first_admission() {
     let fixture = PublicFsProject::new(Policy::Narrow);
     let mut scenario = Scenario::new("gh1095-startup", json!([{"do":"invoke","label":"first"}]));
     scenario.admit_first = false;
-    let mut run = Launch::start(&fixture, scenario);
+    let mut run = Launch::start(&fixture, &scenario);
     let bun = run.boots[0].pid;
     // Snapshots at the hold, not waits. The boot report is the positive
     // event: a host that presented its window before spawning Bun would have
@@ -1068,7 +1071,7 @@ fn run_returning(kill: bool) -> ReturningRun {
         .collect();
     let mut run = Launch::start(
         &fixture,
-        Scenario::new("gh1095-returning", Value::from(steps)),
+        &Scenario::new("gh1095-returning", Value::from(steps)),
     );
     let first = run.bun;
     let baseline = run.step();
@@ -1190,7 +1193,7 @@ fn run_late_registration(registration: Registration) -> LateRun {
     ]);
     let mut scenario = Scenario::new("gh1095-late-registration", steps);
     scenario.registration = registration;
-    let mut run = Launch::start(&fixture, scenario);
+    let mut run = Launch::start(&fixture, &scenario);
     let first = run.bun;
     let inside = registration == Registration::InsideReady;
     if inside {

@@ -538,9 +538,7 @@ fn criterion5_close_without_err_throws_022_and_keeps_prior_records() {
 fn gh1095_ipc_022_is_one_code_for_a_read_call_and_an_unsent_call() {
     let (mut stream, role) = start("gh1095-unknown-after-end");
     read_call_named(&mut stream, "pending-at-close");
-    stream
-        .shutdown(Shutdown::Both)
-        .expect("host closes the link");
+    stream.shutdown_app_link().expect("host closes the link");
     drop(stream);
     let output = role.finish();
     expect_report(
