@@ -414,6 +414,53 @@ class ExecutorTests(SelectionTests):
     test_unknown_gate_runs_and_malformed_gate_fails = None
     test_unrelated_rust_gates_need_explicit_false_not_missing_output = None
 
+    def run_production_typescript(self, failure=""):
+        source = Path(__file__).resolve().parent.parent
+        bash = shutil.which("bash")
+        self.assertIsNotNone(bash, "recipe tests require the same Bash used by CI")
+        with tempfile.TemporaryDirectory(prefix="keld-ci-typescript-") as temporary:
+            root = Path(temporary)
+            shutil.copyfile(source / "justfile", root / "justfile")
+            for package in ("kipc", "api", "electron"):
+                (root / "packages/@keld" / package).mkdir(parents=True)
+            (root / "bin").mkdir()
+            bun = root / "bin/bun"
+            bun.write_text(
+                '#!/usr/bin/env bash\nset -euo pipefail\n'
+                'package=${PWD##*/}\n'
+                'printf "%s:%s\\n" "$package" "$*" >> "$KELD_TEST_BUN_TRACE"\n'
+                'if [ "$package" = api ] && [ "$*" = "$KELD_TEST_BUN_FAIL" ]; then\n'
+                '    exit 37\n'
+                'fi\n', encoding="utf-8", newline="\n")
+            bun.chmod(0o755)
+            trace = root / "trace"
+            environment = os.environ.copy()
+            environment.update(PATH=str(root / "bin") + os.pathsep + environment["PATH"],
+                               KELD_TEST_BUN_TRACE=trace.as_posix(), KELD_TEST_BUN_FAIL=failure)
+            result = subprocess.run(["just", "--shell", bash, "typescript"], cwd=root,
+                                    env=environment, capture_output=True, text=True, encoding="utf-8")
+            return result, trace.read_text(encoding="utf-8").splitlines() if trace.exists() else []
+
+    def test_typescript_recipe_checks_all_packages_with_frozen_installs(self):
+        result, observed = self.run_production_typescript()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(observed, [
+            "kipc:install --frozen-lockfile", "kipc:run typecheck", "kipc:test",
+            "api:install --frozen-lockfile", "api:run typecheck", "api:test",
+            "electron:install --frozen-lockfile", "electron:run typecheck", "electron:test",
+        ])
+
+    def test_typescript_recipe_stops_at_api_typecheck_or_test_failure(self):
+        for failure in ("run typecheck", "test"):
+            with self.subTest(failure=failure):
+                result, observed = self.run_production_typescript(failure)
+                self.assertEqual(result.returncode, 37, result.stderr)
+                expected = ["kipc:install --frozen-lockfile", "kipc:run typecheck", "kipc:test",
+                            "api:install --frozen-lockfile", "api:run typecheck"]
+                if failure == "test":
+                    expected.append("api:test")
+                self.assertEqual(observed, expected)
+
     def test_real_just_inventory_preserves_bodyful_prerequisites_and_order(self):
         with tempfile.TemporaryDirectory(prefix="keld-ci-inventory-") as temporary:
             root = Path(temporary)

@@ -44,7 +44,7 @@ ci-route:
 # pinned `just` in CI (dependency-gate decision, not taken):
 # - hooks-test: the hooks under test execute `just` (its negative control runs
 #   the incoming branch's recipe through it); it fails, never skips, without just.
-# - the four test_ci_local.py ExecutorTests in ci-router-test, which drive real
+# - the test_ci_local.py ExecutorTests in ci-router-test, which drive real
 #   recipes (tools/ci_local.py inventory/execute). SelectionTests and the rest
 #   of test_ci_local.py run hosted through tools/ci_changes_test.sh.
 # agent-context's workspace.py check also runs hosted, but only a developer
@@ -77,6 +77,9 @@ typescript:
     cd packages/@keld/kipc && bun install --frozen-lockfile
     cd packages/@keld/kipc && bun run typecheck
     cd packages/@keld/kipc && bun test
+    cd packages/@keld/api && bun install --frozen-lockfile
+    cd packages/@keld/api && bun run typecheck
+    cd packages/@keld/api && bun test
     cd packages/@keld/electron && bun install --frozen-lockfile
     cd packages/@keld/electron && bun run typecheck
     cd packages/@keld/electron && bun test
