@@ -74,44 +74,66 @@ describe("GH-1132: a status snapshot is not a replay fence", () => {
   );
 
   test(
-    "safe app control: both attempts share one atomic durable idempotency key",
+    "safe app control: durable idempotency returns the recorded result in either completion order",
     withSqlite(async (db) => {
       db.exec("CREATE TABLE effects (logical_key TEXT PRIMARY KEY, result INTEGER NOT NULL)");
       const commit = db.query(
-        "INSERT INTO effects (logical_key, result) VALUES (?1, 65) ON CONFLICT(logical_key) DO NOTHING",
+        "INSERT INTO effects (logical_key, result) VALUES (?1, ?2) ON CONFLICT(logical_key) DO NOTHING",
       );
+      const read = db.query("SELECT result FROM effects WHERE logical_key = ?1");
       const count = db.query("SELECT COUNT(*) AS n FROM effects WHERE logical_key = ?1");
-      const committed = (): number =>
-        (count.get(LOGICAL_ACTION) as { n: number }).n;
+      const committed = (key: string): number =>
+        (count.get(key) as { n: number }).n;
 
-      const delayed = latch();
-      const outstanding: Promise<unknown>[] = [];
-      const first: EchoCallHandler = async () => {
-        outstanding.push(delayed.wait.then(() => commit.run(LOGICAL_ACTION)));
-        throw new Error("first handler did not await its deferred effect");
+      // The application, not Keld, uses a stable key carried in *both* CALL
+      // payloads. An atomic insertion is the complete effect in this fixture;
+      // real external effects need their own idempotent receiver/protocol.
+      const perform = (payload: Uint8Array, proposedResult: number): Uint8Array => {
+        const key = new TextDecoder().decode(payload);
+        commit.run(key, proposedResult);
+        const row = read.get(key) as { result: number } | null;
+        if (row === null) throw new Error("durable effect record disappeared");
+        return Uint8Array.of(row.result);
       };
 
-      try {
-        const firstAnswer = await resolveEchoCall(ECHO_CHANNEL, PAYLOAD, first);
-        expect(firstAnswer.kind).toBe(FrameKind.Err);
-        expect(decodeCallError(firstAnswer.payload).code).toBe("KELD-API-001");
-        expect(committed()).toBe(0);
+      for (const order of ["retry-first", "original-first"] as const) {
+        const key = `${LOGICAL_ACTION}-${order}`;
+        const payload = new TextEncoder().encode(key);
+        const delayed = latch();
+        const outstanding: Promise<unknown>[] = [];
+        const first: EchoCallHandler = async (_channel, bytes) => {
+          outstanding.push(delayed.wait.then(() => perform(bytes, 66)));
+          throw new Error("first handler did not await its deferred effect");
+        };
 
-        // The retry is safe only because it shares the same durable uniqueness
-        // constraint with the original. This is APP logic, never a Keld retry.
-        const retry = await resolveEchoCall(ECHO_CHANNEL, PAYLOAD, async () => {
-          commit.run(LOGICAL_ACTION);
-          return Uint8Array.of(0x41);
-        });
-        expect(retry.kind).toBe(FrameKind.Reply);
-        expect(retry.payload).toEqual(Uint8Array.of(0x41));
+        try {
+          const firstAnswer = await resolveEchoCall(ECHO_CHANNEL, payload, first);
+          expect(firstAnswer.kind).toBe(FrameKind.Err);
+          expect(decodeCallError(firstAnswer.payload).code).toBe("KELD-API-001");
+          expect(committed(key)).toBe(0);
 
-        delayed.release();
-        await Promise.all(outstanding);
-        expect(committed()).toBe(1); // At most one durable effect for one key.
-      } finally {
-        delayed.release();
-        await Promise.allSettled(outstanding);
+          if (order === "original-first") {
+            delayed.release();
+            await Promise.all(outstanding);
+          }
+
+          // Competing retries propose a different result (65 versus 66).
+          // Both MUST read the single durable winner's recorded value.
+          const retry = await resolveEchoCall(ECHO_CHANNEL, payload, async (_channel, bytes) =>
+            perform(bytes, 65),
+          );
+          expect(retry.kind).toBe(FrameKind.Reply);
+
+          delayed.release();
+          await Promise.all(outstanding);
+          const expected = order === "retry-first" ? 65 : 66;
+          expect(retry.payload).toEqual(Uint8Array.of(expected));
+          expect((read.get(key) as { result: number }).result).toBe(expected);
+          expect(committed(key)).toBe(1);
+        } finally {
+          delayed.release();
+          await Promise.allSettled(outstanding);
+        }
       }
     }),
   );
