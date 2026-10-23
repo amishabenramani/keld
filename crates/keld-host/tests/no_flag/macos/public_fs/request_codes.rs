@@ -1105,7 +1105,11 @@ fn run_returning(kill: bool) -> ReturningRun {
 /// Criterion 7 at S15 (AT-13d): Bun is killed as its reply leaves. The page
 /// gets the reply or `KELD-WV-013`, never `KELD-WV-012`; exactly one
 /// terminal; the successor never runs the call. Which of the two outcomes
-/// occurred is printed, not asserted (spec §7).
+/// occurred is printed, not asserted (spec §7). The signal goes through
+/// `/bin/kill`, a real process, so it lands a few milliseconds after the
+/// report; on this Mac the reply has left by then in every sample, and the
+/// arm then proves exactly once for a reply followed by the link's end. The
+/// outcome-unknown branch of the same retirement is pinned by AT-13b.
 #[test]
 fn gh1095_bun_killed_while_returning_settles_once_as_reply_or_outcome_unknown() {
     let run = run_returning(true);
