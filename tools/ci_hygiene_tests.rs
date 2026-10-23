@@ -1918,11 +1918,26 @@ fn bun_lane_rejects_matrix_exclusions_and_includes() {
     let lane = "  bun-test:\n    runs-on: ${{ matrix.os }}\n    if: needs.changes.outputs.ts == 'true'\n    strategy:\n      fail-fast: false\n      matrix:\n        os: [ubuntu-latest, macos-latest, windows-latest]\n";
     assert!(workflow.contains(lane), "fixture lacks the Bun matrix");
     for (extra, label) in [
-        ("        exclude:\n          - os: windows-latest\n", "exclude Windows"),
-        ("        exclude:\n          - os: macos-latest\n", "exclude macOS"),
-        ("        exclude:\n          - os: ubuntu-latest\n", "exclude Ubuntu"),
-        ("        include:\n          - os: windows-latest\n", "matrix include"),
-        ("        os: [ubuntu-latest, macos-latest, windows-latest]\n", "duplicate os key"),
+        (
+            "        exclude:\n          - os: windows-latest\n",
+            "exclude Windows",
+        ),
+        (
+            "        exclude:\n          - os: macos-latest\n",
+            "exclude macOS",
+        ),
+        (
+            "        exclude:\n          - os: ubuntu-latest\n",
+            "exclude Ubuntu",
+        ),
+        (
+            "        include:\n          - os: windows-latest\n",
+            "matrix include",
+        ),
+        (
+            "        os: [ubuntu-latest, macos-latest, windows-latest]\n",
+            "duplicate os key",
+        ),
     ] {
         let changed = workflow.replacen(lane, &format!("{lane}{extra}"), 1);
         let error = check_bun_test_job(&changed).expect_err(label);
@@ -1940,7 +1955,10 @@ fn bun_lane_requires_the_actual_job_level_routing_condition() {
 
     // A step-level condition cannot substitute for the job-level router gate.
     for (job_if, label) in [
-        ("    if: needs.changes.outputs.rust == 'true'\n", "wrong job route"),
+        (
+            "    if: needs.changes.outputs.rust == 'true'\n",
+            "wrong job route",
+        ),
         ("", "missing job route"),
     ] {
         let changed = workflow
