@@ -414,7 +414,9 @@ fn unset_app_link_is_cli_010_at_every_emitter() {
             .unwrap_or_else(|| panic!("{code} missing from {REGISTRY_REL}"))
     };
     assert!(
-        find("KELD-CLI-010").message.contains("KELD_APP_LINK is unset"),
+        find("KELD-CLI-010")
+            .message
+            .contains("KELD_APP_LINK is unset"),
         "{:?}",
         find("KELD-CLI-010").message
     );

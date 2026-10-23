@@ -72,12 +72,18 @@ mod private_roles_macos {
         assert_eq!(output.status.code(), Some(1));
         let stderr = String::from_utf8(output.stderr).expect("host error is UTF-8");
         assert!(stderr.contains("KELD-CORE-044"), "{stderr}");
-        assert!(stderr.contains("guardian invocation is malformed"), "{stderr}");
+        assert!(
+            stderr.contains("guardian invocation is malformed"),
+            "{stderr}"
+        );
         assert!(!stderr.contains("KELD-CORE-037"), "{stderr}");
 
-        // Negative control: a well-shaped argv is not misuse. It is refused later, by
-        // the guardian's own liveness/registration validation (boot_admission.rs owns
-        // that oracle), so the misuse code must be absent from that refusal.
+        // Negative control: a well-shaped argv is not misuse, so the misuse code is
+        // absent and the two other conditions surface under their own codes. The
+        // guardian's primary failure (its liveness validation refuses a non-pipe
+        // stdin; boot_admission.rs owns that oracle) is the kept no-flag session code,
+        // and a test binary never sits in a `.keld/dev/<nonce>` stage, so the stage
+        // refusal is deterministic.
         let temp = tempfile::tempdir().expect("shaped-argv fixture");
         let shaped = Command::new(env!("CARGO_BIN_EXE_keld-host"))
             .arg(keld_runtime::macos_guardian::SUPERVISED_GUARDIAN_ARG)
@@ -89,10 +95,22 @@ mod private_roles_macos {
             .stdin(Stdio::null())
             .output()
             .expect("run host with a well-shaped private guardian argv");
-        assert!(!shaped.status.success(), "shaped argv without a host became success");
+        assert!(
+            !shaped.status.success(),
+            "shaped argv without a host became success"
+        );
         let shaped_stderr = String::from_utf8(shaped.stderr).expect("host error is UTF-8");
         assert!(!shaped_stderr.contains("KELD-CORE-044"), "{shaped_stderr}");
-        assert!(!shaped_stderr.contains("KELD-CORE-045"), "{shaped_stderr}");
+        assert!(
+            shaped_stderr.contains("KELD-CORE-037: supervised Bun guardian failed"),
+            "{shaped_stderr}"
+        );
+        assert!(
+            shaped_stderr.contains(
+                "KELD-CORE-045: guardian is not executing from a validated private dev stage"
+            ),
+            "{shaped_stderr}"
+        );
     }
 
     /// The KEL-135 fixture roles exist only in a debug host built with
@@ -142,7 +160,10 @@ mod private_roles_windows {
         // The sentinel reports on stdout: its stderr is the inherited Job handle.
         let stdout = String::from_utf8(output.stdout).expect("sentinel report is UTF-8");
         assert!(stdout.contains("KELD-CORE-044"), "{stdout}");
-        assert!(stdout.contains("cleanup invocation is malformed"), "{stdout}");
+        assert!(
+            stdout.contains("cleanup invocation is malformed"),
+            "{stdout}"
+        );
         assert!(!stdout.contains("KELD-CORE-037"), "{stdout}");
         assert!(!stdout.contains("KELD-CORE-046"), "{stdout}");
 
@@ -159,7 +180,10 @@ mod private_roles_windows {
         assert_eq!(shaped.status.code(), Some(1));
         let shaped_stdout = String::from_utf8(shaped.stdout).expect("sentinel report is UTF-8");
         assert!(shaped_stdout.contains("KELD-CORE-046"), "{shaped_stdout}");
-        assert!(shaped_stdout.contains("cleanup Job admission failed"), "{shaped_stdout}");
+        assert!(
+            shaped_stdout.contains("cleanup Job admission failed"),
+            "{shaped_stdout}"
+        );
         assert!(!shaped_stdout.contains("KELD-CORE-044"), "{shaped_stdout}");
         assert!(!shaped_stdout.contains("KELD-CORE-037"), "{shaped_stdout}");
     }

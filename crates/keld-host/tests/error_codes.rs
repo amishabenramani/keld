@@ -34,7 +34,10 @@ const EXPECTED: &[(&str, &str)] = &[
     ("invalid private entry inode", "KELD-CORE-044"),
     // KELD-CORE-045: the guardian refused to run outside its validated dev stage.
     ("guardian stage identity failed", "KELD-CORE-045"),
-    ("not executing from a validated private dev stage", "KELD-CORE-045"),
+    (
+        "not executing from a validated private dev stage",
+        "KELD-CORE-045",
+    ),
     ("guardian stage argument does not match", "KELD-CORE-045"),
     // KELD-CORE-046: the Windows dev-stage cleanup sentinel failed a step.
     ("cleanup Job admission failed", "KELD-CORE-046"),
