@@ -918,7 +918,7 @@ echo "ok: router suite discovery matches the active Bun runtime across all 32 pa
 # then proves the edge is derived from the checked-out test reference.
 fixture_path='crates/keld-ipc/tests/fixtures/shared.tsv'
 fixture_without_consumer="$(cd "$temp_dir" && printf '%s\0' "$fixture_path" | PATH="$temp_dir/fake-bin:$PATH" "$router" classify)"
-fake_fixture_without_consumer=$'rust=true\ndocs=false\nhygiene=true\ngui=true\nmsrv=true\ndeny=false\nts=false\nwebkitgtk=false'
+fake_fixture_without_consumer=$'rust=true\ndocs=false\nhygiene=false\ngui=true\nmsrv=true\ndeny=false\nts=false\nwebkitgtk=false'
 expect_flags "unreferenced crate fixture does not invent a Bun consumer" "$fake_fixture_without_consumer" "$fixture_without_consumer"
 expect_empty_output "unreferenced crate fixture selects no Bun suite" ts_packages "$fixture_without_consumer"
 # #630 negative control: an all-workspace fallback whose packages link no
@@ -941,7 +941,7 @@ git -C "$temp_dir" add packages
 git -C "$temp_dir" commit -qm packages
 ts_sha="$(git -C "$temp_dir" rev-parse HEAD)"
 ts_pr_result="$(cd "$temp_dir" && PATH="$temp_dir/fake-bin:$PATH" KELD_CI_EVENT_NAME=pull_request KELD_CI_BASE_SHA="$untested_sha" KELD_CI_HEAD_SHA="$ts_sha" "$router" github)"
-fake_ts_flags=$'rust=false\ndocs=false\nhygiene=false\ngui=false\nmsrv=false\ndeny=false\nts=true\nwebkitgtk=false'
+fake_ts_flags=$'rust=false\ndocs=false\nhygiene=true\ngui=false\nmsrv=false\ndeny=false\nts=true\nwebkitgtk=false'
 expect_flags "pull-request TypeScript-only diff runs the Bun lane with no Rust consumer" "$fake_ts_flags" "$ts_pr_result"
 expect_output_package_token "pull-request TypeScript-only diff selects the changed Bun suite" ts_packages 'packages/@fake/pkg' "$ts_pr_result"
 expect_empty_packages "pull-request TypeScript-only diff selects no workspace package" "$ts_pr_result"

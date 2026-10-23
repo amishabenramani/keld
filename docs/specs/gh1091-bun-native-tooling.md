@@ -54,7 +54,10 @@ implementation or a formatter runtime dependency. Keep `tsc --noEmit` and existi
 semantic tests; formatting and linting are separate contracts from type checking.
 
 Repository formatting selects the tracked JavaScript/TypeScript family, including
-tests and tooling, through one owning recipe. Do not run an unrestricted formatter
+tests and tooling, through one owning recipe. Bun's native ignore files remain
+authoritative exclusions; selecting a tracked file does not override them. The
+regression test covers all eight JS/TS extensions and unchanged non-JS/TS files.
+Do not run an unrestricted formatter
 over instruction Markdown, historical evidence, nested research or vendor files.
 Use Bun defaults unless an existing project contract requires an explicit setting;
 disable import sorting and other optional transforms by leaving their defaults off.

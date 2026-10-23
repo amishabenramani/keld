@@ -11,6 +11,7 @@ test("native tracked formatter checks without writing, repairs, and is idempoten
       expect(Bun.spawnSync(["git", ...args], { cwd: root }).exitCode).toBe(0);
     };
     git("init", "--quiet");
+    git("config", "maintenance.auto", "false");
     const path = join(root, "source with spaces.ts");
     const original = "export const value={answer:42};\n";
     writeFileSync(path, original);
@@ -34,6 +35,53 @@ test("native tracked formatter checks without writing, repairs, and is idempoten
     git("rm", "--cached", "source with spaces.ts");
     expect(formatTrackedSources(root, false)).toBe(0);
     expect(readFileSync(join(root, "untracked.ts"), "utf8")).toBe(original);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("native formatter stays within the JS/TS family and honors native ignore files", () => {
+  const root = mkdtempSync(join(tmpdir(), "keld-js-format-scope-"));
+  try {
+    const original = "export const value={answer:42};\n";
+    const sources = ["js", "jsx", "mjs", "cjs", "ts", "tsx", "mts", "cts"].map(
+      (ext) => `source.${ext}`,
+    );
+    const untouched = [
+      "source.rs",
+      "document.md",
+      "page.html",
+      "data.json",
+      "data.yaml",
+    ];
+    for (const name of [...sources, ...untouched, "ignored.ts"]) {
+      writeFileSync(join(root, name), original);
+    }
+    expect(
+      Bun.spawnSync(["git", "init", "--quiet"], { cwd: root }).exitCode,
+    ).toBe(0);
+    expect(
+      Bun.spawnSync(["git", "config", "maintenance.auto", "false"], {
+        cwd: root,
+      }).exitCode,
+    ).toBe(0);
+    expect(Bun.spawnSync(["git", "add", "."], { cwd: root }).exitCode).toBe(0);
+    writeFileSync(join(root, ".gitignore"), "ignored.ts\n");
+    expect(trackedSources(root).sort()).toEqual(
+      [...sources, "ignored.ts"].sort(),
+    );
+    expect(formatTrackedSources(root, true)).toBe(1);
+    for (const name of [...sources, ...untouched, "ignored.ts"]) {
+      expect(readFileSync(join(root, name), "utf8")).toBe(original);
+    }
+    expect(formatTrackedSources(root, false)).toBe(0);
+    for (const name of sources) {
+      expect(readFileSync(join(root, name), "utf8")).not.toBe(original);
+    }
+    for (const name of [...untouched, "ignored.ts"]) {
+      expect(readFileSync(join(root, name), "utf8")).toBe(original);
+    }
+    expect(formatTrackedSources(root, true)).toBe(0);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
