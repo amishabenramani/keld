@@ -7,7 +7,7 @@ import { aptStepTimeoutMinutes, cargoDenyArchiveSha256, cargoDenyChecks, cargoDe
 type Step = Record<string, unknown>;
 type FixtureJob = {
   steps: Step[];
-  defaults?: { run: { shell: string } };
+  defaults?: { run: { shell?: string; "working-directory"?: string } };
   env?: Record<string, unknown>;
   permissions?: Record<string, unknown>;
   strategy?: { matrix: Record<string, unknown> };
@@ -22,7 +22,7 @@ type Fixture = {
   on?: Record<string, unknown>;
   permissions?: Record<string, unknown>;
   env?: Record<string, unknown>;
-  defaults?: { run: { shell: string } };
+  defaults?: { run: { shell?: string; "working-directory"?: string } };
 };
 const source = readFileSync(join(import.meta.dir, "../.github/workflows/ci.yml"), "utf8");
 const windowsMediaOracle = readFileSync(join(import.meta.dir, "../crates/keld-wv/tests/windows_media_guard.ps1"));
@@ -266,6 +266,15 @@ test("inherited custom shells cannot false-green terminal required results", () 
     if (mutation === "ignore-error") evaluator["continue-on-error"] = true;
     if (mutation === "swallow-shell") evaluator.shell = "bash -c true {0}";
     expect(() => check(workflow)).toThrow("CI required evaluator must execute directly");
+  }
+});
+
+test("inherited working directories cannot redirect executable CI gates", () => {
+  for (const scope of ["workflow", "fmt", "changes"] as const) {
+    const workflow = fixture();
+    if (scope === "workflow") workflow.defaults = { run: { "working-directory": "./spoof" } };
+    else workflow.jobs[scope]!.defaults = { run: { "working-directory": "./spoof" } };
+    expect(() => check(workflow), scope).toThrow("must not set defaults.run.working-directory");
   }
 });
 

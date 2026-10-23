@@ -478,11 +478,18 @@ function refuseRustupRunOverride(run: unknown, label: string): void {
 function refuseInheritedCustomShell(owner: Mapping, label: string): void {
   if (!Object.hasOwn(owner, "defaults")) return;
   const defaults = mapping(owner.defaults, `${label}.defaults`);
-  if (!Object.hasOwn(defaults, "run")) return;
-  const run = mapping(defaults.run, `${label}.defaults.run`);
-  if (Object.hasOwn(run, "shell")) {
-    fail(`${label} must not set defaults.run.shell; an inherited custom shell can hide failed required gates.`);
+  if (Object.hasOwn(defaults, "run")) {
+    const run = mapping(defaults.run, `${label}.defaults.run`);
+    if (Object.hasOwn(run, "shell")) {
+      fail(`${label} must not set defaults.run.shell; an inherited custom shell can hide failed required gates.`);
+    }
+    if (Object.hasOwn(run, "working-directory")) {
+      fail(`${label} must not set defaults.run.working-directory; a redirected relative script can bypass the reviewed CI gate.`);
+    }
   }
+  // The current workflow has no defaults. Admit no other inherited execution
+  // settings, even if a future syntax adds more than shell/working-directory.
+  fail(`${label} must not set defaults; executable CI commands require their reviewed execution context.`);
 }
 
 /** Preserve the branch-protection entry points and the default token scope. */
