@@ -201,7 +201,7 @@ export const codeqlLanguages = ["rust", "javascript-typescript", "actions"] as c
 // Both actions must use the same *reviewed* immutable revision. Merely
 // requiring equal 40-hex SHAs would allow all six init/analyze uses to drift
 // together to an unreviewed action while the security admission stays green.
-const approvedCodeqlActionSha = "24c54180a607b1449ed407dd24f251e4e9147c8d"; // v4.38.3
+const approvedCodeqlActionSha = "6f2ac81f5cd81fe351a197ba0b00d91d03cd2aee"; // v4.39.0
 
 /**
  * One language's job condition: its router output (tools/ci_changes.sh), or a
@@ -549,7 +549,7 @@ const reviewedWorkflowActionRefs = new Set([
   "actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9",
   "actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9",
   "oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6",
-  "taiki-e/install-action@ab6895351a88b908e96a4697860d4ffea5e57dbe",
+  "taiki-e/install-action@8cca0918f8471c33515202b73f56ab27f2bed283",
   `github/codeql-action/init@${approvedCodeqlActionSha}`,
   `github/codeql-action/analyze@${approvedCodeqlActionSha}`,
   "actions/dependency-review-action@a1d282b36b6f3519aa1f3fc636f609c47dddb294",
