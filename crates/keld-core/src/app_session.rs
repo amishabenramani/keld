@@ -511,9 +511,9 @@ struct FsDispatchSession {
     state: Mutex<FsDispatchState>,
     handler_transition: Mutex<()>,
     drained: Condvar,
-    #[cfg(all(test, target_os = "macos"))]
+    #[cfg(test)]
     drain_wait_observer: Mutex<Option<SyncSender<()>>>,
-    #[cfg(all(test, target_os = "macos"))]
+    #[cfg(test)]
     terminal_write_hold: Mutex<Option<(SyncSender<()>, Receiver<()>)>>,
 }
 
@@ -541,9 +541,9 @@ impl FsDispatchSession {
             state: Mutex::new(FsDispatchState::initial()),
             handler_transition: Mutex::new(()),
             drained: Condvar::new(),
-            #[cfg(all(test, target_os = "macos"))]
+            #[cfg(test)]
             drain_wait_observer: Mutex::new(None),
-            #[cfg(all(test, target_os = "macos"))]
+            #[cfg(test)]
             terminal_write_hold: Mutex::new(None),
         }
     }
@@ -722,7 +722,7 @@ impl FsDispatchSession {
         self.wait_for_handler_transition()
     }
 
-    #[cfg(all(test, target_os = "macos"))]
+    #[cfg(test)]
     #[cfg(not(keld_core_native_renderer_main))]
     fn observe_next_drain_wait(&self, observer: SyncSender<()>) {
         *self
@@ -734,7 +734,7 @@ impl FsDispatchSession {
     /// Test hook: holds the next successful FS terminal write after it
     /// releases the generation lock and before its lease drops, until the
     /// test resumes it.
-    #[cfg(all(test, target_os = "macos"))]
+    #[cfg(test)]
     #[cfg(not(keld_core_native_renderer_main))]
     fn hold_next_terminal_write(&self, written: SyncSender<()>, resume: Receiver<()>) {
         *self
@@ -743,7 +743,7 @@ impl FsDispatchSession {
             .unwrap_or_else(std::sync::PoisonError::into_inner) = Some((written, resume));
     }
 
-    #[cfg(all(test, target_os = "macos"))]
+    #[cfg(test)]
     fn hold_after_terminal_write(&self) {
         let hold = self
             .terminal_write_hold
@@ -762,7 +762,7 @@ impl FsDispatchSession {
             .lock()
             .map_err(|_| app_detail("filesystem drain", "in-flight lock poisoned"))?;
         while state.in_flight != 0 {
-            #[cfg(all(test, target_os = "macos"))]
+            #[cfg(test)]
             if let Some(observer) = self
                 .drain_wait_observer
                 .lock()
@@ -1065,11 +1065,11 @@ impl PendingFsWriteFailure {
     }
 }
 
-#[cfg(all(test, any(target_os = "macos", target_os = "linux")))]
+#[cfg(test)]
 type FsWorkerTestInitializer =
     Box<dyn FnOnce() -> Result<Box<dyn std::any::Any>, HostAppError> + Send>;
 
-#[cfg(all(test, any(target_os = "macos", target_os = "linux")))]
+#[cfg(test)]
 struct FsWorkerTestGate {
     taken: SyncSender<()>,
     release: Mutex<Receiver<()>>,
@@ -1079,7 +1079,7 @@ struct FsWorkerTestGate {
     initializer: Mutex<Option<FsWorkerTestInitializer>>,
 }
 
-#[cfg(all(test, any(target_os = "macos", target_os = "linux")))]
+#[cfg(test)]
 impl FsWorkerTestGate {
     fn initialize_worker(&self) -> Result<Option<Box<dyn std::any::Any>>, HostAppError> {
         let initialize = self
@@ -4992,7 +4992,12 @@ impl Clone for DirectPrimaryOwnerHandle {
 
 #[cfg(any(target_os = "linux", windows))]
 enum DirectPrimaryOwnerCommand {
-    AttachRouter(PrimaryRouterHandle, mpsc::SyncSender<Result<(), String>>),
+    // Boxed like the macOS guardian's command: the handle dwarfs every other
+    // variant (`clippy::large_enum_variant`), and attachment is cold.
+    AttachRouter(
+        Box<PrimaryRouterHandle>,
+        mpsc::SyncSender<Result<(), String>>,
+    ),
     ArmRecovery(RecoveryArm, mpsc::SyncSender<Result<(), String>>),
     DenyRecovery,
     FailGeneration(u32, mpsc::SyncSender<Result<(), String>>),
@@ -5108,7 +5113,7 @@ impl DirectPrimaryOwner {
                             let result = if router.is_some() {
                                 Err(String::from("primary router was already attached"))
                             } else {
-                                router = Some(attached);
+                                router = Some(*attached);
                                 Ok(())
                             };
                             let _ = reply.send(result);
@@ -5208,7 +5213,10 @@ impl DirectPrimaryOwner {
     fn attach_router(&self, router: PrimaryRouterHandle) -> Result<(), HostAppError> {
         let (reply_tx, reply_rx) = mpsc::sync_channel(1);
         self.command_tx
-            .send(DirectPrimaryOwnerCommand::AttachRouter(router, reply_tx))
+            .send(DirectPrimaryOwnerCommand::AttachRouter(
+                Box::new(router),
+                reply_tx,
+            ))
             .map_err(|_| app_detail("primary router attachment", "owner stopped"))?;
         receive_direct_owner_reply(&reply_rx, "primary router attachment", false)
     }
@@ -5563,17 +5571,19 @@ struct PrimaryRouterHandle {
     auth_commands: Option<SyncSender<AuthWork>>,
     guardian: PlatformPrimaryOwnerHandle,
     window_commands: Sender<AppWindowCommand>,
-    #[cfg(all(test, target_os = "macos"))]
+    #[cfg(all(test, any(target_os = "macos", target_os = "linux")))]
     quit_drain_hooks: Arc<Mutex<QuitDrainTestHooks>>,
 }
 
 /// Test hooks for the post-Quit drain: [`PrimaryRouterHandle::stall_next_quit_drain`]
 /// and [`PrimaryRouterHandle::observe_next_quit_drain_end`].
-#[cfg(all(test, target_os = "macos"))]
+#[cfg(all(test, any(target_os = "macos", target_os = "linux")))]
 #[derive(Default)]
 struct QuitDrainTestHooks {
     stall: Option<(SyncSender<()>, Receiver<()>)>,
     end: Option<SyncSender<QuitDrainEnd>>,
+    // Only the macOS CLI-publication fixture reads this slot.
+    #[cfg(target_os = "macos")]
     cli_acceptance: Option<(SyncSender<()>, Receiver<()>)>,
 }
 
@@ -6251,14 +6261,14 @@ impl PrimaryRouterHandle {
         ) else {
             return;
         };
-        #[cfg(all(test, target_os = "macos"))]
+        #[cfg(all(test, any(target_os = "macos", target_os = "linux")))]
         let idle_deadline = self
             .stall_quit_drain_for_test(started)
             .unwrap_or(idle_deadline);
         let end = self.drain_calls_after_quit(attempt, reader, idle_deadline, hard_deadline);
-        #[cfg(all(test, target_os = "macos"))]
+        #[cfg(all(test, any(target_os = "macos", target_os = "linux")))]
         self.report_quit_drain_end(end);
-        #[cfg(not(all(test, target_os = "macos")))]
+        #[cfg(not(all(test, any(target_os = "macos", target_os = "linux"))))]
         let _ = end;
     }
 
@@ -6316,7 +6326,7 @@ impl PrimaryRouterHandle {
     }
 
     /// Test hook: reports how the next post-Quit drain ended.
-    #[cfg(all(test, target_os = "macos"))]
+    #[cfg(all(test, any(target_os = "macos", target_os = "linux")))]
     #[cfg(not(keld_core_native_renderer_main))]
     fn observe_next_quit_drain_end(&self, end: SyncSender<QuitDrainEnd>) {
         self.quit_drain_hooks
@@ -6325,7 +6335,7 @@ impl PrimaryRouterHandle {
             .end = Some(end);
     }
 
-    #[cfg(all(test, target_os = "macos"))]
+    #[cfg(all(test, any(target_os = "macos", target_os = "linux")))]
     fn report_quit_drain_end(&self, end: QuitDrainEnd) {
         let observer = self
             .quit_drain_hooks
@@ -6341,7 +6351,7 @@ impl PrimaryRouterHandle {
     /// Test hook: holds the next post-Quit drain before its first read until
     /// the test resumes it, then gives it an idle deadline that has already
     /// passed, as a host stall longer than its idle backstop would.
-    #[cfg(all(test, target_os = "macos"))]
+    #[cfg(all(test, any(target_os = "macos", target_os = "linux")))]
     #[cfg(not(keld_core_native_renderer_main))]
     fn stall_next_quit_drain(&self, stalled: SyncSender<()>, resume: Receiver<()>) {
         self.quit_drain_hooks
@@ -6352,7 +6362,7 @@ impl PrimaryRouterHandle {
 
     /// Returns the injected idle deadline (`started`, already passed) when
     /// the hook is armed.
-    #[cfg(all(test, target_os = "macos"))]
+    #[cfg(all(test, any(target_os = "macos", target_os = "linux")))]
     fn stall_quit_drain_for_test(&self, started: Instant) -> Option<Instant> {
         let (stalled, resume) = self
             .quit_drain_hooks
@@ -6449,7 +6459,7 @@ impl PrimaryRouterHandle {
             return Ok(None);
         }
         let Err(primary) = write(&mut active.writer) else {
-            #[cfg(all(test, target_os = "macos"))]
+            #[cfg(test)]
             {
                 drop(current);
                 drop(transition);
@@ -7022,7 +7032,7 @@ impl PrimaryRouterHandle {
         self.install_generation_with_identity(attempt, stream, PrimaryLinkIdentity::Fixture)
     }
 
-    #[cfg(all(test, any(target_os = "macos", target_os = "linux")))]
+    #[cfg(test)]
     fn install_prepared_generation(
         &self,
         attempt: u32,
@@ -7234,9 +7244,7 @@ impl FsWorker {
         handle: &mut PrimaryRouterHandle,
         broker: FsBroker,
         attempt: u32,
-        #[cfg(all(test, any(target_os = "macos", target_os = "linux")))] test_gate: Option<
-            Arc<FsWorkerTestGate>,
-        >,
+        #[cfg(test)] test_gate: Option<Arc<FsWorkerTestGate>>,
     ) -> Result<Self, HostAppError> {
         let (commands, receiver) = mpsc::sync_channel(1);
         let worker_handle = handle.clone();
@@ -7249,7 +7257,7 @@ impl FsWorker {
                     &worker_handle,
                     broker,
                     attempt,
-                    #[cfg(all(test, any(target_os = "macos", target_os = "linux")))]
+                    #[cfg(test)]
                     test_gate.as_deref(),
                 );
                 if result.is_err() {
@@ -7302,7 +7310,7 @@ impl PrimaryRouter {
         Self::start_with_fs_test_gate(stream, window_commands, guardian, shutdown, fs, None)
     }
 
-    #[cfg(all(test, any(target_os = "macos", target_os = "linux")))]
+    #[cfg(test)]
     fn start_with_fs_test_gate(
         stream: BootstrapStream,
         window_commands: Sender<AppWindowCommand>,
@@ -7335,14 +7343,14 @@ impl PrimaryRouter {
             auth_commands: None,
             guardian,
             window_commands,
-            #[cfg(all(test, target_os = "macos"))]
+            #[cfg(all(test, any(target_os = "macos", target_os = "linux")))]
             quit_drain_hooks: Arc::default(),
         };
         let router = Self::finish_start(
             handle,
             fs.map(GuardSnapshot::take_initial_broker).transpose()?,
             1,
-            #[cfg(all(test, any(target_os = "macos", target_os = "linux")))]
+            #[cfg(test)]
             fs_worker_test_gate,
             #[cfg(target_os = "macos")]
             None,
@@ -7366,7 +7374,7 @@ impl PrimaryRouter {
             guardian,
             shutdown,
             fs,
-            #[cfg(all(test, any(target_os = "macos", target_os = "linux")))]
+            #[cfg(test)]
             None,
             #[cfg(target_os = "macos")]
             fs.map(|snapshot| (snapshot.verified.clone(), auth_configuration, presentation)),
@@ -7394,8 +7402,7 @@ impl PrimaryRouter {
         guardian: PlatformPrimaryOwnerHandle,
         shutdown: SessionShutdownState,
         fs: Option<&GuardSnapshot>,
-        #[cfg(all(test, any(target_os = "macos", target_os = "linux")))]
-        fs_worker_test_gate: Option<Arc<FsWorkerTestGate>>,
+        #[cfg(test)] fs_worker_test_gate: Option<Arc<FsWorkerTestGate>>,
         #[cfg(target_os = "macos")] auth_startup: Option<(
             VerifiedManifest,
             AuthConfiguration,
@@ -7429,14 +7436,14 @@ impl PrimaryRouter {
             auth_commands: None,
             guardian,
             window_commands,
-            #[cfg(all(test, target_os = "macos"))]
+            #[cfg(all(test, any(target_os = "macos", target_os = "linux")))]
             quit_drain_hooks: Arc::default(),
         };
         let router = Self::finish_start(
             handle,
             fs.map(GuardSnapshot::take_initial_broker).transpose()?,
             attempt,
-            #[cfg(all(test, any(target_os = "macos", target_os = "linux")))]
+            #[cfg(test)]
             fs_worker_test_gate,
             #[cfg(target_os = "macos")]
             auth_startup,
@@ -7451,9 +7458,7 @@ impl PrimaryRouter {
         mut handle: PrimaryRouterHandle,
         broker: Option<FsBroker>,
         attempt: u32,
-        #[cfg(all(test, any(target_os = "macos", target_os = "linux")))] test_gate: Option<
-            Arc<FsWorkerTestGate>,
-        >,
+        #[cfg(test)] test_gate: Option<Arc<FsWorkerTestGate>>,
         #[cfg(target_os = "macos")] auth_startup: Option<(
             VerifiedManifest,
             AuthConfiguration,
@@ -7471,7 +7476,7 @@ impl PrimaryRouter {
                 &mut handle,
                 broker,
                 attempt,
-                #[cfg(all(test, any(target_os = "macos", target_os = "linux")))]
+                #[cfg(test)]
                 test_gate,
             )?)
         } else {
@@ -7594,9 +7599,7 @@ fn run_fs_worker(
     handle: &PrimaryRouterHandle,
     initial_broker: FsBroker,
     initial_attempt: u32,
-    #[cfg(all(test, any(target_os = "macos", target_os = "linux")))] test_gate: Option<
-        &FsWorkerTestGate,
-    >,
+    #[cfg(test)] test_gate: Option<&FsWorkerTestGate>,
 ) -> Result<(), HostAppError> {
     let session = handle.fs.as_ref().and_then(Weak::upgrade).ok_or_else(|| {
         app_detail(
@@ -7614,7 +7617,7 @@ fn run_fs_worker(
     let mut retiring: Option<(u32, SyncSender<FsWorkerCompletion>)> = None;
     // Retain this exact worker's scope through its final call and loop exit.
     // A thread-affine erased value is never transferred back to the fixture.
-    #[cfg(all(test, any(target_os = "macos", target_os = "linux")))]
+    #[cfg(test)]
     let _worker_scope = test_gate
         .map(FsWorkerTestGate::initialize_worker)
         .transpose()?
@@ -7680,7 +7683,7 @@ fn run_fs_worker(
             &session,
             handle,
             work,
-            #[cfg(all(test, any(target_os = "macos", target_os = "linux")))]
+            #[cfg(test)]
             test_gate,
         )?;
         if let Some(next) = next_failure {
@@ -7703,9 +7706,7 @@ fn run_fs_work_item(
     session: &FsDispatchSession,
     handle: &PrimaryRouterHandle,
     work: FsWorkItem,
-    #[cfg(all(test, any(target_os = "macos", target_os = "linux")))] test_gate: Option<
-        &FsWorkerTestGate,
-    >,
+    #[cfg(test)] test_gate: Option<&FsWorkerTestGate>,
 ) -> Result<Option<PendingFsWriteFailure>, HostAppError> {
     let FsWorkItem {
         admitted,
@@ -7714,12 +7715,12 @@ fn run_fs_work_item(
         correlation,
         cancellation,
     } = work;
-    #[cfg(all(test, any(target_os = "macos", target_os = "linux")))]
+    #[cfg(test)]
     if let Some(fence) = test_gate.and_then(|gate| gate.before_entry.as_deref()) {
         fence.wait_after_take()?;
     }
     let outcome = admitted.handle_with(|| {
-        #[cfg(all(test, any(target_os = "macos", target_os = "linux")))]
+        #[cfg(test)]
         if let Some(gate) = test_gate {
             gate.wait_after_take()?;
         }
@@ -8243,7 +8244,6 @@ fn app_ipc(phase: &'static str, source: &IpcError) -> HostAppError {
 }
 
 #[cfg(test)]
-#[cfg(target_os = "macos")]
 type GuardedFsTestSetup = Box<dyn FnOnce(&mut FsWorkerTestGate)>;
 
 #[cfg(test)]
