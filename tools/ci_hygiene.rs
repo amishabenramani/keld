@@ -1315,6 +1315,50 @@ fn check_bun_setup_steps(text: &str, job: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// The Bun lane has exactly one static three-OS matrix, not a larger matrix
+/// with include/exclude rows that can suppress a required hosted runner. Read
+/// only the actual job-level strategy.matrix mapping, never an unrelated
+/// indentation-matched `os:` line or a step/script with similar text.
+fn bun_job_has_static_three_os_matrix(block: &str) -> bool {
+    let mut strategies = 0;
+    let mut matrices = 0;
+    let mut os_entries = 0;
+    let mut in_strategy = false;
+    let mut in_matrix = false;
+
+    for (indent, content) in block.lines().filter_map(yaml_content) {
+        if indent == 4 {
+            in_matrix = false;
+            in_strategy = yaml_mapping_key(content).is_some_and(|(key, _)| key == "strategy");
+            if in_strategy {
+                strategies += 1;
+                if content != "strategy:" {
+                    return false;
+                }
+            }
+        } else if in_strategy && indent == 6 {
+            in_matrix = false;
+            if yaml_mapping_key(content).is_some_and(|(key, _)| key == "matrix") {
+                matrices += 1;
+                in_matrix = true;
+                if content != "matrix:" {
+                    return false;
+                }
+            }
+        } else if in_matrix && indent > 6 {
+            // A static inline OS list needs no other matrix entries. In
+            // particular, `exclude:` can silently drop Windows while leaving
+            // the literal three-OS list intact. Reject `include:` as well.
+            if indent != 8 || content != THREE_OS_MATRIX {
+                return false;
+            }
+            os_entries += 1;
+        }
+    }
+
+    strategies == 1 && matrices == 1 && os_entries == 1
+}
+
 /// Asserts the `bun-test` lane's decidable properties and the exact Bun pin for
 /// every current Bun consumer: `check`, `bun-test`, and `hygiene`. The `bun-test`
 /// lane must exist, be gated on the router's own output, and avoid a second live
@@ -1329,13 +1373,23 @@ fn check_bun_test_job(text: &str) -> Result<(), String> {
             "CI-HYGIENE: `{WORKFLOW}` has no `bun-test` job. The `packages/` TypeScript suites need a lane of their own: the Bun install inside `check` exists so Rust tests can spawn Bun children and never runs `bun test`."
         ));
     };
-    if !uncommented_line_contains(&block, "if: needs.changes.outputs.ts == 'true'") {
+    let job_if_count = block
+        .lines()
+        .filter_map(yaml_content)
+        .filter(|(indent, content)| {
+            *indent == 4 && yaml_mapping_key(content).is_some_and(|(key, _)| key == "if")
+        })
+        .count();
+    if job_if_count != 1
+        || workflow_job_level_if(&block).as_deref()
+            != Some("needs.changes.outputs.ts == 'true'")
+    {
         return Err(format!(
             "CI-HYGIENE: `{WORKFLOW}` `bun-test` must be gated on `if: needs.changes.outputs.ts == 'true'`. The router owns which diffs reach this lane; an ungated job wastes runners and a gate on another output silently never runs (contexts: needs, github, vars, inputs only — never `matrix`)."
         ));
     }
     if workflow_job_level_property(&block, "runs-on").as_deref() != Some("${{ matrix.os }}")
-        || workflow_job_matrix_os_lines(text, "bun-test") != [THREE_OS_MATRIX]
+        || !bun_job_has_static_three_os_matrix(&block)
     {
         return Err(format!(
             "CI-HYGIENE: `{WORKFLOW}` `bun-test` must use `runs-on: ${{{{ matrix.os }}}}` over `{THREE_OS_MATRIX}`. Bun roles run on every OS, and the GH-1095 three-OS rows (AT-B1, AT-B2, AT-API2a) are proven only there (#1111)."
