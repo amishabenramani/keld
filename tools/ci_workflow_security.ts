@@ -391,7 +391,7 @@ export function checkPullRequestTargetWorkflow(source: string, label: string): v
 const approvedRustToolchainAction =
   "dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8";
 const rustToolchainInstallerJobs = new Set([
-  "changes", "fmt", "check", "windows-media", "doctest", "linux-gui-smoke",
+  "changes", "router-contracts", "fmt", "check", "windows-media", "doctest", "linux-gui-smoke",
   "msrv", "deny", "hygiene", "mermaid", "codeql-rust",
 ]);
 
@@ -648,6 +648,26 @@ export function checkWorkflowSecurity(source: string): void {
   if (!dependencies) fail("CodeQL and dependency-review jobs must exist.");
   const changes = stepsByJob.get("changes");
   if (!changes) fail("the changes job must exist.");
+  // A 56-second suite used to gate the outputs of every OS and CodeQL lane.
+  // It now has its own always-created runner, but remains a mandatory result.
+  const routerJob = mapping(jobs["router-contracts"], "jobs.router-contracts");
+  exactKeys(routerJob, ["name", "runs-on", "timeout-minutes", "steps"], "router contract regression job");
+  if (routerJob.name !== "Router contract tests" || routerJob["runs-on"] !== "ubuntu-latest"
+      || scalar(routerJob["timeout-minutes"]) !== "10") {
+    fail("router contract regression job must run unconditionally on hosted Ubuntu with the reviewed 10-minute bound.");
+  }
+  const routerSteps = stepsByJob.get("router-contracts")!;
+  if (routerSteps.length !== 3
+      || actionName(actionRef(routerSteps[0]!.uses, "router contracts checkout")) !== "actions/checkout"
+      || scalar(mapping(routerSteps[0]!.with, "router contracts checkout inputs")["fetch-depth"]) !== "0"
+      || actionName(actionRef(routerSteps[1]!.uses, "router contracts compiler")) !== "dtolnay/rust-toolchain") {
+    fail("router contract regression job must have full-history checkout, reviewed Rust toolchain and exact test in that order.");
+  }
+  directRunStep(routerSteps, "Router contract tests", "tools/ci_changes_test.sh", "independent router contract regression tests");
+  if (routerSteps[2]!.name !== "Router contract tests" || changes.some(step =>
+    step.name === "Router contract tests" || (typeof step.run === "string" && step.run.includes("tools/ci_changes_test.sh")))) {
+    fail("router contracts must run only in the independent regression job, not block change-router outputs.");
+  }
   namedStep(changes, "Test module import ownership");
   namedStep(changes, "Source budget tool tests");
   directRunStep(changes, "CI attempt timing reporter regression tests",
@@ -680,10 +700,19 @@ export function checkWorkflowSecurity(source: string): void {
   if (Object.hasOwn(requiredJob, "continue-on-error")) {
     fail("CI required must not tolerate failures.");
   }
+  if (!Array.isArray(requiredJob.needs)
+      || requiredJob.needs.filter(value => value === "router-contracts").length !== 1) {
+    fail("CI required must independently need the mandatory router contract regression job.");
+  }
   const evaluator = namedStep(required, "Verify required CI results");
   if (Object.keys(evaluator).length !== 3 || !Object.hasOwn(evaluator, "name")
       || !Object.hasOwn(evaluator, "env") || typeof evaluator.run !== "string") {
     fail("CI required evaluator must execute directly without shell, condition or failure swallowing.");
+  }
+  if (mapping(evaluator.env, "CI required evaluator environment")["KELD_RESULT_ROUTER_CONTRACTS"]
+      !== "${{ needs['router-contracts'].result }}"
+      || evaluator.run.trimEnd().split("\n").at(-1)?.trim() !== '"$KELD_RESULT_ROUTER_CONTRACTS"') {
+    fail("CI required must pass the exact independent router contracts result into its final blocking check.");
   }
   const review = requiredAction(dependencies, "Review dependency vulnerabilities", "actions/dependency-review-action", {
     "base-ref": baseRef, "head-ref": headRef, "fail-on-severity": "low",

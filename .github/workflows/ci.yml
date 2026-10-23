@@ -75,8 +75,6 @@ jobs:
           target/product-status/product-status-test
           rustc --edition=2024 -D warnings tools/product_status.rs -o target/product-status/product-status
           target/product-status/product-status check .
-      - name: Router contract tests
-        run: tools/ci_changes_test.sh
       # Enforce explicit dependencies only for newly introduced Rust test imports.
       # No legacy-only rejection or privileged pull_request_target execution.
       - name: Test module import ownership
@@ -147,6 +145,24 @@ jobs:
           echo '~~~json' >> "$GITHUB_STEP_SUMMARY"
           cat target/source-budget/brief.json >> "$GITHUB_STEP_SUMMARY"
           echo '~~~' >> "$GITHUB_STEP_SUMMARY"
+
+  # The router's full 56-second regression suite has no dependency on the
+  # selected outputs. Keep it mandatory, but do not hold all routed jobs until
+  # these tests complete. CI required rejects any missing or failing result.
+  router-contracts:
+    name: Router contract tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master pinned commit
+        with:
+          toolchain: 1.99.1
+      - name: Router contract tests
+        run: tools/ci_changes_test.sh
 
   fmt:
     name: rustfmt
@@ -1059,6 +1075,7 @@ jobs:
     if: ${{ always() }}
     needs:
       - changes
+      - router-contracts
       - fmt
       - check
       - bun-test
@@ -1117,6 +1134,7 @@ jobs:
           KELD_ROUTE_DOCTEST: ${{ needs.changes.outputs.doctest }}
           KELD_RESULT_MEDIA: ${{ needs['windows-media'].result }}
           KELD_ROUTE_MEDIA: ${{ needs.changes.outputs.rust == 'true' && contains(needs.changes.outputs.packages, 'keld-wv') }}
+          KELD_RESULT_ROUTER_CONTRACTS: ${{ needs['router-contracts'].result }}
         run: |
           tools/ci_required.sh test
           tools/ci_required.sh check \
@@ -1153,4 +1171,5 @@ jobs:
             "$KELD_RESULT_DOCTEST" \
             "$KELD_ROUTE_DOCTEST" \
             "$KELD_RESULT_MEDIA" \
-            "$KELD_ROUTE_MEDIA"
+            "$KELD_ROUTE_MEDIA" \
+            "$KELD_RESULT_ROUTER_CONTRACTS"

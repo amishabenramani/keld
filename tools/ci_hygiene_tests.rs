@@ -119,8 +119,6 @@ fn valid_workflow() -> String {
             "        with:",
             "          fetch-depth: 0",
             "          persist-credentials: false",
-            "      - name: Router contract tests",
-            "        run: tools/ci_changes_test.sh",
             "      - name: Classify changed-path ownership",
             "        run: tools/ci_changes.sh github",
             "      - name: Agent instruction inventory (agents-md)",
@@ -132,6 +130,16 @@ fn valid_workflow() -> String {
             "          target/product-status/product-status-test",
             "          rustc --edition=2024 -D warnings tools/product_status.rs -o target/product-status/product-status",
             "          target/product-status/product-status check .",
+            "  router-contracts:",
+            "    name: Router contract tests",
+            "    runs-on: ubuntu-latest",
+            "    steps:",
+            "      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0",
+            "        with:",
+            "          fetch-depth: 0",
+            "          persist-credentials: false",
+            "      - name: Router contract tests",
+            "        run: tools/ci_changes_test.sh",
             "  check:",
             "    strategy:",
             "      matrix:",
@@ -321,6 +329,7 @@ fn valid_workflow() -> String {
             "    if: ${{ always() }}",
             "    needs:",
             "      - changes",
+            "      - router-contracts",
             "      - fmt",
             "      - check",
             "      - bun-test",
@@ -344,6 +353,7 @@ fn valid_workflow() -> String {
             "      - name: Verify required CI results",
             "        env:",
             "          KELD_RESULT_CHANGES: ${{ needs.changes.result }}",
+            "          KELD_RESULT_ROUTER_CONTRACTS: ${{ needs['router-contracts'].result }}",
             "          KELD_RESULT_FMT: ${{ needs.fmt.result }}",
             "          KELD_RESULT_CHECK: ${{ needs.check.result }}",
             "          KELD_RESULT_BUN: ${{ needs['bun-test'].result }}",
@@ -396,7 +406,8 @@ fn valid_workflow() -> String {
             "            \"$KELD_RESULT_WORKSPACE\" \"$KELD_ROUTE_WORKSPACE\" \\",
             "            \"$KELD_EVENT_NAME\" \"$KELD_ROUTE_RUST_DOCUMENTATION_ONLY\" \"$KELD_ROUTE_CHECK_OS\" \\",
             "            \"$KELD_RESULT_DOCTEST\" \"$KELD_ROUTE_DOCTEST\" \\",
-            "            \"$KELD_RESULT_MEDIA\" \"$KELD_ROUTE_MEDIA\"",
+            "            \"$KELD_RESULT_MEDIA\" \"$KELD_ROUTE_MEDIA\" \\",
+            "            \"$KELD_RESULT_ROUTER_CONTRACTS\"",
             "",
         ]
         .join("\n")
@@ -1106,7 +1117,7 @@ fn required_result_must_receive_router_applicability() {
         &valid_workflow().replacen("\"$KELD_ROUTE_TS\"", "false", 1),
     );
     let error = check(temp.path()).expect_err("unused router output must fail");
-    assert!(error.contains("34-argument"), "{error}");
+    assert!(error.contains("35-argument"), "{error}");
 }
 
 #[test]
@@ -1163,7 +1174,7 @@ fn required_result_must_receive_security_results_without_spoofing() {
         assert!(error.contains(key), "{error}");
         let workflow = valid_workflow().replacen(&format!("\"${key}\""), "success", 1);
         let error = check_required_job(&workflow).expect_err("unused security result must fail");
-        assert!(error.contains("34-argument"), "{error}");
+        assert!(error.contains("35-argument"), "{error}");
     }
 }
 
@@ -1649,7 +1660,7 @@ fn commented_out_retries_is_not_a_retry() {
 }
 
 #[test]
-fn router_test_in_another_job_does_not_satisfy_changes_contract() {
+fn router_test_in_another_job_does_not_satisfy_independent_contract() {
     let temp = complete_fixture();
     let workflow = valid_workflow()
         .replacen("        run: tools/ci_changes_test.sh\n", "", 1)
@@ -1658,8 +1669,8 @@ fn router_test_in_another_job_does_not_satisfy_changes_contract() {
             "  unrelated:\n    steps:\n      - run: tools/ci_changes_test.sh\n  secrets:\n",
         );
     temp.write(WORKFLOW, &workflow);
-    let error = check(temp.path()).expect_err("router test must run in changes job");
-    assert!(error.contains("changes` job"), "{error}");
+    let error = check(temp.path()).expect_err("router contract test must run in its dedicated job");
+    assert!(error.contains("router-contracts`"), "{error}");
     assert!(error.contains("tools/ci_changes_test.sh"), "{error}");
 }
 
@@ -2405,7 +2416,7 @@ fn parallel_windows_media_job_preserves_required_admission() {
         assert!(
             error.contains("windows-media")
                 || error.contains("MEDIA")
-                || error.contains("34-argument"),
+                || error.contains("35-argument"),
             "{needle}: {error}"
         );
     }

@@ -40,7 +40,7 @@ const staleRustToolchain = selectedRustToolchain.replace(`"${selectedRust}"`, `"
 if (staleRustToolchain === selectedRustToolchain) throw new Error("stale-pin mutation did not apply");
 const checkout = "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1";
 const requiredRustInstallerJobs = [
-  "changes", "fmt", "check", "windows-media", "doctest", "linux-gui-smoke",
+  "changes", "router-contracts", "fmt", "check", "windows-media", "doctest", "linux-gui-smoke",
   "msrv", "deny", "hygiene", "mermaid", "codeql-rust",
 ];
 
@@ -59,6 +59,58 @@ function check(f: Fixture): void { checkWorkflowSecurity(Bun.YAML.stringify(f, n
 
 test("actual workflow passes parsed security admission", () => {
   expect(() => checkWorkflowSecurity(source)).not.toThrow();
+});
+
+test("router contract regression runs independently without releasing its required gate", () => {
+  const workflow = fixture();
+  const job = workflow.jobs["router-contracts"];
+  expect(job).toBeDefined();
+  expect(job!.steps.some(candidate => candidate.name === "Router contract tests"
+    && candidate.run === "tools/ci_changes_test.sh")).toBe(true);
+  expect(workflow.jobs.changes!.steps.some(candidate => candidate.name === "Router contract tests"))
+    .toBe(false);
+  expect(workflow.jobs.required!.needs).toContain("router-contracts");
+});
+
+test("independent router regression job is unconditional, exact and required", () => {
+  for (const [name, mutate] of [
+    ["absent job", (f: Fixture) => { delete f.jobs["router-contracts"]; }],
+    ["job skipped", (f: Fixture) => { f.jobs["router-contracts"]!.if = false; }],
+    ["job queued behind classifier", (f: Fixture) => { f.jobs["router-contracts"]!.needs = "changes"; }],
+    ["missing test", (f: Fixture) => { f.jobs["router-contracts"]!.steps.pop(); }],
+    ["duplicate test", (f: Fixture) => {
+      const steps = f.jobs["router-contracts"]!.steps;
+      steps.push(structuredClone(steps.at(-1)!));
+    }],
+    ["echo-only test", (f: Fixture) => {
+      f.jobs["router-contracts"]!.steps.at(-1)!.run = "echo tools/ci_changes_test.sh";
+    }],
+    ["conditional test", (f: Fixture) => {
+      f.jobs["router-contracts"]!.steps.at(-1)!.if = false;
+    }],
+    ["partial history", (f: Fixture) => {
+      (f.jobs["router-contracts"]!.steps[0]!.with as Record<string, unknown>)["fetch-depth"] = 1;
+    }],
+    ["suite back in blocking router", (f: Fixture) => {
+      f.jobs.changes!.steps.splice(2, 0, { name: "Router contract tests", run: "tools/ci_changes_test.sh" });
+    }],
+    ["required needs missing", (f: Fixture) => {
+      f.jobs.required!.needs = (f.jobs.required!.needs as string[])
+        .filter(name => name !== "router-contracts");
+    }],
+    ["result handoff changed", (f: Fixture) => {
+      (step(f, "required", "Verify required CI results").env as Record<string, unknown>)
+        .KELD_RESULT_ROUTER_CONTRACTS = "success";
+    }],
+    ["result argument missing", (f: Fixture) => {
+      const evaluator = step(f, "required", "Verify required CI results");
+      evaluator.run = String(evaluator.run).replace('"$KELD_RESULT_ROUTER_CONTRACTS"', "");
+    }],
+  ] as const) {
+    const altered = fixture();
+    mutate(altered);
+    expect(() => check(altered), name).toThrow();
+  }
 });
 
 test("CI retains main push and every pull request without trigger filters", () => {

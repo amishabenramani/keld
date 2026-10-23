@@ -838,7 +838,6 @@ fn check_change_router_job(text: &str) -> Result<(), String> {
         ));
     }
     for (step_name, command) in [
-        ("Router contract tests", "tools/ci_changes_test.sh"),
         (
             "Classify changed-path ownership",
             "tools/ci_changes.sh github",
@@ -855,6 +854,34 @@ fn check_change_router_job(text: &str) -> Result<(), String> {
                 "CI-HYGIENE: `{WORKFLOW}` `changes` job must have an unconditional `{step_name}` step whose exact command is `{command}`. Put it in the router job; a shell guard, GitHub `if`, or identical command in another job cannot prove routing."
             ));
         }
+    }
+    Ok(())
+}
+
+fn check_independent_router_contract_job(text: &str) -> Result<(), String> {
+    let Some(block) = workflow_job_block(text, "router-contracts") else {
+        return Err(format!(
+            "CI-HYGIENE: `{WORKFLOW}` must retain the unconditional `router-contracts` job so slow regression tests do not block classification."
+        ));
+    };
+    if workflow_job_level_property(&block, "needs").is_some()
+        || workflow_job_level_if(&block).is_some()
+        || workflow_job_level_property(&block, "continue-on-error").is_some()
+        || workflow_job_level_property(&block, "runs-on").as_deref() != Some("ubuntu-latest")
+        || !workflow_has_checkout_fetch_depth_zero(&block)
+        || !workflow_has_unconditional_named_step(&block, "Router contract tests", "tools/ci_changes_test.sh")
+    {
+        return Err(format!(
+            "CI-HYGIENE: `{WORKFLOW}` `router-contracts` must run the exact unconditional `tools/ci_changes_test.sh` on its own full-history Ubuntu runner, never behind changes."
+        ));
+    }
+    if workflow_job_block(text, "changes").is_some_and(|changes| {
+        uncommented_line_contains(&changes, "run: tools/ci_changes_test.sh")
+            || uncommented_line_contains(&changes, "name: Router contract tests")
+    }) {
+        return Err(format!(
+            "CI-HYGIENE: `{WORKFLOW}` `changes` must not execute the independent router contract test suite and delay every selected native lane."
+        ));
     }
     Ok(())
 }
@@ -1441,6 +1468,7 @@ fn check_required_job(text: &str) -> Result<(), String> {
     }
     let expected_needs = [
         "changes",
+        "router-contracts",
         "fmt",
         "check",
         "bun-test",
@@ -1470,6 +1498,7 @@ fn check_required_job(text: &str) -> Result<(), String> {
     }
     for (key, expression) in [
         ("KELD_RESULT_CHANGES", "${{ needs.changes.result }}"),
+        ("KELD_RESULT_ROUTER_CONTRACTS", "${{ needs['router-contracts'].result }}"),
         ("KELD_RESULT_FMT", "${{ needs.fmt.result }}"),
         ("KELD_RESULT_CHECK", "${{ needs.check.result }}"),
         ("KELD_RESULT_BUN", "${{ needs['bun-test'].result }}"),
@@ -1569,7 +1598,8 @@ fn check_required_job(text: &str) -> Result<(), String> {
         "\"$KELD_RESULT_WORKSPACE\" \"$KELD_ROUTE_WORKSPACE\" ",
         "\"$KELD_EVENT_NAME\" \"$KELD_ROUTE_RUST_DOCUMENTATION_ONLY\" \"$KELD_ROUTE_CHECK_OS\" ",
         "\"$KELD_RESULT_DOCTEST\" \"$KELD_ROUTE_DOCTEST\" ",
-        "\"$KELD_RESULT_MEDIA\" \"$KELD_ROUTE_MEDIA\""
+        "\"$KELD_RESULT_MEDIA\" \"$KELD_ROUTE_MEDIA\" ",
+        "\"$KELD_RESULT_ROUTER_CONTRACTS\""
     );
     let expected_commands = [
         "tools/ci_required.sh test".to_owned(),
@@ -1579,7 +1609,7 @@ fn check_required_job(text: &str) -> Result<(), String> {
         .unwrap_or_default();
     if actual_commands != expected_commands {
         return Err(format!(
-            "CI-HYGIENE: `{WORKFLOW}` `required` evaluator run block must contain only its self-test and the exact ordered 34-argument check, without control flow, reassignment, wrappers, or exit-status suppression."
+            "CI-HYGIENE: `{WORKFLOW}` `required` evaluator run block must contain only its self-test and the exact ordered 35-argument check, without control flow, reassignment, wrappers, or exit-status suppression."
         ));
     }
 
@@ -2451,6 +2481,7 @@ fn check_workflow(root: &Path) -> Result<(), String> {
     }
 
     check_change_router_job(&text)?;
+    check_independent_router_contract_job(&text)?;
     check_mermaid_job(&text)?;
     check_package_loop_shell(&text)?;
     check_check_job_if_avoids_matrix(&text)?;

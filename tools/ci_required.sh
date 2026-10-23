@@ -34,21 +34,24 @@ require_routed_result() {
     esac
 }
 
-# Argument layout (34): 1 change router; 2-10 core job results; 11-18 lane
+# Argument layout (35): 1 change router; 2-10 core job results; 11-18 lane
 # router outputs; 19-21 CodeQL rust, javascript-typescript and actions job
 # results; 22-24 their router outputs; 25 dependency review; 26 workspace
 # contracts job result; 27 its router output; 28 the triggering event name;
 # 29 the router's rust_documentation_only output; 30 its check_os output;
 # 31 doctest job result; 32 its router output; 33 Windows media acceptance
-# job result; 34 its router output.
-readonly CHECK_ARGUMENT_COUNT=34
+# job result; 34 its router output; 35 independent router contract test result.
+readonly CHECK_ARGUMENT_COUNT=35
 check_results() {
     if [[ "$#" -ne "$CHECK_ARGUMENT_COUNT" ]]; then
-        fail "expected 10 routed/core job results, 8 router outputs, 3 CodeQL job results, 3 CodeQL router outputs, 1 dependency review result, the workspace contracts result and router output, the event name, the rust_documentation_only and check_os router outputs, the doctest result and router output, and the Windows media result and router output, got $#; restore the required job's complete needs and applicability handoff."
+        fail "expected 10 routed/core job results, 8 router outputs, 3 CodeQL job results, 3 CodeQL router outputs, 1 dependency review result, workspace contracts, event and OS routes, doctests, Windows media and independent router contract test result, got $#; restore the required job's complete needs and applicability handoff."
         return
     fi
 
     require_success "change router" "$1" || return 1
+    # This independent job is unconditionally required even if no Rust/TS/docs
+    # sources changed. Its tests must not delay the router's output emission.
+    require_success "independent router contract tests" "${35}" || return 1
     require_routed_result "rustfmt" "$2" "${11}" || return 1
     require_routed_result "cross-platform clippy + test" "$3" "${11}" || return 1
     require_routed_result "Bun TypeScript tests" "$4" "${12}" || return 1
@@ -148,7 +151,7 @@ require_check_os() {
 
 # Older self-test rows predate Mermaid (18 arguments) and per-language CodeQL
 # routing (20 arguments, one always-selected CodeQL result). Widen them with
-# the meaning they had then; check_results accepts only the current 34.
+# the meaning they had then; check_results accepts only the current 35.
 normalize_self_test_args() {
     local -a args=("$@")
     if [[ "${#args[@]}" -eq 18 ]]; then
@@ -173,6 +176,12 @@ normalize_self_test_args() {
     # Rows before the standalone Windows media lane had no such job.
     if [[ "${#args[@]}" -eq 32 ]]; then
         args=("${args[@]}" skipped false)
+    fi
+    # Historical self-tests ran the router's contract suite in its own job.
+    # Only test fixtures can supply this synthetic success: the real `check`
+    # rejects 34 arguments and demands the separate result from GitHub.
+    if [[ "${#args[@]}" -eq 34 ]]; then
+        args=("${args[@]}" success)
     fi
     normalized_args=("${args[@]}")
 }
@@ -390,6 +399,23 @@ windows_media_self_test() {
     echo "ok: Windows media acceptance is independently required when routed"
 }
 
+router_contract_self_test() {
+    # Even a docs-only run must execute the independent router contract suite.
+    local -a row=("${docs_only_prefix[@]}" skipped skipped skipped false false false success
+        skipped false pull_request false "$ALL_CHECK_OS" skipped false skipped false)
+    expect_pass "independent router contract tests succeed" "${row[@]}" success
+    local outcome
+    for outcome in skipped cancelled failure missing ''; do
+        expect_fail "independent router contracts '$outcome' are not admissible" \
+            "${row[@]}" "$outcome"
+    done
+    if check_results "${row[@]}" >/dev/null 2>&1; then
+        fail "the 34-argument hosted handoff omitting independent router contracts was accepted"
+        return 1
+    fi
+    echo "ok: independent router contract tests cannot disappear or false-green"
+}
+
 self_test() {
     expect_pass "all applicable jobs succeed" \
         success success success success success success success success success \
@@ -460,6 +486,7 @@ self_test() {
     push_and_check_os_self_test
     doctest_self_test
     windows_media_self_test
+    router_contract_self_test
 
     echo "ci-required contract tests ok"
 }
