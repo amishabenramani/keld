@@ -662,6 +662,11 @@ impl MacRendererBridge {
     /// §4.7). If it commits, the old document already settled the call on
     /// `pagehide`, and the successor drops this result by its document.
     /// Nothing here can fail after the call was cleared.
+    ///
+    /// Spec r2 §4.7: a host `navigate()` cannot run while the app runs today,
+    /// so this path is not reachable end to end. It is covered only by the
+    /// unit test that calls `navigation_reset_script` directly; its running-
+    /// app owner is #459.
     pub(super) fn navigation_started(&self, webview: Option<&wry::WryWebView>) {
         if let Some(script) = navigation_reset_script(&self.state)
             && let Some(webview) = webview

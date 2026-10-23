@@ -122,14 +122,23 @@ impl StderrTap {
 }
 
 impl Launch {
-    fn start(fixture: &PublicFsProject, name: &str, steps: &Value, reload_steps: &Value) -> Self {
+    /// `successor_steps` drive the page the observer serves at
+    /// `/successor-page`, the target of a `navigate` step.
+    fn start(
+        fixture: &PublicFsProject,
+        name: &str,
+        steps: &Value,
+        reload_steps: &Value,
+        successor_steps: &Value,
+    ) -> Self {
         let observer = Observation::bind_recovery();
         let port = observer.port.to_string();
         let app = include_str!("../../../fixtures/request_codes_app.ts").replace("__PORT__", &port);
-        let page = include_str!("../../../fixtures/request_codes_page.html")
+        let template = include_str!("../../../fixtures/request_codes_page.html")
             .replace("__PORT__", &port)
-            .replace("__STEPS__", &steps.to_string())
             .replace("__RELOAD_STEPS__", &reload_steps.to_string());
+        observer.serve_page(template.replace("__STEPS__", &successor_steps.to_string()));
+        let page = template.replace("__STEPS__", &steps.to_string());
         let (stage, bun_image) = fixture.stage_app_body(name, &app, &page);
         let mut presentation = NativeWindowObserver::arm_for_title(&fixture.census, TITLE);
         let mut cleanup = spawn_shipping_host(&stage);
@@ -452,7 +461,13 @@ fn gh1095_restart_gap_call_is_not_dispatched_and_never_replayed() {
         .iter()
         .map(|label| json!({"do":"invoke","label":label}))
         .collect();
-    let mut run = Launch::start(&fixture, "gh1095-gap", &Value::from(steps), &json!([]));
+    let mut run = Launch::start(
+        &fixture,
+        "gh1095-gap",
+        &Value::from(steps),
+        &json!([]),
+        &json!([]),
+    );
     let first = run.bun;
     let baseline = run.step();
     let successor = run.crash_and_hold_successor();
@@ -533,6 +548,7 @@ fn run_after_write(arm: AfterWrite) {
         "gh1095-after-write",
         &Value::from(steps),
         &json!([]),
+        &json!([]),
     );
     let first = run.bun;
     let baseline = run.step();
@@ -602,7 +618,13 @@ fn run_reload(pending: bool) -> (Value, Vec<String>, String) {
         steps.push(json!({"do":"invoke-pending","label":"held-at-reload"}));
     }
     steps.push(json!({"do":"reload"}));
-    let mut run = Launch::start(&fixture, "gh1095-reload", &Value::from(steps), &json!([]));
+    let mut run = Launch::start(
+        &fixture,
+        "gh1095-reload",
+        &Value::from(steps),
+        &json!([]),
+        &json!([]),
+    );
     let bun = run.bun;
     let baseline = run.step();
     succeeded_on(&baseline, "g1-baseline", bun).expect("healthy call before the reload");
@@ -656,6 +678,119 @@ fn gh1095_pagehide_with_no_call_pending_rejects_nothing() {
     assert_eq!(outcomes.len(), 1, "{unload}");
     assert_eq!(outcomes[0]["ok"], true, "{unload}");
     assert_eq!(handled, ["g1-baseline"]);
+}
+
+/// Criteria 7 and 12 (AT-S arm d, spec r2): the call is held inside the
+/// handler while the page makes a main-frame navigation that commits a real
+/// successor document. The old document settles the call exactly once, on
+/// pagehide, as `KELD-WV-013` (its own beacon carries its own nonce); the
+/// handler census is 1; the released handler's late outcome reaches no
+/// document, so the successor records only its own call. With `navigate`
+/// false (the control) the same held call settles once with its real reply.
+fn run_navigation(navigate: bool) -> (Value, Value, Vec<String>, u32) {
+    let fixture = PublicFsProject::new(Policy::Narrow);
+    let mut steps = vec![
+        json!({"do":"invoke","label":"g1-baseline"}),
+        json!({"do":"invoke-pending","label":"held-at-navigation"}),
+    ];
+    steps.push(if navigate {
+        json!({"do":"navigate"})
+    } else {
+        json!({"do":"await-pending"})
+    });
+    let successor = json!([{"do":"invoke","label":"successor-call"}]);
+    let mut run = Launch::start(
+        &fixture,
+        "gh1095-navigation",
+        &Value::from(steps),
+        &json!([]),
+        &successor,
+    );
+    let bun = run.bun;
+    let baseline = run.step();
+    succeeded_on(&baseline, "g1-baseline", bun).expect("healthy call before the navigation");
+    let started = run.step();
+    run.await_where("hold inside the handler", |report| {
+        report["phase"] == "recovery-handler-pending" && report["pid"] == bun
+    });
+    let (first, second) = if navigate {
+        run.send_step();
+        let unload = run.await_count("page-unload", 1);
+        let successor_ready = run.await_count("page-ready", 2);
+        assert_ne!(
+            successor_ready["documentNonce"], unload["documentNonce"],
+            "the navigation committed a new document"
+        );
+        assert_eq!(unload["documentNonce"], started["documentNonce"]);
+        // Release the held handler. Its outcome reaches the host dispatch
+        // thread, which serves the successor's next call only after it.
+        run.observer
+            .send_recovery_command(RecoveryCommand::RetirePending(bun));
+        run.await_where("released handler", |report| {
+            report["phase"] == "handler-released" && report["pid"] == bun
+        });
+        // The old document never reported its navigate step, so wait on the
+        // successor's own step by label.
+        run.send_step();
+        let successor_call = run.await_where("successor step", |report| {
+            report["phase"] == "step" && report["label"] == "successor-call"
+        });
+        (unload, successor_call)
+    } else {
+        run.observer
+            .send_recovery_command(RecoveryCommand::RetirePending(bun));
+        let settled = run.step();
+        (settled, Value::Null)
+    };
+    let journal = run.journal.clone();
+    let _stderr = run.quit();
+    (first, second, handled_labels(&journal, bun), bun)
+}
+
+#[test]
+fn gh1095_committing_navigation_settles_the_old_call_once_on_pagehide() {
+    let (unload, successor, handled, bun) = run_navigation(true);
+    println!(
+        "KELD_GH1095_ATSD unload_outcomes={} successor={} handled={handled:?}",
+        unload["outcomes"], successor["outcomes"]
+    );
+    let held = outcome(&unload, "held-at-navigation");
+    assert_eq!(held["ok"], false, "{held}");
+    assert_eq!(held["code"], OUTCOME_UNKNOWN, "{held}");
+    assert_eq!(held["error"], PAGEHIDE_MESSAGE, "{held}");
+    assert_eq!(
+        unload["outcomes"].as_array().expect("outcomes").len(),
+        2,
+        "baseline and the one pagehide settlement: {unload}"
+    );
+    // The successor settled only its own call: the late outcome of the held
+    // call reached no document.
+    succeeded_on(&successor, "successor-call", bun).expect("the successor serves");
+    assert_eq!(
+        successor["outcomes"].as_array().expect("outcomes").len(),
+        1,
+        "{successor}"
+    );
+    assert_eq!(
+        successor["terminals"].as_array().expect("terminals").len(),
+        1,
+        "{successor}"
+    );
+    // Census 1 for the held call, then the successor's own call.
+    assert_eq!(
+        handled,
+        ["g1-baseline", "held-at-navigation", "successor-call"]
+    );
+}
+
+/// Control for AT-S arm d: no navigation. The same held call settles once
+/// with its real reply, so the arm's KELD-WV-013 comes from the navigation.
+#[test]
+fn gh1095_without_navigation_the_held_call_settles_with_its_reply() {
+    let (settled, _, handled, bun) = run_navigation(false);
+    succeeded_on(&settled, "held-at-navigation", bun).expect("the real reply settles it");
+    assert_eq!(terminals(&settled, "held-at-navigation").len(), 1);
+    assert_eq!(handled, ["g1-baseline", "held-at-navigation"]);
 }
 
 /// Criterion 8 (AT-12c): after `KELD-WV-012` in the restart gap, the app's one
@@ -742,7 +877,7 @@ fn run_resend(ready_first: bool) -> (Value, Value, ResendCensus) {
         {"do":"invoke","label":"gap"},
         {"do":"arm-resend","label":"gap"},
     ]);
-    let mut run = Launch::start(&fixture, "gh1095-resend", &steps, &json!([]));
+    let mut run = Launch::start(&fixture, "gh1095-resend", &steps, &json!([]), &json!([]));
     let first = run.bun;
     let baseline = run.step();
     succeeded_on(&baseline, "g1-baseline", first).expect("healthy G1 call");

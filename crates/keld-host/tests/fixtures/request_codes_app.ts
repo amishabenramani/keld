@@ -23,10 +23,11 @@ channels.handle(echoChannel, async request => {
   console.error("KELD_GH1095_HANDLER " + JSON.stringify(record));
   await post(record);
   if (label.startsWith("held")) {
-    // Held inside the handler until the test kills Bun or drops this wait.
+    // Held inside the handler until the test kills Bun or drops this wait;
+    // a released hold then answers like any other call.
     await fetch(base + "/recovery-pending/" + process.pid + "/" + holdId()).then(
       () => undefined, () => undefined);
-    throw new Error("gh1095 held handler released");
+    await post({ phase: "handler-released", pid: process.pid, message: request.message });
   }
   return { message: JSON.stringify({ pid: process.pid, call: handlerCalls }), count: request.count };
 });

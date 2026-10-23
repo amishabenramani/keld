@@ -98,6 +98,7 @@ async function invoke(label) {
 // The app's own resend rule (spec gh1095 §4.4): one resend, as a new invoke,
 // only after KELD-WV-012 and only on a later user action; never a timer and
 // never a second resend. Keld itself never resends.
+const pendingCalls = [];
 let resendLabel = null;
 let resent = false;
 document.getElementById("resend").addEventListener("click", event => {
@@ -118,18 +119,23 @@ async function run(script) {
     const command = await fetch(base + "/recovery-page");
     if (!command.ok) throw new Error("gh1095 page command refused");
     await command.text();
-    if (step.do === "reload") {
+    if (step.do === "reload" || step.do === "navigate") {
       // The facade's own pagehide listener runs first and rejects a pending
       // call; its rejection is recorded before this listener reports it.
       window.addEventListener("pagehide", () => {
         navigator.sendBeacon(base + "/observe", JSON.stringify({ phase: "page-unload", ...state() }));
       }, { once: true });
-      location.reload();
+      // A page-initiated main-frame navigation that commits a real successor
+      // document served by the observer.
+      if (step.do === "navigate") location.href = base + "/successor-page";
+      else location.reload();
       return;
     }
     if (step.do === "invoke") await invoke(step.label);
     // Started, never awaited: the call stays pending while later steps run.
-    if (step.do === "invoke-pending") void invoke(step.label);
+    if (step.do === "invoke-pending") pendingCalls.push(invoke(step.label));
+    // Fence on the started calls' own settlement before reporting.
+    if (step.do === "await-pending") await Promise.all(pendingCalls);
     if (step.do === "arm-resend") resendLabel = step.label;
     await report("step", { label: step.label, step: step.do });
   }
