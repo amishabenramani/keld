@@ -310,20 +310,42 @@ const BROWSER_SHUTDOWN_HANG_GUARD: Duration = Duration::from_mins(4);
 /// their sum.
 ///
 /// This constant is the one owner of that rule. A caller that must outlast a UI
-/// end reads it rather than restating the barrier's parts. Examples are a test
-/// harness's kill switch and the S6c coordinator before it launches a candidate.
+/// end reads it rather than restating the barrier's parts. Examples are
+/// [`WEBVIEW2_TEARDOWN_BOUND`] and the S6c coordinator before it launches a
+/// candidate.
 /// If the barrier ever gains another wait, this sum changes with it.
 pub const WEBVIEW2_UI_END_BOUND: Duration =
     BROWSER_SHUTDOWN_HANG_GUARD.saturating_add(BROWSER_EXIT_GRACE);
+
+/// The longest one healthy hidden exclusive-UDF probe takes: one profile launch
+/// deadline shared by the probe's environment and controller, then the probe
+/// browser's release barrier ([`WEBVIEW2_UI_END_BOUND`]). Startup recovery and
+/// the post-release scavenge each run this probe, so both bounds read it.
+const EXCLUSIVE_UDF_PROBE_BOUND: Duration =
+    PROFILE_LAUNCH_DEADLINE.saturating_add(WEBVIEW2_UI_END_BOUND);
+
+/// The longest a healthy `WebView2` teardown takes after a terminal command, from
+/// the command to the run's return: the session's own UI end
+/// ([`WEBVIEW2_UI_END_BOUND`]) and then, on a dev-ephemeral profile, the
+/// post-release scavenge of at most `MAX_EPHEMERAL_SCAVENGE_PER_LAUNCH`
+/// predecessor leaves, each one exclusive-UDF probe. A persistent profile runs
+/// no scavenge and ends sooner, so the bound covers both.
+///
+/// This constant is the one owner of that rule. A caller that must outlast a
+/// host's exit after `Quit` reads it rather than [`WEBVIEW2_UI_END_BOUND`]: a
+/// stale leaf left by an earlier dev host (one that was killed, for example)
+/// makes a healthy exit run a second probe after its own release. If teardown
+/// ever gains another bounded phase, this sum changes with it.
+pub const WEBVIEW2_TEARDOWN_BOUND: Duration = WEBVIEW2_UI_END_BOUND
+    .saturating_add(EXCLUSIVE_UDF_PROBE_BOUND.saturating_mul(MAX_EPHEMERAL_SCAVENGE_PER_LAUNCH));
 
 /// The longest a healthy `WebView2` startup takes, from the engine's
 /// construction to the initial navigation that makes the session `Ready`.
 /// Startup runs these bounded phases one after another, so its bound is their
 /// sum:
-/// - recovery of a profile quarantined by a crash: the exclusive-UDF probe's
-///   launch (the profile launch deadline, shared by the probe's environment and
-///   controller) and then the probe browser's release barrier
-///   ([`WEBVIEW2_UI_END_BOUND`]);
+/// - recovery of a profile quarantined by a crash: one exclusive-UDF probe
+///   (`EXCLUSIVE_UDF_PROBE_BOUND`: its launch and then the probe browser's
+///   release barrier, [`WEBVIEW2_UI_END_BOUND`]);
 /// - environment creation (the profile launch deadline, armed afresh);
 /// - controller creation, which launches the browser process (the profile launch
 ///   deadline, armed afresh);
@@ -336,8 +358,7 @@ pub const WEBVIEW2_UI_END_BOUND: Duration =
 /// changes with it. Work that carries no deadline of its own is outside it: the
 /// runtime version query, profile selection, window creation, and on persistent
 /// profiles the saved media-permission reconciliation during webview creation.
-pub const WEBVIEW2_STARTUP_BOUND: Duration = PROFILE_LAUNCH_DEADLINE
-    .saturating_add(WEBVIEW2_UI_END_BOUND)
+pub const WEBVIEW2_STARTUP_BOUND: Duration = EXCLUSIVE_UDF_PROBE_BOUND
     .saturating_add(PROFILE_LAUNCH_DEADLINE)
     .saturating_add(PROFILE_LAUNCH_DEADLINE)
     .saturating_add(crate::INITIAL_NAVIGATION_DEADLINE);
@@ -357,7 +378,9 @@ const PROFILE_LIFECYCLE_PENDING: &str = "profile.lifecycle.pending";
 const PROFILE_PURGE: &str = "profile.purge.v1";
 const PROFILE_PURGE_PENDING: &str = "profile.purge.pending";
 const MAX_PROFILE_CONTROL_RECORD_BYTES: u64 = 4 * 1024;
-const MAX_EPHEMERAL_SCAVENGE_PER_LAUNCH: usize = 1;
+/// Predecessor dev-ephemeral leaves one teardown may probe; `u32` because
+/// [`WEBVIEW2_TEARDOWN_BOUND`] multiplies a `Duration` by it.
+const MAX_EPHEMERAL_SCAVENGE_PER_LAUNCH: u32 = 1;
 
 /// Directory `WebView2` keeps its profile in.
 ///
@@ -2098,7 +2121,7 @@ fn scavenge_ephemeral_profiles(
     let mut removed = 0;
     for entry in fs::read_dir(&root)
         .map_err(|_| profile_failure(ProfileErrorKind::MarkerMismatch))?
-        .take(MAX_EPHEMERAL_SCAVENGE_PER_LAUNCH)
+        .take(MAX_EPHEMERAL_SCAVENGE_PER_LAUNCH as usize)
     {
         let entry = entry.map_err(|_| profile_failure(ProfileErrorKind::MarkerMismatch))?;
         let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
@@ -3623,6 +3646,28 @@ mod tests {
 
     mod exit_wait_pump;
     mod profile_lifecycle;
+
+    /// The teardown bound charges the post-release scavenge one full probe (launch
+    /// plus release barrier) per leaf it may try, on top of the session's own UI
+    /// end, and startup recovery charges the same probe once.
+    #[test]
+    fn teardown_and_startup_bounds_charge_each_exclusive_udf_probe() {
+        use super::{
+            BROWSER_EXIT_GRACE, BROWSER_SHUTDOWN_HANG_GUARD, MAX_EPHEMERAL_SCAVENGE_PER_LAUNCH,
+            WEBVIEW2_STARTUP_BOUND, WEBVIEW2_TEARDOWN_BOUND, WEBVIEW2_UI_END_BOUND,
+        };
+        let ui_end = BROWSER_SHUTDOWN_HANG_GUARD + BROWSER_EXIT_GRACE;
+        let probe = PROFILE_LAUNCH_DEADLINE + ui_end;
+        assert_eq!(WEBVIEW2_UI_END_BOUND, ui_end);
+        assert_eq!(
+            WEBVIEW2_TEARDOWN_BOUND,
+            ui_end + probe * MAX_EPHEMERAL_SCAVENGE_PER_LAUNCH
+        );
+        assert_eq!(
+            WEBVIEW2_STARTUP_BOUND,
+            probe + PROFILE_LAUNCH_DEADLINE * 2 + crate::INITIAL_NAVIGATION_DEADLINE
+        );
+    }
 
     #[cfg(feature = "profile-test-root")]
     #[test]

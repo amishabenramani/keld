@@ -87,12 +87,17 @@ const RENDERER_ACCEPT_POLL: Duration = Duration::from_millis(10);
 const CONTROL_LINE_LIMIT: usize = 4096;
 
 /// Kill switch over a host exit that includes a `WebView2` UI end (after `Quit` or a
-/// host-fatal Bun exit), never a synchronization wait. The UI end is bounded by its
-/// one owner, `keld_wv::webview2::WEBVIEW2_UI_END_BOUND`; `PRODUCT_DEADLINE` covers
-/// the rest of the exit. A healthy UI end is not bounded by `PRODUCT_DEADLINE`; the
-/// owner's documentation records the measured healthy releases that exceed it.
+/// host-fatal Bun exit), never a synchronization wait. The `WebView2` teardown is
+/// bounded by its one owner, `keld_wv::webview2::WEBVIEW2_TEARDOWN_BOUND`: the UI end
+/// plus, on a dev host, the post-release scavenge probe of a stale ephemeral leaf
+/// that an earlier (for example killed) dev host left in the shared `LocalAppData`.
+/// `PRODUCT_DEADLINE` covers the rest of the exit. A healthy UI end is not bounded by
+/// `PRODUCT_DEADLINE`; the owner's documentation records the measured healthy
+/// releases that exceed it.
+/// `profiles::handover::kill_switches_stay_below_the_nextest_terminate` pins this
+/// switch below the binary's nextest per-test terminate.
 fn ui_end_kill_switch() -> Duration {
-    keld_wv::webview2::WEBVIEW2_UI_END_BOUND + PRODUCT_DEADLINE
+    keld_wv::webview2::WEBVIEW2_TEARDOWN_BOUND + PRODUCT_DEADLINE
 }
 
 /// Kill switch over a wait that includes a `WebView2` startup (a session's `Ready`
