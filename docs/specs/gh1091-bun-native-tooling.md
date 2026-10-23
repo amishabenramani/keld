@@ -1,7 +1,10 @@
 # Spec: Bun 1.4.4 and native JavaScript tooling
 
-Status: draft
+Status: implementing
 Linear: KEL-177 · Public: GH-1091 (user-requested combined PR) · Owner: GYLDLAB · Updated: 2026-10-23
+
+Approved by the repository owner in this session, 2026-10-23: continue with stable
+Bun 1.4.4 native formatting; track native lint until it is available in stable.
 
 ## 1. Goal & non-goals
 
@@ -59,8 +62,12 @@ Generated files must reach the same formatting through their existing owner, nev
 through manual edits. Preserve intentional malformed parser fixtures as fixtures,
 with a named path and regression oracle rather than a broad source exclusion.
 
-Generated applications expose `format = bun fmt --no-script` and
-`format:check = bun fmt --no-script --check`. These commands run in the application
+Generated applications expose `format` invoking `bun fmt --no-script` over the
+JS/TS family glob and `format:check = bun run format --check`, forwarding the
+read-only flag to that same command. This scope matches repository JS/TS formatting;
+HTML/JSON/Markdown are available through direct native Bun commands. Arbitrary
+admitted project-name lengths remain valid without adding a runtime formatter
+subprocess to `keld create` or formatter-ignore directives. These commands run in the application
 checkout with the contributor's normal tooling authority, not in the sandboxed
 application process. Native commands must not recursively call identically named
 package scripts. CLI/template tests execute both commands in a temporary app and
@@ -94,11 +101,11 @@ The user explicitly requests these slices in the same PR as the public-claims fi
 
 - [ ] T1: update active stable pins and current docs; prove existing pin rejection
   controls accept only 1.4.4 and execute existing semantic gates with that binary.
-- [ ] T2, after human spec approval: integrate native formatting into the repository
+- [ ] T2, approved: integrate native formatting into the repository
   and generated apps, with failure-first check/mutation tests and CI admission.
-- [ ] T3: resolve upstream lint capability choice before implementing lint. Stable
-  native lint is unavailable. A separately pinned canary developer toolchain needs
-  its own exact-version, installation, checksum and CI design added here for approval.
+- [ ] T3, deferred on GH-1091: when native lint is available in an official stable
+  release, verify its actual command contract and integrate it through a reviewed
+  update. Keep the current runtime/tooling stable; do not install canary for lint.
 
 ## 7. Test plan
 
@@ -125,11 +132,10 @@ is claimed from the language or upstream benchmark numbers.
 
 ## 10. Open questions
 
-Human approval required before T2: approve the stable 1.4.4 native-formatting design
-above. For lint, recommend keeping the application/runtime and tooling stable and
-tracking native lint until an exact stable release includes it. Alternatively,
-authorize designing a separately pinned canary developer-only lint toolchain; that
-is a distinct version and support contract, not a native lint feature of 1.4.4.
+None for the approved formatter implementation. Native lint is explicitly deferred
+until an official stable release supports it, tracked on GH-1091 and KEL-177. Its
+future update must verify release provenance, actual native execution and CI/app
+acceptance before changing the current stable tooling contract.
 
 Upstream evidence (retrieved 2026-10-23):
 [release](https://github.com/oven-sh/bun/releases/tag/bun-v1.4.4),

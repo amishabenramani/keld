@@ -726,6 +726,16 @@ classify_path() {
 
     classify_codeql_path "$changed_file"
 
+    # Native JS formatting also covers tools and crate fixtures, not only packages.
+    # Generator source changes can change the checked-in formatted artifacts.
+    case "$changed_file" in
+        *.js | *.jsx | *.mjs | *.cjs | *.ts | *.tsx | *.mts | *.cts | \
+        crates/keld-ipc/src/echo.rs | crates/keld-ipc/src/channel_table.rs | \
+        crates/keld-native/src/fs.rs | crates/keld-native/src/auth/mod.rs)
+            hygiene="$TRUE"
+            ;;
+    esac
+
     # Crate-local reports/fixtures can be include_bytes!/include_str! inputs.
     # Documentation routing below is additive, never an exemption from its owner.
     case "$changed_file" in

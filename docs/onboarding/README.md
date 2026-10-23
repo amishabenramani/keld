@@ -201,6 +201,16 @@ bun --revision
 just ci
 ```
 
+`just js-fmt` formats tracked JavaScript/TypeScript and refreshes generated bindings
+and transport stamps through their generator. `just js-fmt-check` checks without
+writing; it is included in `just ci` and the hosted hygiene check. `just fmt` also
+runs the JS/TS formatter before Rust formatting.
+
+New `keld create` applications include `bun run format` and `bun run format:check`
+for their JavaScript/TypeScript, with no formatter package to install. Use native
+`bun fmt` directly for other supported file kinds. Native lint remains tracked on
+[issue 1091](https://github.com/gyldlab/keld/issues/1091) until Bun ships it in stable.
+
 On Windows, run the shell-based full gate from Git Bash or another environment with
 the required GNU tools. Keep the interactive PowerShell session for the separate
 native `dev`/Ctrl-C acceptance run.

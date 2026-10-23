@@ -530,6 +530,18 @@ fn check_serial_rust_gates(root: &Path) -> Result<(), String> {
             ));
         }
     }
+    for recipe in ["ci", "ci-full"] {
+        if !expanded_gates(&justfile, recipe).is_some_and(|gates| {
+            gates.iter().filter(|gate| **gate == "js-fmt-check").count() == 1
+        }) || just_recipe_commands(&justfile, "js-fmt-check").as_deref()
+            != Some(&["bun tools/js_format.ts --check".to_owned()])
+        {
+            return Err(format!(
+                "CI-HYGIENE: `{recipe}` must run js-fmt-check exactly once through bun tools/js_format.ts --check."
+            ));
+        }
+    }
+
     Ok(())
 }
 
@@ -1323,6 +1335,23 @@ fn check_bun_setup_steps(text: &str, job: &str) -> Result<(), String> {
 /// suites the router selected — is tracked in KEL-115, because it is a
 /// behavioural property and no reading of the text settles it.
 fn check_bun_test_job(text: &str) -> Result<(), String> {
+    let format_step = "Native JavaScript formatting";
+    let format_block = workflow_job_block(text, "hygiene").and_then(|job| {
+        (workflow_direct_named_step_count(&job, format_step) == 1)
+            .then(|| workflow_direct_named_step_block(&job, format_step))
+            .flatten()
+    });
+    let format_lines = format_block.as_deref().map(|block| {
+        block.lines().map(str::trim).filter(|line| !line.is_empty()).collect::<Vec<_>>()
+    });
+    if format_lines != Some(vec![
+        "- name: Native JavaScript formatting",
+        "run: bun tools/js_format.ts --check",
+    ]) {
+        return Err(format!(
+            "CI-HYGIENE: `{WORKFLOW}` hygiene needs one unconditional native JS formatting step: bun tools/js_format.ts --check."
+        ));
+    }
     let Some(block) = workflow_job_block(text, "bun-test") else {
         return Err(format!(
             "CI-HYGIENE: `{WORKFLOW}` has no `bun-test` job. The `packages/` TypeScript suites need a lane of their own: the Bun install inside `check` exists so Rust tests can spawn Bun children and never runs `bun test`."

@@ -207,7 +207,7 @@ ipc_fixture_flags=$'rust=true\ndocs=false\nhygiene=false\ngui=true\nmsrv=true\nd
 # package directory (keld-compat spawns the @keld/electron fixtures). It cannot
 # change rustc, the workspace dependency policy, or the host window, so MSRV,
 # cargo-deny and GUI smoke stay off; GTK follows the selected Rust closure.
-ts_flags=$'rust=true\ndocs=false\nhygiene=false\ngui=false\nmsrv=false\ndeny=false\nts=true\nwebkitgtk=true'
+ts_flags=$'rust=true\ndocs=false\nhygiene=true\ngui=false\nmsrv=false\ndeny=false\nts=true\nwebkitgtk=true'
 wv_flags=$'rust=true\ndocs=false\nhygiene=false\ngui=true\nmsrv=true\ndeny=false\nts=false\nwebkitgtk=true'
 manifest=$'rust=true\ndocs=false\nhygiene=false\ngui=true\nmsrv=true\ndeny=true\nts=false\nwebkitgtk=true'
 # Workflow/router edits run every lane, and the Ubuntu leg installs WebKitGTK to
@@ -248,6 +248,12 @@ case "$(uname -s)" in
 esac
 "$python_command" -B "$repo_root/tools/test_ci_local.py" --tracked-snapshot "$temp_dir/bound"
 cd "$temp_dir/bound"
+
+# Each native JS/TS family member and each generator source must reach hosted formatting.
+for input in packages/@keld/api/src/index.ts tools/example.jsx crates/keld-cli/templates/hello/keld.config.ts crates/keld-ipc/src/echo.rs crates/keld-native/src/fs.rs crates/keld-native/src/auth/mod.rs; do
+    formatted_classification="$(result_for_paths "$input")"
+    expect_exact_output "native formatting input $input selects hygiene" hygiene true "$formatted_classification"
+done
 
 empty_classification="$(printf '' | "$router" classify)"
 expect_flags "empty diff skips conditional lanes" "$all_false" "$empty_classification"
@@ -912,7 +918,7 @@ echo "ok: router suite discovery matches the active Bun runtime across all 32 pa
 # then proves the edge is derived from the checked-out test reference.
 fixture_path='crates/keld-ipc/tests/fixtures/shared.tsv'
 fixture_without_consumer="$(cd "$temp_dir" && printf '%s\0' "$fixture_path" | PATH="$temp_dir/fake-bin:$PATH" "$router" classify)"
-fake_fixture_without_consumer=$'rust=true\ndocs=false\nhygiene=false\ngui=true\nmsrv=true\ndeny=false\nts=false\nwebkitgtk=false'
+fake_fixture_without_consumer=$'rust=true\ndocs=false\nhygiene=true\ngui=true\nmsrv=true\ndeny=false\nts=false\nwebkitgtk=false'
 expect_flags "unreferenced crate fixture does not invent a Bun consumer" "$fake_fixture_without_consumer" "$fixture_without_consumer"
 expect_empty_output "unreferenced crate fixture selects no Bun suite" ts_packages "$fixture_without_consumer"
 # #630 negative control: an all-workspace fallback whose packages link no

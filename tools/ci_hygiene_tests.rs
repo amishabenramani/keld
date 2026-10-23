@@ -215,6 +215,8 @@ fn valid_workflow() -> String {
             "      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0",
             "        with:",
             "          bun-version: \"1.4.4\"",
+            "      - name: Native JavaScript formatting",
+            "        run: bun tools/js_format.ts --check",
             "      - name: Documentation placeholder contracts",
             "        run: |",
             "          mkdir -p target/doc-placeholders",
@@ -458,11 +460,12 @@ fn complete_fixture() -> TempDir {
     temp.write(
             JUSTFILE,
             concat!(
-                "ci: audit-docs mermaid-ci fmt-check clippy test doc deny\n",
+                "ci: audit-docs mermaid-ci js-fmt-check fmt-check clippy test doc deny\n",
                 "audit-docs:\n",
                 "    {{python_command}} -B docs/audits/verify.py\n",
                 "    {{python_command}} -B docs/audits/test_verify.py\n",
-                "ci-full: audit-docs mermaid-full fmt-check clippy test doc deny\n",
+                "ci-full: audit-docs mermaid-full js-fmt-check fmt-check clippy test doc deny\n",
+                "js-fmt-check:\n    bun tools/js_format.ts --check\n",
                 "mermaid-full: mermaid-test mermaid-check mermaid-render-check\n",
                 "mermaid-ci:\n",
                 "    #!/usr/bin/env bash\n",
@@ -505,13 +508,13 @@ fn gates_inside_parallel_groups_count_for_ci_and_ci_full() {
     let grouped = read(temp.path(), JUSTFILE)
             .expect("just fixture")
             .replacen(
-                "ci: audit-docs mermaid-ci fmt-check clippy test doc deny\n",
-                "ci: policy fmt-check clippy test doc deny\n\n[parallel]\npolicy: audit-docs mermaid-ci\n",
+                "ci: audit-docs mermaid-ci js-fmt-check fmt-check clippy test doc deny\n",
+                "ci: policy js-fmt-check fmt-check clippy test doc deny\n\n[parallel]\npolicy: audit-docs mermaid-ci\n",
                 1,
             )
             .replacen(
-                "ci-full: audit-docs mermaid-full fmt-check clippy test doc deny\n",
-                "ci-full: policy-full fmt-check clippy test doc deny\n\n[parallel]\npolicy-full: audit-docs mermaid-full\n",
+                "ci-full: audit-docs mermaid-full js-fmt-check fmt-check clippy test doc deny\n",
+                "ci-full: policy-full js-fmt-check fmt-check clippy test doc deny\n\n[parallel]\npolicy-full: audit-docs mermaid-full\n",
                 1,
             );
     temp.write(JUSTFILE, &grouped);
@@ -544,18 +547,18 @@ fn gates_inside_parallel_groups_count_for_ci_and_ci_full() {
             "one at a time",
         ),
         (
-            "ci: policy fmt-check clippy test doc deny",
+            "ci: policy js-fmt-check fmt-check clippy test doc deny",
             "ci: policy fmt-check clippy doc deny",
             "one at a time",
         ),
         (
-            "ci: policy fmt-check clippy test doc deny\n",
+            "ci: policy js-fmt-check fmt-check clippy test doc deny\n",
             "ci: policy rust deny\n\n[parallel]\nrust: fmt-check clippy test doc\n",
             "one at a time",
         ),
         (
-            "ci: policy fmt-check clippy test doc deny\n",
-            "[parallel]\nci: policy fmt-check clippy test doc deny\n",
+            "ci: policy js-fmt-check fmt-check clippy test doc deny\n",
+            "[parallel]\nci: policy js-fmt-check fmt-check clippy test doc deny\n",
             "one at a time",
         ),
         (
@@ -647,14 +650,14 @@ fn typescript_cannot_run_inside_the_parallel_policy_batch() {
 fn rust_suffix_order_and_policy_before_rust_are_enforced() {
     for replacement in [
         "clippy fmt-check test doc deny",
-        "fmt-check clippy test doc deny audit-docs",
+        "js-fmt-check fmt-check clippy test doc deny audit-docs",
     ] {
         let temp = complete_fixture();
         let original = read(temp.path(), JUSTFILE).expect("just fixture");
         check_serial_rust_gates(temp.path()).expect("original suffix is valid");
         temp.write(
             JUSTFILE,
-            &original.replace("fmt-check clippy test doc deny", replacement),
+            &original.replace("js-fmt-check fmt-check clippy test doc deny", replacement),
         );
         let error = check_serial_rust_gates(temp.path())
             .expect_err("the Rust gates must be the ordered serial suffix");
@@ -1886,6 +1889,43 @@ fn bun_ci_accepts_requested_144_and_rejects_other_versions() {
             check_bun_test_job(&changed).is_err(),
             "unexpected runtime {version} must not satisfy the CI pin"
         );
+    }
+}
+
+#[test]
+fn native_js_formatting_cannot_be_removed_or_skipped() {
+    let step =
+        "      - name: Native JavaScript formatting\n        run: bun tools/js_format.ts --check\n";
+    for replacement in [
+        "",
+        "      - name: Native JavaScript formatting\n        run: echo bun tools/js_format.ts --check\n",
+        "      - name: Native JavaScript formatting\n        if: false\n        run: bun tools/js_format.ts --check\n",
+        "      - name: Native JavaScript formatting\n        continue-on-error: true\n        run: bun tools/js_format.ts --check\n",
+    ] {
+        let temp = complete_fixture();
+        let workflow = valid_workflow();
+        assert!(workflow.contains(step));
+        temp.write(WORKFLOW, &workflow.replace(step, replacement));
+        assert!(
+            check(temp.path()).is_err(),
+            "missing/skipped formatter passed"
+        );
+    }
+}
+
+#[test]
+fn local_native_js_formatting_cannot_leave_the_ci_inventory() {
+    for recipe in ["ci", "ci-full"] {
+        let temp = complete_fixture();
+        let justfile = read(temp.path(), JUSTFILE).expect("justfile");
+        let header = justfile
+            .lines()
+            .find(|line| line.starts_with(&format!("{recipe}:")))
+            .expect("CI header");
+        let altered = justfile.replacen(header, &header.replace(" js-fmt-check", ""), 1);
+        assert_ne!(altered, justfile);
+        temp.write(JUSTFILE, &altered);
+        assert!(check(temp.path()).is_err());
     }
 }
 

@@ -247,6 +247,40 @@ mod tests {
     }
 
     #[test]
+    fn created_app_native_formatter_checks_repairs_and_is_idempotent() {
+        use std::process::Command;
+
+        for name in ["formatted-app".to_owned(), "a".repeat(100)] {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let root = create_project(dir.path(), &name).expect("create app");
+            let run = |script: &str| {
+                Command::new("bun")
+                    .args(["run", script])
+                    .current_dir(&root)
+                    .output()
+                    .expect("run native formatter script")
+            };
+            let fresh = run("format:check");
+            assert!(fresh.status.success(), "fresh app: {fresh:?}");
+
+            let source = root.join("src/unformatted source.ts");
+            let unformatted = b"export const value={answer:42};\n";
+            fs::write(&source, unformatted).expect("plant unformatted source");
+            let rejected = run("format:check");
+            assert!(!rejected.status.success(), "unformatted app passed");
+            assert_eq!(fs::read(&source).expect("read after check"), unformatted);
+
+            let formatted = run("format");
+            assert!(formatted.status.success(), "format app: {formatted:?}");
+            let bytes = fs::read(&source).expect("formatted source");
+            assert_ne!(bytes, unformatted);
+            assert!(run("format:check").status.success());
+            assert!(run("format").status.success());
+            assert_eq!(fs::read(&source).expect("second format"), bytes);
+        }
+    }
+
+    #[test]
     fn writes_expected_file_contents() {
         let dir = tempfile::tempdir().expect("tempdir");
         let root = create_project(dir.path(), "demo").expect("create");
