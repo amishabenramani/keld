@@ -1,5 +1,5 @@
 /** Internal host-fact mirror (GH-531 §4.d); deliberately not attached to a link. */
-import { WINDOW_CHANNEL, linkError } from "../../kipc/src/transport.ts";
+import { WINDOW_CHANNEL, linkError, type KeldCallError } from "../../kipc/src/transport.ts";
 import type { MirrorSource } from "./mirror.ts";
 import {
   decodeWindowEvent,
@@ -33,7 +33,9 @@ function snapshot(window: WindowRef, state: WindowState, pending_close: bigint |
  * A largest decoded Created fact has four plain objects, fourteen own properties:
  * eleven scalar slots and three object references. Its separate mirror snapshot
  * has the same object/property/slot counts. All integers are wire-bounded; variant
- * strings are closed literals. No payload, buffer, view or variable string survives.
+ * strings are closed literals. These graphs retain no payload, buffer or view.
+ * Diagnostics retain the first primitive code/full message, not an Error object;
+ * their string backing and the callback's captures still need qualification.
  * These shapes are not a heap-byte budget: production attachment still requires
  * independent retained-fact, map-census, heap and alias/lifetime qualification.
  */
@@ -41,15 +43,29 @@ export class WindowSource implements MirrorSource<WindowEvent> {
   readonly channel = WINDOW_CHANNEL;
   readonly #windows = new Map<number, WindowSnapshot>();
   readonly #onFact: (fact: WindowEvent) => void;
-  #failure: Error | undefined;
+  #failureCode: string | undefined;
+  #failureMessage = "";
 
   constructor(onFact: (fact: WindowEvent) => void) { this.#onFact = onFact; }
 
-  #requireLive(): void { if (this.#failure) throw this.#failure; }
+  #diagnostic(code: string): KeldCallError {
+    const error = linkError(code, "");
+    // linkError accepts a detail and prepends code. Saved terminal messages are
+    // already full messages, with no required prefix grammar; preserve exactly.
+    error.message = this.#failureMessage;
+    return error;
+  }
 
-  #reject(): Error {
-    this.#failure ??= linkError("KELD-IPC-005", "window mirror rejected a host fact. Check the host window pair and codec before restarting the role.");
-    return this.#failure;
+  #requireLive(): void {
+    if (this.#failureCode !== undefined) throw this.#diagnostic(this.#failureCode);
+  }
+
+  #reject(): KeldCallError {
+    if (this.#failureCode !== undefined) return this.#diagnostic(this.#failureCode);
+    const error = linkError("KELD-IPC-005", "window mirror rejected a host fact. Check the host window pair and codec before restarting the role.");
+    this.#failureMessage = error.message;
+    this.#failureCode = error.code;
+    return error;
   }
 
   /** Decode once through the shared codec, freezing its bounded known graph. */
@@ -120,8 +136,11 @@ export class WindowSource implements MirrorSource<WindowEvent> {
   }
 
   /** Called by the future link owner only after its retained-record drain. */
-  end(error: Error): void {
-    this.#failure ??= error;
+  end(error: KeldCallError): void {
+    if (this.#failureCode === undefined) {
+      this.#failureMessage = error.message;
+      this.#failureCode = error.code;
+    }
     this.#windows.clear();
   }
 }

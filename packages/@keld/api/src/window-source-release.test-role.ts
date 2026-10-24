@@ -1,6 +1,7 @@
 /** Standalone lifetime regression; no link attachment or heap-byte/native claim. */
 import { WindowSource, type WindowSnapshot } from "./window-source.ts";
 import { encodeWindowEvent } from "./window-codec.ts";
+import { isCallError, linkError } from "../../kipc/src/transport.ts";
 
 function requireFact(condition: unknown, message: string): asserts condition {
   if (!condition) throw new Error(message);
@@ -61,12 +62,12 @@ const replacement = await nextJob(() => {
   return observation;
 });
 
-const terminal = new Error("standalone source release regression ended");
+const terminal = linkError("KELD-IPC-022", "standalone source release regression ended");
 await nextJob(() => source.end(terminal));
 const end = await nextJob(() => {
   Bun.gc(true);
   let readsDenied = false;
-  try { source.all(); } catch (error) { readsDenied = error === terminal; }
+  try { source.all(); } catch (error) { readsDenied = isCallError(error) && error.code === terminal.code && error.message === terminal.message; }
   const observation = {
     oldObjectsLive: refs.slice(0, -1).reduce((count, graph) => count + live(graph), 0),
     currentObjectsLive: live(refs[refs.length - 1]!),

@@ -2,7 +2,7 @@
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { expect, test } from "bun:test";
-import { APP_LINK_IO_DEADLINE_MS, WINDOW_CHANNEL, withIoDeadline } from "../../kipc/src/transport.ts";
+import { APP_LINK_IO_DEADLINE_MS, WINDOW_CHANNEL, isCallError, linkError, withIoDeadline, type KeldCallError } from "../../kipc/src/transport.ts";
 import { encodeWindowEvent, type WindowEvent, type WindowRef } from "./window-codec.ts";
 import { WindowSource } from "./window-source.ts";
 
@@ -24,12 +24,32 @@ function accept(source: WindowSource, bytes: Uint8Array): WindowEvent {
   source.apply(fact);
   return fact;
 }
-function rejected(action: () => void): Error {
+function diagnostic(action: () => unknown): KeldCallError {
   let error: unknown;
   try { action(); } catch (caught) { error = caught; }
-  expect(error).toBeInstanceOf(Error);
+  expect(isCallError(error)).toBe(true);
+  return error as KeldCallError;
+}
+function rejected(action: () => void): KeldCallError {
+  const error = diagnostic(action);
   expect(error).toHaveProperty("code", "KELD-IPC-005");
-  return error as Error;
+  return error;
+}
+async function sourceRole(file: string, args: readonly string[] = []): Promise<unknown> {
+  const runtime = { version: Bun.version, revision: Bun.revision, platform: process.platform, arch: process.arch };
+  const child = Bun.spawn([process.execPath, join(import.meta.dir, file), ...args, runtime.version, runtime.revision, runtime.platform, runtime.arch], {
+    stdin: "ignore", stdout: "pipe", stderr: "pipe",
+  });
+  try {
+    const [exit, stdout, stderr] = await withIoDeadline(Promise.all([
+      child.exited, new Response(child.stdout).text(), new Response(child.stderr).text(),
+    ]), APP_LINK_IO_DEADLINE_MS);
+    expect({ exit, stdout, stderr }).toEqual({ exit: 0, stdout: expect.any(String), stderr: "" });
+    return JSON.parse(stdout) as unknown;
+  } finally {
+    if (child.exitCode === null) child.kill();
+    await child.exited;
+  }
 }
 
 test("Created literal supplies the complete host snapshot on the generated channel", () => {
@@ -198,20 +218,55 @@ test("source failure denies reads immediately while earlier applied facts remain
   expect(observed[0]).toBe(earlier);
   expect(() => source.apply(earlier)).toThrow(error);
   // This unit test proves invalidation and cause priority, not Map heap release.
-  source.end(new Error("later transport completion"));
+  source.end(linkError("KELD-IPC-022", "later transport completion"));
   expect(() => source.get(WINDOW)).toThrow(error);
 });
 
-test("terminal end is permanent and preserves its first existing transport error", () => {
-  const source = new WindowSource(() => {});
-  const fact = accept(source, literal("event-created"));
-  const error = new Error("KELD-IPC-023: peer ended after the retained-record drain");
-  source.end(error);
-  source.end(new Error("later terminal error"));
-  expect(() => source.get(WINDOW)).toThrow(error);
-  expect(() => source.all()).toThrow(error);
-  expect(() => source.decode(literal("event-created"))).toThrow(error);
-  expect(() => source.apply(fact)).toThrow(error);
+test("source diagnostic values survive mutation without retaining the original Error or changing Fact identity", () => {
+  const observed: WindowEvent[] = [];
+  const source = new WindowSource((fact) => observed.push(fact));
+  const earlier = accept(source, literal("event-created"));
+  const original = rejected(() => source.decode(Uint8Array.of(7)));
+  const expected = { code: "KELD-IPC-005", message: "KELD-IPC-005: window mirror rejected a host fact. Check the host window pair and codec before restarting the role." };
+  expect({ code: original.code, message: original.message }).toEqual(expected);
+  original.code = "KELD-IPC-099";
+  original.message = "externally mutated original diagnostic";
+  source.dispatch(earlier);
+  expect(observed).toHaveLength(1);
+  expect(observed[0]).toBe(earlier);
+  source.end(linkError("KELD-IPC-022", "later transport completion"));
+  for (const action of [() => source.get(WINDOW), () => source.all(), () => source.decode(literal("event-created")), () => source.apply(earlier)]) {
+    const error = diagnostic(action);
+    expect({ code: error.code, message: error.message }).toEqual(expected);
+    expect(error).not.toBe(original);
+    error.code = "KELD-IPC-098";
+    error.message = "externally mutated later diagnostic";
+  }
+});
+
+test("typed terminal diagnostics preserve the first exact values including a nonprefix full message", () => {
+  for (const expected of [
+    { code: "KELD-IPC-022", message: "KELD-IPC-022: peer ended after the retained-record drain" },
+    { code: "KELD-IPC-023", message: "KELD-IPC-023: deadline witness" },
+    { code: "KELD-IPC-005", message: "KELD-IPC-005: source ending cause" },
+    { code: "KELD-IPC-023", message: "custom full message without a code prefix" },
+  ]) {
+    const source = new WindowSource(() => {});
+    const fact = accept(source, literal("event-created"));
+    const original = linkError(expected.code, "factory detail is replaced by the exact full message");
+    original.message = expected.message;
+    source.end(original);
+    original.code = "KELD-IPC-099";
+    original.message = "externally mutated terminal diagnostic";
+    source.end(linkError("KELD-IPC-005", "later terminal error"));
+    for (const action of [() => source.get(WINDOW), () => source.all(), () => source.decode(literal("event-created")), () => source.apply(fact)]) {
+      const error = diagnostic(action);
+      expect({ code: error.code, message: error.message }).toEqual(expected);
+      expect(error).not.toBe(original);
+      error.code = "KELD-IPC-098";
+      error.message = "externally mutated later terminal diagnostic";
+    }
+  }
 });
 
 test("multiple host windows keep independent focus facts and stable host-id ordering", () => {
@@ -229,21 +284,16 @@ test("multiple host windows keep independent focus facts and stable host-id orde
 
 test("standalone source releases replaced and ended snapshot graphs using the same Bun executable", async () => {
   const runtime = { version: Bun.version, revision: Bun.revision, platform: process.platform, arch: process.arch };
-  const child = Bun.spawn([process.execPath, join(import.meta.dir, "window-source-release.test-role.ts"), Buffer.from(literal("event-created")).toString("hex"), runtime.version, runtime.revision, runtime.platform, runtime.arch], {
-    stdin: "ignore", stdout: "pipe", stderr: "pipe",
+  expect(await sourceRole("window-source-release.test-role.ts", [Buffer.from(literal("event-created")).toString("hex")])).toEqual({
+    runtime,
+    replacement: { trackedGraphs: 33, oldObjectsLive: 0, currentObjectsLive: 4, sourceAlive: true, externalSnapshotAlive: true, census: 2 },
+    end: { oldObjectsLive: 0, currentObjectsLive: 0, sourceAlive: true, externalSnapshotAlive: true, readsDenied: true },
   });
-  try {
-    const [exit, stdout, stderr] = await withIoDeadline(Promise.all([
-      child.exited, new Response(child.stdout).text(), new Response(child.stderr).text(),
-    ]), APP_LINK_IO_DEADLINE_MS);
-    expect({ exit, stderr }).toEqual({ exit: 0, stderr: "" });
-    expect(JSON.parse(stdout)).toEqual({
-      runtime,
-      replacement: { trackedGraphs: 33, oldObjectsLive: 0, currentObjectsLive: 4, sourceAlive: true, externalSnapshotAlive: true, census: 2 },
-      end: { oldObjectsLive: 0, currentObjectsLive: 0, sourceAlive: true, externalSnapshotAlive: true, readsDenied: true },
-    });
-  } finally {
-    if (child.exitCode === null) child.kill();
-    await child.exited;
-  }
+}, APP_LINK_IO_DEADLINE_MS * 2);
+
+test("source releases original fault and supplied terminal Errors with live source and external Error controls", async () => {
+  expect(await sourceRole("window-source-diagnostic-release.test-role.ts")).toEqual({
+    runtime: { version: Bun.version, revision: Bun.revision, platform: process.platform, arch: process.arch },
+    faultErrorAlive: false, endErrorAlive: false, externalErrorAlive: true, sourcesAlive: true,
+  });
 }, APP_LINK_IO_DEADLINE_MS * 2);
