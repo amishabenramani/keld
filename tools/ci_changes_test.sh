@@ -652,13 +652,30 @@ git -C "$temp_dir" config maintenance.auto false
 git -C "$temp_dir" config user.email ci-router@example.invalid
 git -C "$temp_dir" config user.name ci-router-test
 mkdir -p "$temp_dir/crates/keld-runtime/src" "$temp_dir/fake-bin" "$temp_dir/tools"
-printf '%s\n' '{"schema":"keld.ci-inputs/v1","known_inputs":["*"],"reader_sets":{},"consumers":[]}' >"$temp_dir/tools/ci-inputs.json"
 mkdir -p "$temp_dir/packages/@fake/bootstrap/src"
 printf '{"name":"@fake/bootstrap"}\n' >"$temp_dir/packages/@fake/bootstrap/package.json"
 printf 'import { test } from "bun:test";\n' >"$temp_dir/packages/@fake/bootstrap/src/unit.test.ts"
 printf 'fake-bin/\ntarget/\nbound/\n' >"$temp_dir/.gitignore"
 printf 'base\n' >"$temp_dir/README.md"
-git -C "$temp_dir" add README.md .gitignore tools/ci-inputs.json packages
+# Keep the real shared native policy in this minimal graph fixture. Bind a real,
+# immutable reader so TS selects hygiene without stale-reader or all-gate rescue.
+"$python_command" -B - "$repo_root" "$temp_dir" <<'PY'
+import json, shutil, sys
+from pathlib import Path
+source, fixture = map(Path, sys.argv[1:])
+sys.path.insert(0, str(source / "tools"))
+import ci_inputs
+native = next(consumer for consumer in ci_inputs.load(source)["consumers"]
+              if consumer["owner"] == "Native JavaScript formatting")
+shutil.copyfile(source / "tools/ci_inputs.py", fixture / "tools/ci_inputs.py")
+patterns = ["tools/ci_inputs.py"]
+reader = {"patterns": patterns,
+          "sha256": ci_inputs.fingerprint(fixture, ci_inputs.files(fixture), patterns)}
+contract = {"schema": ci_inputs.SCHEMA, "known_inputs": ["*"],
+            "reader_sets": {native["reader_set"]: reader}, "consumers": [native]}
+(fixture / "tools/ci-inputs.json").write_text(json.dumps(contract) + "\n", encoding="utf-8")
+PY
+git -C "$temp_dir" add README.md .gitignore tools/ci-inputs.json tools/ci_inputs.py packages
 git -C "$temp_dir" commit -qm base
 base_sha="$(git -C "$temp_dir" rev-parse HEAD)"
 real_jq="$(command -v jq)"
