@@ -281,6 +281,18 @@ mod tests {
     }
 
     #[test]
+    fn created_app_omits_unavailable_native_lint_script() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = create_project(dir.path(), "demo").expect("create");
+        let package = fs::read_to_string(root.join("package.json")).expect("package");
+        let manifest: serde_json::Value = serde_json::from_str(&package).expect("package JSON");
+        assert!(
+            manifest["scripts"].get("lint").is_none(),
+            "native lint remains deferred until stable Bun supports it: {package}"
+        );
+    }
+
+    #[test]
     fn writes_expected_file_contents() {
         let dir = tempfile::tempdir().expect("tempdir");
         let root = create_project(dir.path(), "demo").expect("create");
@@ -300,11 +312,6 @@ mod tests {
         assert!(package.contains("\"name\": \"demo\""), "{package}");
         assert!(package.contains("\"type\": \"module\""), "{package}");
         assert!(!package.contains("{{name}}"), "{package}");
-        let manifest: serde_json::Value = serde_json::from_str(&package).expect("package JSON");
-        assert!(
-            manifest["scripts"].get("lint").is_none(),
-            "native lint remains deferred until stable Bun supports it: {package}"
-        );
 
         let html = fs::read_to_string(root.join("index.html")).expect("html");
         assert!(html.contains("<title>demo</title>"), "{html}");
