@@ -172,8 +172,8 @@
         "macos"
       ],
       "test_path": "packages/@keld/electron/src/native-surface.test.ts",
-      "test_name": "menu.role-quit.before-quit today: role quit cannot be constructed without MenuItem",
-      "negative_control": "Current baseline shares the missing MenuItem constructor prerequisite. After GH-563 inversion: macOS role quit must emit before-quit through the app.quit path and honor dirty-window veto; direct OS termination or skipped before-quit fails."
+      "test_name": "menu.role-quit.before-quit pending GH-563: three-stage no-native-quit contract",
+      "negative_control": "THREE STAGES (GH-1156 review #5638444771): (0) Before GH-480, MenuItem is absent and this red baseline passes. (1) GH-480 implementing PR MUST in the same diff re-record THIS mapped GH-563 pending-fail test to witness actual native role quit refusal, a typed KELD-COMPAT diagnostic naming GH-563, zero process/window termination and no fabricated before-quit; keep expected_verdict=fail and implementing_ticket=GH-563. Injecting a MenuItem constructor alone MUST fail this intermediate transition gate with the exact GH-480 same-PR fix message. (2) GH-563 implementing PR alone flips this cell to pass after actual role quit/Cmd+Q emits before-quit through the Host cancelable quit state machine and honors dirty-window veto; raw OS terminate/skip before-quit fails. This remains separate from GH-480 role-close parity."
     },
     {
       "operation_id": "screen.get-primary-display",
