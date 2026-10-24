@@ -14,8 +14,8 @@ use crate::support::control::{
 use crate::support::product::ProductFixture;
 use crate::support::renderer::{expect_renderer_beacon, spawn_renderer_beacon};
 use crate::{
-    DARK_BG, PRODUCT_DEADLINE, PRODUCT_TITLE, dev_stage_command, process_exists, wait_child,
-    wait_for_host_window,
+    DARK_BG, PRODUCT_DEADLINE, PRODUCT_TITLE, dev_stage_command, process_exists,
+    ui_end_kill_switch, wait_child, wait_for_host_window,
 };
 
 #[test]
@@ -52,7 +52,7 @@ fn windows_status_zero_self_termination_keeps_pid_and_status_in_the_host_error()
 
     writer.write_all(b"EXIT0\n").expect("request status zero");
     writer.flush().expect("flush status-zero request");
-    let status = wait_child(&mut child, Instant::now() + PRODUCT_DEADLINE);
+    let status = wait_child(&mut child, Instant::now() + ui_end_kill_switch());
     assert!(
         !status.success(),
         "status-zero Bun exit became host success"
@@ -134,7 +134,7 @@ fn windows_fast_revoked_g2_is_never_installed_ahead_of_g3() {
 
     g3_writer.write_all(b"QUIT\n").expect("request g3 Quit");
     g3_writer.flush().expect("flush g3 Quit");
-    let status = wait_child(&mut child, Instant::now() + PRODUCT_DEADLINE);
+    let status = wait_child(&mut child, Instant::now() + ui_end_kill_switch());
     assert!(status.success(), "fast-g2 recovery host exited {status}");
 }
 
@@ -187,7 +187,7 @@ fn windows_crash_loop_keeps_core033_as_the_outer_host_error() {
         }
     };
     assert_eq!(acknowledgement, "CRASH_ACK");
-    let status = wait_child(&mut child, Instant::now() + PRODUCT_DEADLINE);
+    let status = wait_child(&mut child, Instant::now() + ui_end_kill_switch());
     assert!(
         !status.success(),
         "acknowledged crash loop became host success: {status}"
@@ -257,7 +257,7 @@ fn run_same_window_recovery(failure_command: &str) {
     g2_writer.flush().expect("flush g2 Quit");
     assert_eq!(read_control_line(&mut g2_reader), "QUIT_REPLY");
     assert_eq!(read_control_line(&mut g2_reader), "LINK_EOF");
-    let status = wait_child(&mut child, Instant::now() + PRODUCT_DEADLINE);
+    let status = wait_child(&mut child, Instant::now() + ui_end_kill_switch());
     assert!(status.success(), "recovery host exited with {status}");
     assert!(!process_exists(g1_pid), "retired g1 Bun survived");
     assert!(!process_exists(g2_pid), "g2 Bun survived Quit");
