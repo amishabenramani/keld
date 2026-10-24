@@ -16,7 +16,7 @@ Use [`CONTRIBUTING.md`](../CONTRIBUTING.md) for contributor steps, [`docs/agents
 | [`dependency_review_metadata.sh`](dependency_review_metadata.sh) | Hosted dependency-review metadata completeness check; invoked from `ci.yml`. |
 | [`ci_workflow_security.ts`](ci_workflow_security.ts), [`ci_workflow_security.test.ts`](ci_workflow_security.test.ts) | Bun contracts for GitHub workflow security; `just hygiene`. |
 | [`ci_hygiene.rs`](ci_hygiene.rs), [`ci_hygiene_tests.rs`](ci_hygiene_tests.rs), [`ci_hygiene_workflow_access.rs`](ci_hygiene_workflow_access.rs) | Repository/CI-policy validator with private test and workflow-reading modules; `just hygiene`. |
-| [`fmt_included.sh`](fmt_included.sh) | Rust formatting coverage for included and macro-declared modules missed by normal Cargo discovery; `just fmt` / `just fmt-check`. |
+| [`fmt_included.sh`](fmt_included.sh) | Rust formatting coverage for Git-tracked standalone tools, included files, and macro-declared modules missed by normal Cargo discovery; `just fmt` / `just fmt-check`. |
 | [`test_hello_command.py`](test_hello_command.py) | Tests the platform-appropriate native hello recipe; `just hygiene`. |
 
 ## Instruction, path, and test-layout contracts
