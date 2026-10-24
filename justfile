@@ -39,14 +39,13 @@ ci-full-inventory: ci-policy-full js-fmt-check typescript fmt-check clippy test 
 ci-route:
     tools/ci_changes.sh local
 
-# Hosted CI runs every ci-policy gate (#650) except two that need the real
-# `just` executable, which hosted runners do not install; hosting either needs a
-# pinned `just` in CI (dependency-gate decision, not taken):
+# Hosted CI runs every ci-policy gate (#650) except hooks-test, which needs the
+# hook runner's incoming recipe. The macOS Rust-check matrix installs pinned Just
+# and runs ci-router-test with stock system Bash for the portability contract below.
 # - hooks-test: the hooks under test execute `just` (its negative control runs
 #   the incoming branch's recipe through it); it fails, never skips, without just.
-# - the test_ci_local.py ExecutorTests in ci-router-test, which drive real
-#   recipes (tools/ci_local.py inventory/execute). SelectionTests and the rest
-#   of test_ci_local.py run hosted through tools/ci_changes_test.sh.
+# SelectionTests and the remaining hosted Python contracts run through
+# tools/ci_changes_test.sh; ci-router-test additionally drives real Just recipes.
 # agent-context's workspace.py check also runs hosted, but only a developer
 # checkout has task records for it to validate.
 # cache-check-test also runs hosted, unchanged, as two steps of the clippy + test

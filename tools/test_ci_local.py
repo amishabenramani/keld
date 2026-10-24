@@ -405,6 +405,52 @@ class SelectionTests(unittest.TestCase):
             missing = "\n".join(line for line in self.route().splitlines() if not line.startswith("local_" + gate + "="))
             self.assertTrue(ci_local.selection(missing, ["fmt-check", "clippy", "test"])[gate])
 
+class FmtIncludedBashCompatibilityTests(unittest.TestCase):
+    """Exercise the production Rust discovery helper without Bash's mapfile builtin."""
+
+    def test_fmt_included_supports_bash_without_mapfile(self):
+        source = Path(__file__).resolve().parent.parent
+        bash = "/bin/bash" if sys.platform == "darwin" else shutil.which("bash")
+        self.assertTrue(bash, "formatter compatibility coverage requires Bash")
+        with tempfile.TemporaryDirectory(prefix="keld-fmt-included-bash-") as temporary:
+            root = Path(temporary)
+            helper = root / "tools/fmt_included.sh"
+            helper.parent.mkdir(parents=True)
+            shutil.copyfile(source / "tools/fmt_included.sh", helper)
+            (root / "src").mkdir()
+            (root / "src/lib.rs").write_text(
+                'include!("included.rs");\n#[path = "module.rs"]\nmod module;\n',
+                encoding="utf-8", newline="\n")
+            (root / "src/included.rs").write_text("pub fn included() {}\n", encoding="utf-8")
+            (root / "src/module.rs").write_text("pub fn module() {}\n", encoding="utf-8")
+            bin_dir = root / "bin"
+            bin_dir.mkdir()
+            rustfmt = bin_dir / "rustfmt"
+            rustfmt.write_text(
+                '#!/bin/sh\n'
+                'printf "%s\\n" "$@" >> "$KELD_TEST_RUSTFMT_TRACE"\n',
+                encoding="utf-8", newline="\n")
+            rustfmt.chmod(0o755)
+            subprocess.run(["git", "init", "--quiet"], cwd=root, check=True)
+            subprocess.run(["git", "config", "maintenance.auto", "false"], cwd=root, check=True)
+            subprocess.run(["git", "add", "tools/fmt_included.sh", "src"], cwd=root, check=True)
+            trace = root / "rustfmt-args"
+            environment = os.environ.copy()
+            environment.update(PATH=str(bin_dir) + os.pathsep + environment["PATH"],
+                               KELD_TEST_RUSTFMT_TRACE=trace.as_posix())
+            command = (
+                "enable -n mapfile 2>/dev/null || true; "
+                "set -- --check; source tools/fmt_included.sh \"$@\""
+            )
+            result = subprocess.run([bash, "--noprofile", "--norc", "-c", command], cwd=root,
+                                    env=environment, capture_output=True, text=True, encoding="utf-8")
+            self.assertEqual(result.returncode, 0, result.stderr)
+            observed = trace.read_text(encoding="utf-8").splitlines()
+            self.assertIn("--check", observed)
+            self.assertIn("src/included.rs", observed)
+            self.assertIn("src/module.rs", observed)
+
+
 class ExecutorTests(SelectionTests):
     """Inventory and execution drive real recipes through the `just` executable
     (tools/ci_local.py inventory/execute), so these stay local-only: hosted

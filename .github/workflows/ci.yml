@@ -298,6 +298,14 @@ jobs:
       - uses: taiki-e/install-action@8cca0918f8471c33515202b73f56ab27f2bed283 # v2.87.29
         with:
           tool: nextest,just@1.58.0
+      - name: Run local router and formatter-order contracts with system Bash
+        if: matrix.os == 'macos-latest'
+        shell: bash
+        run: |
+          export PATH="/bin:$PATH"
+          /bin/bash tools/fmt_included.sh test
+          /bin/bash tools/fmt_included.sh --check
+          just --shell /bin/bash ci-router-test
       # The rest of the `cache-check-test` ci-policy recipe, hosted on all three
       # runners: "Worktree cache tool native tests" above runs the
       # worktree_cache.rs unit tests, and this runs
