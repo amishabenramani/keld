@@ -342,7 +342,7 @@ describe("echo declaration generator", () => {
     const apiCommitted = readFileSync(apiGeneratedPath);
     expect(() => assertEchoArtifactFresh(echoSource, committed)).not.toThrow();
     expect(() =>
-      assertEchoArtifactFresh(echoSource, apiCommitted),
+      assertEchoArtifactFresh(echoSource, apiCommitted, apiGeneratedPath),
     ).not.toThrow();
     expect(apiCommitted).toEqual(committed);
     expect(() =>

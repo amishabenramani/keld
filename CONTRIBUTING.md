@@ -70,8 +70,8 @@ Use these outcomes to coordinate work:
 | Withdrawn claim or closed, unmerged PR | Post that you are stopping and link useful work; this ends your intent claim. A new contributor may claim an open issue, subject to any remaining assignment, reservation or overlapping PR. Ask a maintainer to clear an obsolete assignment. |
 | Completed work | Link the merged PR and say whether scope remains. A closed issue needs a maintainer to reopen it or identify a follow-up before new implementation. Remaining work on an open issue may be claimed under the rules above. |
 
-Keep the issue updated with public progress or a blocker at least every 14 calendar
-days while working; link your PR when available. For a handoff, name the remaining
+While working, post a public progress/blocker update before the inactivity
+threshold above; link your PR when available. For a handoff, name the remaining
 scope and link the branch/PR, then have the next contributor post their own claim.
 Maintainers record changed assignments or scope decisions publicly. If coordination
 stalls, choose another unclaimed issue or ask a [maintainer](MAINTAINERS.md) to resolve
