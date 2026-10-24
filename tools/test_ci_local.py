@@ -628,6 +628,67 @@ class RouterFailureBoundaryTests(unittest.TestCase):
 
 
 class ProductionConsumerTests(unittest.TestCase):
+    def test_native_format_configuration_changes_select_both_format_gates(self):
+        source = Path(__file__).resolve().parent.parent
+        # These are Bun 1.4.4's exact supported config basenames, not a copy of
+        # the production input globs. A known path must not need all-gate fallback.
+        names = [
+            '.oxfmtrc.json',
+            '.oxfmtrc.jsonc',
+            'oxfmt.config.ts',
+            'oxfmt.config.mts',
+            'package.json',
+            'package.yaml',
+            '.prettierrc',
+            '.prettierrc.json',
+            '.prettierrc.yml',
+            '.prettierrc.yaml',
+            '.prettierrc.json5',
+            '.prettierrc.js',
+            'prettier.config.js',
+            '.prettierrc.ts',
+            'prettier.config.ts',
+            '.prettierrc.mjs',
+            'prettier.config.mjs',
+            '.prettierrc.mts',
+            'prettier.config.mts',
+            '.prettierrc.cjs',
+            'prettier.config.cjs',
+            '.prettierrc.cts',
+            'prettier.config.cts',
+            '.prettierrc.toml',
+            '.editorconfig',
+        ]
+        paths = ["crates/keld-cli/templates/hello/" + name for name in names]
+        paths += ["packages/@keld/api/package.json",
+                  "crates/keld-cli/templates/hello/.PRETTIERRC",
+                  "crates/keld-ipc/fuzz/.prettierrc", ".gitignore",
+                  "crates/keld-cli/templates/hello/.GITIGNORE",
+                  "crates/keld-cli/templates/hello/.GitIgnore"]
+        with tempfile.TemporaryDirectory(prefix="keld-native-config-route-") as temporary:
+            root = Path(temporary)
+            tracked_snapshot(source, root)
+            for path in paths:
+                with self.subTest(path=path):
+                    selected = ci_inputs.classify(root, [path], paths_only=True)
+                    self.assertFalse(selected["input_all"])
+                    self.assertTrue(selected["local_js-fmt-check"])
+                    self.assertTrue(selected.get("input_hygiene", False))
+                    self.assertTrue(selected["local_typescript"])
+
+    def test_root_manifests_keep_unknown_input_fallback(self):
+        source = Path(__file__).resolve().parent.parent
+        with tempfile.TemporaryDirectory(prefix="keld-native-root-manifest-route-") as temporary:
+            root = Path(temporary)
+            tracked_snapshot(source, root)
+            for path in ("package.json", "package.yaml"):
+                with self.subTest(path=path):
+                    selected = ci_inputs.classify(root, [path], paths_only=True)
+                    self.assertTrue(selected["input_all"])
+                    self.assertTrue(selected["local_js-fmt-check"])
+                    self.assertTrue(selected["local_typescript"])
+                    self.assertTrue(selected["local_clippy"])
+
     def test_nested_template_ignore_changes_select_native_formatter(self):
         source = Path(__file__).resolve().parent.parent
         with tempfile.TemporaryDirectory(prefix="keld-native-nested-ignore-route-") as temporary:

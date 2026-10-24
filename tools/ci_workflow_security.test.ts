@@ -139,6 +139,113 @@ test("direct native formatter selects JS/TS, honors ignores and checks without w
     rmSync(root, { recursive: true, force: true });
   }
 }, 30_000);
+
+test("native configuration alone can reject unchanged TypeScript", () => {
+  const cases = [
+    {
+      path: "packages/@keld/api/package.json",
+      before: "{}\n",
+      after: '{"prettier":{"semi":false}}\n',
+    },
+    {
+      path: "crates/keld-cli/templates/hello/package.json",
+      before: "{}\n",
+      after: '{"prettier":{"semi":false}}\n',
+    },
+    {
+      path: "crates/keld-cli/templates/hello/.editorconfig",
+      before: "[*]\nindent_size=2\n",
+      after: "[*]\nindent_size=4\n",
+    },
+    {
+      path: "crates/keld-cli/templates/hello/.prettierrc",
+      before: "{}\n",
+      after: '{"semi":false}\n',
+    },
+    {
+      path: "crates/keld-cli/templates/hello/.oxfmtrc.jsonc",
+      before: "{}\n",
+      after: '{"semi":false}\n',
+    },
+    {
+      path: "crates/keld-cli/templates/hello/package.yaml",
+      before: "{}\n",
+      after: "prettier:\n  semi: false\n",
+    },
+    {
+      path: ".prettierignore",
+      before: "packages/probe/src/value.ts\n",
+      after: "\n",
+    },
+  ];
+  // Windows resolves config basenames without regard to ASCII case.
+  if (process.platform === "win32")
+    cases.push(
+      {
+        path: "crates/keld-cli/templates/hello/.PrettierRC",
+        before: "{}\n",
+        after: '{"semi":false}\n',
+      },
+      { path: ".GITIGNORE", before: "src/value.ts\n", after: "\n" },
+      {
+        path: ".PRETTIERIGNORE",
+        before: "packages/probe/src/value.ts\n",
+        after: "\n",
+      },
+    );
+  for (const config of cases) {
+    const root = mkdtempSync(join(tmpdir(), "keld-native-config-"));
+    try {
+      const prettierIgnore = config.path.toLowerCase() === ".prettierignore";
+      const ignored =
+        prettierIgnore || config.path.toLowerCase() === ".gitignore";
+      const source = prettierIgnore
+        ? "packages/probe/src/value.ts"
+        : join(dirname(config.path), "src/value.ts").replaceAll("\\", "/");
+      mkdirSync(dirname(join(root, source)), { recursive: true });
+      const bytes = ignored
+        ? "export const answer={value:42};\n"
+        : "export const answer = {\n  value: 42,\n};\n";
+      writeFileSync(join(root, source), bytes);
+      cpSync(
+        join(import.meta.dir, "../bunfig.toml"),
+        join(root, "bunfig.toml"),
+      );
+      writeFileSync(join(root, config.path), config.before);
+      for (const args of [
+        ["init", "--quiet"],
+        ["config", "maintenance.auto", "false"],
+        ["add", "-f", "."],
+      ])
+        expect(Bun.spawnSync(["git", ...args], { cwd: root }).exitCode).toBe(0);
+      const check = () =>
+        Bun.spawnSync(
+          [
+            process.execPath,
+            "fmt",
+            "--no-script",
+            "--check",
+            "**/*.{js,jsx,mjs,cjs,ts,tsx,mts,cts}",
+          ],
+          { cwd: root },
+        );
+      expect(check().exitCode, config.path).toBe(0);
+      writeFileSync(join(root, config.path), config.after);
+      const changed = Bun.spawnSync(["git", "diff", "--name-only"], {
+        cwd: root,
+      });
+      expect(changed.exitCode).toBe(0);
+      expect(changed.stdout.toString().trim()).toBe(config.path);
+      const rejected = check();
+      expect(rejected.exitCode, config.path).toBe(1);
+      expect(rejected.stdout.toString(), config.path).toContain(source);
+      expect(readFileSync(join(root, source), "utf8")).toBe(bytes);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  }
+}, 30_000);
+
 type FixtureJob = {
   steps: Step[];
   env?: Record<string, unknown>;

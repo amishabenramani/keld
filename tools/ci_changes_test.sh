@@ -255,6 +255,23 @@ for input in bunfig.toml .gitignore crates/keld-cli/templates/hello/.gitignore c
     expect_exact_output "native formatting input $input selects hygiene" hygiene true "$formatted_classification"
 done
 
+# Config-only diffs must reach the hosted formatter, without a JS/TS edit.
+# The literal basenames are the immutable Bun 1.4.4 configuration contract.
+for config in .oxfmtrc.json .oxfmtrc.jsonc oxfmt.config.ts oxfmt.config.mts package.json package.yaml .prettierrc .prettierrc.json .prettierrc.yml .prettierrc.yaml .prettierrc.json5 .prettierrc.js prettier.config.js .prettierrc.ts prettier.config.ts .prettierrc.mjs prettier.config.mjs .prettierrc.mts prettier.config.mts .prettierrc.cjs prettier.config.cjs .prettierrc.cts prettier.config.cts .prettierrc.toml .editorconfig; do
+    for input in "crates/keld-cli/templates/hello/$config"; do
+        config_classification="$(result_for_paths "$input")"
+        expect_exact_output "native config input $input selects hosted formatting" hygiene true "$config_classification"
+        expect_exact_output "native config input $input selects local formatting" local_js-fmt-check true "$config_classification"
+        expect_exact_output "native config input $input selects generator tests" ts true "$config_classification"
+    done
+done
+for input in .prettierignore packages/@keld/api/package.json crates/keld-cli/templates/hello/.PRETTIERRC crates/keld-cli/templates/hello/.GITIGNORE crates/keld-cli/templates/hello/.GitIgnore; do
+    config_classification="$(result_for_paths "$input")"
+    expect_exact_output "native config input $input selects hosted formatting" hygiene true "$config_classification"
+    expect_exact_output "native config input $input selects local formatting" local_js-fmt-check true "$config_classification"
+    expect_exact_output "native config input $input selects generator tests" ts true "$config_classification"
+done
+
 empty_classification="$(printf '' | "$router" classify)"
 expect_flags "empty diff skips conditional lanes" "$all_false" "$empty_classification"
 expect_mermaid_flag "empty diff does not select Mermaid" false "$empty_classification"

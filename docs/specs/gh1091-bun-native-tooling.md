@@ -59,6 +59,12 @@ untracked sources. Root `bunfig.toml` owns formatter configuration; its empty
 `ignorePatterns` adds no exclusions beyond Bun's native ignore rules. The native
 inventory contains no source requiring an additional exclusion. Existing CI tests
 cover all eight extensions, native ignores and unchanged non-JS/TS files.
+Bun also resolves path-scoped package, Prettier, oxfmt and EditorConfig settings.
+The shared CI input contract admits their verified filenames, including Windows
+case variants, to both local and hosted formatter checks and the generator's
+TypeScript tests. A config-only change cannot bypass those checks merely because
+the TypeScript bytes are unchanged. Root manifests retain the existing unknown
+input fallback rather than narrowing shared build-graph changes.
 Do not run an unrestricted formatter
 over instruction Markdown, historical evidence, nested research or vendor files.
 Use Bun defaults unless an existing project contract requires an explicit setting;
