@@ -488,7 +488,9 @@ for selection in "$unknown_codeql" "$workflow_codeql"; do
 done
 
 audit_docs_classification="$(result_for_paths docs/audits/verify.py docs/audits/evidence/example.json)"
-expect_flags "audit documentation without a Rust reader omits Rust" "$docs_only" "$audit_docs_classification"
+expect_flags "audit checker selects documentation and policy-reader hygiene without Rust" "$docs_hygiene" "$audit_docs_classification"
+audit_prose_classification="$(result_for_paths docs/audits/README.md docs/audits/evidence/example.json)"
+expect_flags "audit prose and evidence without a checker change select only documentation" "$docs_only" "$audit_prose_classification"
 
 hygiene_classification="$(result_for_paths .github/CODEOWNERS)"
 expect_flags "hygiene input runs only hygiene contract" "$hygiene_only" "$hygiene_classification"
