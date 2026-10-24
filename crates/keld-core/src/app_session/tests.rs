@@ -47,9 +47,9 @@ use super::{HOST_ANSWER_BUDGET, QuitDrainEnd};
 
 #[cfg(target_os = "macos")]
 use super::{
-    AuthConfiguration, BoundPrimaryGeneration, FsWorkItem, FsWorkerCommand, IpcError,
-    PendingFsWriteFailure, PrimaryCallerContext, RoleOwner, ValidatedBootSelection,
-    collapse_app_results, dispatch_primary_echo, finish_link_shutdown, run_fs_worker, run_guarded,
+    AuthConfiguration, FsWorkItem, FsWorkerCommand, IpcError, PendingFsWriteFailure,
+    PrimaryCallerContext, ValidatedBootSelection, collapse_app_results, dispatch_primary_echo,
+    finish_link_shutdown, run_fs_worker, run_guarded,
 };
 
 #[cfg(target_os = "macos")]
