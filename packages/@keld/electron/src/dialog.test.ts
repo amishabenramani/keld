@@ -19,7 +19,10 @@ import * as electron from "./index";
 
 /** Read the exported surface (not a copied implementation of dialog behavior). */
 function member(target: unknown, key: string): unknown {
-  if ((typeof target !== "object" && typeof target !== "function") || target === null) {
+  if (
+    (typeof target !== "object" && typeof target !== "function") ||
+    target === null
+  ) {
     return undefined;
   }
   return Reflect.get(target, key);

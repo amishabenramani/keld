@@ -16,7 +16,10 @@ import * as electron from "./index";
 
 /** No new implementation-specific facade test hook: read the public module. */
 function member(target: unknown, key: string): unknown {
-  if ((typeof target !== "object" && typeof target !== "function") || target === null) {
+  if (
+    (typeof target !== "object" && typeof target !== "function") ||
+    target === null
+  ) {
     return undefined;
   }
   return Reflect.get(target, key);
@@ -31,7 +34,9 @@ function expectMissingExport(key: string): void {
 /** Each named static/facade member must be independently absent today. */
 function expectMissingMethod(moduleName: string, methodName: string): void {
   expect(member(member(electron, moduleName), methodName)).toBeUndefined();
-  expect(member(member(electron.default, moduleName), methodName)).toBeUndefined();
+  expect(
+    member(member(electron.default, moduleName), methodName),
+  ).toBeUndefined();
 }
 
 // Pinned menu.md: buildFromTemplate synchronously returns a Menu. The future
@@ -106,6 +111,10 @@ test("display.work-area.rectangle today: no Display workArea is available withou
 // Pinned native-theme.md: shouldUseDarkColors is a read-only boolean backed
 // by the actual OS theme, not an inferred constant or async request.
 test("native-theme.should-use-dark-colors today: no boolean native theme fact exists", () => {
-  expect(member(member(electron, "nativeTheme"), "shouldUseDarkColors")).toBeUndefined();
-  expect(member(member(electron.default, "nativeTheme"), "shouldUseDarkColors")).toBeUndefined();
+  expect(
+    member(member(electron, "nativeTheme"), "shouldUseDarkColors"),
+  ).toBeUndefined();
+  expect(
+    member(member(electron.default, "nativeTheme"), "shouldUseDarkColors"),
+  ).toBeUndefined();
 });
