@@ -7,6 +7,22 @@ use keld_ipc::{CorrelationId, FrameKind};
 use keld_wv::{AppWindowCommand, AppWindowEvent, WebviewId};
 use std::time::Duration;
 
+fn shutdown_host_writer(fixture: &Fixture) -> TestResult {
+    // Inject the fault at the owned writer, keeping registry/caller admission
+    // live. Peer shutdown alone does not establish a failed host-write premise.
+    let current = fixture
+        .handle
+        .current
+        .lock()
+        .map_err(|_| std::io::Error::other("host writer fixture lock poisoned"))?;
+    current
+        .as_ref()
+        .ok_or_else(|| std::io::Error::other("host writer fixture is absent"))?
+        .writer
+        .shutdown_app_link()?;
+    Ok(())
+}
+
 #[test]
 fn destroy_correlation_reuse_retires_the_link_before_a_second_effect() -> TestResult {
     let mut fixture = Fixture::new(Some(true))?;
@@ -108,7 +124,7 @@ fn failed_allow_acknowledgement_still_queues_the_committed_teardown() -> TestRes
         2,
         WindowResponse::CloseRequested { close_seq: 1 },
     )?;
-    fixture.peer.shutdown_app_link()?;
+    shutdown_host_writer(&fixture)?;
     let failure = verdict(&fixture, window, 1, CloseVerdict::Allow, 3)
         .expect_err("the actual failed socket write remains observable");
     assert!(
@@ -156,7 +172,7 @@ fn failed_allow_acknowledgement_and_enqueue_preserve_both_independent_faults() -
         WindowResponse::CloseRequested { close_seq: 1 },
     )?;
     let caller = fixture.caller()?;
-    fixture.peer.shutdown_app_link()?;
+    shutdown_host_writer(&fixture)?;
     drop(fixture.commands);
     let failure = fixture
         .handle
