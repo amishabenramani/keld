@@ -253,6 +253,14 @@ mod tests {
         for name in ["formatted-app".to_owned(), "a".repeat(100)] {
             let dir = tempfile::tempdir().expect("tempdir");
             let root = create_project(dir.path(), &name).expect("create app");
+            // Managed temp roots can sit below an ignored parent checkout.
+            // The app fixture must own its Git boundary, not inherit that ignore.
+            let git = Command::new("git")
+                .args(["init", "--quiet"])
+                .current_dir(&root)
+                .output()
+                .expect("initialize fixture checkout");
+            assert!(git.status.success(), "fixture Git initialization: {git:?}");
             let run = |script: &str| {
                 Command::new("bun")
                     .args(["run", script])
