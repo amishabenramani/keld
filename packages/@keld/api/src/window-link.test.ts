@@ -8,6 +8,8 @@ import {
   LIFECYCLE_CHANNEL, WINDOW_CHANNEL, WriteQueue, encodeCallError, withIoDeadline,
 } from "../../kipc/src/transport.ts";
 
+const testQualifiedHardware = test.skipIf(process.platform !== "linux" || process.arch !== "x64");
+
 const TOKEN = new Uint8Array(32).fill(0x49);
 const TIMEOUT = APP_LINK_IO_DEADLINE_MS * 3;
 const createdHex = readFileSync(join(import.meta.dir, "../../../../crates/keld-ipc/tests/fixtures/window-v0.tsv"), "utf8").split("\n").find((row) => row.startsWith("event-created\tevent\t"))?.split("\t")[2];
@@ -261,7 +263,7 @@ test("failed Window source preserves earlier answers and existing unanswered-cal
 }, TIMEOUT);
 
 for (const scenario of ["release-close", "release-quit"]) {
-  test(`${scenario}: real post-drain end releases source Map snapshots while source and external alias survive`, async () => {
+  testQualifiedHardware(`${scenario}: real post-drain end releases source Map snapshots while source and external alias survive`, async () => {
     const host = await start(scenario);
     try {
       const corr = await subscribe(host);
@@ -286,7 +288,7 @@ for (const scenario of ["release-close", "release-quit"]) {
 }
 
 
-test("original actual subscription RPC Error releases while Link and Source remain healthy", async () => {
+testQualifiedHardware("original actual subscription RPC Error releases while Link and Source remain healthy", async () => {
   const host = await start("subscription-original-release");
   try {
     const corr = await subscribe(host);
