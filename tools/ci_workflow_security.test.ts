@@ -588,6 +588,19 @@ test("Windows media runner avoids unused Bun and rustfmt installation", () => {
   expect((installers[0]!.with as Record<string, unknown>).components).toBe("clippy");
 });
 
+test("Windows media acceptance must execute without step-level skip or failure masking", () => {
+  for (const [label, edit] of [
+    ["literal false condition", (media: Step) => { media.if = false; }],
+    ["expression false condition", (media: Step) => { media.if = "${{ false }}"; }],
+    ["failure tolerance", (media: Step) => { media["continue-on-error"] = true; }],
+    ["different shell", (media: Step) => { media.shell = "bash"; }],
+  ] as const) {
+    const altered = fixture();
+    edit(step(altered, "windows-media", "Windows media guard acceptance (KEL-132)"));
+    expect(() => check(altered), label).toThrow("Windows media acceptance step");
+  }
+});
+
 test("both Nextest installers refuse unreviewed tools and integrity overrides", () => {
   for (const jobName of ["check", "windows-media"] as const) {
     const clean = fixture();

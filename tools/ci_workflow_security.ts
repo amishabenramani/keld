@@ -714,6 +714,15 @@ export function checkWorkflowSecurity(source: string): void {
       }
     }
   }
+  // GitHub treats a skipped step in an otherwise successful job as SUCCESS.
+  // CI required sees only the job result, so the selected media oracle must
+  // not have an independent step-level skip or failure-masking control.
+  // Rust hygiene owns the exact, independently reviewed PowerShell body.
+  const mediaAcceptance = namedStep(stepsByJob.get("windows-media")!, "Windows media guard acceptance (KEL-132)");
+  exactKeys(mediaAcceptance, ["name", "shell", "run"], "Windows media acceptance step");
+  if (mediaAcceptance.shell !== "pwsh") {
+    fail("Windows media acceptance step must use the reviewed pwsh shell.");
+  }
   checkCodeqlJobs(jobs, stepsByJob);
   checkWebkitgtkAptCache(jobs, stepsByJob);
   checkCargoDenyJob(jobs, stepsByJob);
