@@ -7,8 +7,10 @@
 use keld_compat::evidence::{OperationKind, Panel, Platform, Verdict};
 use serde_json::{Value, json};
 
-use super::v1_fixture::{COMMIT, RUST_PATH, V1_PRODUCT, bytes, denominator, parse_with};
-use crate::corpus_admission::{RunnerKind, check_cells};
+use super::v1_fixture::{
+    COMMIT, READY, RUST_PATH, V1_PRODUCT, bytes, citation, denominator, parse_with,
+};
+use crate::corpus_admission::{RunnerKind, check_cells, list_libtest, rust_case_listed};
 use crate::corpus_manifest::{Corpus, CorpusError, REGISTRY, Registration};
 
 type Operation<'a> = (&'a str, &'a str);
@@ -96,6 +98,10 @@ const PARTITIONS: [(&str, &str, OperationKind, &[Operation<'_>]); 3] = [
 #[test]
 fn gh500_three_kind_homogeneous_physical_shapes_have_no_product_evidence() {
     let mut count = 0;
+    // Query the actual compiled test target rather than accepting our own
+    // invented test names or relying on the first empty-output rejection alone.
+    let (live_cases, ignored_cases) =
+        list_libtest("electron_lifecycle").expect("list the admitted real Rust target");
     for (corpus_id, token, expected_kind, ops) in PARTITIONS {
         let reg = registration(corpus_id);
         let proposed = shape(corpus_id, token, ops);
@@ -117,6 +123,10 @@ fn gh500_three_kind_homogeneous_physical_shapes_have_no_product_evidence() {
             );
             assert_eq!(cell.platforms, [Platform::Macos]);
             assert_eq!(cell.test_path, RUST_PATH);
+            assert!(
+                !rust_case_listed(&live_cases, &ignored_cases, &cell.test_name),
+                "a metadata-only GH-500 placeholder must not be admitted as an actual app test"
+            );
         }
 
         // An in-memory shape with no real app test output is NOT a registered
@@ -173,6 +183,20 @@ fn gh500_product_corpus_wrong_kind_and_app_only_citation_fail_closed() {
             Err(CorpusError::VerdictRule { .. })
         ));
     }
+
+    // An application source URL does not become a normative Electron-doc
+    // citation merely because the quoted text and its SHA-256 are well formed.
+    // Exercise the actual citation URL owner, not only the missing-citation rule.
+    let mut app_source = proposed.clone();
+    app_source["cells"][0]["expected_verdict"] = json!("pass");
+    app_source["cells"][0]["doc_citation"] = citation(READY);
+    app_source["cells"][0]["doc_citation"]["url"] = json!(
+        "https://github.com/jgraph/drawio-desktop/blob/2edf9fb97eff9bd94bdda33abfe1ee9e7f7bb55e/src/main/electron.js#L849"
+    );
+    assert!(matches!(
+        parse_with(&reg, &app_source, &[]),
+        Err(CorpusError::CitationUrl { .. })
+    ));
 
     // Desktop's package-lock resolves Electron 44.5.1, but only the 44.4.5
     // normative oracle is admitted here; don't quietly repin the schema.
