@@ -39,6 +39,10 @@ const generationOutputs = [
 function withGeneratorCheckout(run: (root: string) => void): void {
   const root = mkdtempSync(resolve(tmpdir(), "keld-generation-contract-"));
   try {
+    // Managed TMPDIR may be nested inside Keld. Give this synthetic checkout
+    // its own Git boundary so ancestor ignores/config do not own its files.
+    const git = Bun.spawnSync(["git", "init", "--quiet", root]);
+    expect(git.exitCode, git.stderr.toString()).toBe(0);
     for (const path of [
       ...generationOutputs,
       "packages/@keld/kipc/scripts/echo-codegen.ts",
