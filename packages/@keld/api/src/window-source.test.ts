@@ -229,7 +229,7 @@ test("source diagnostic values survive mutation without retaining the original E
   const original = rejected(() => source.decode(Uint8Array.of(7)));
   const expected = { code: "KELD-IPC-005", message: "KELD-IPC-005: window mirror rejected a host fact. Check the host window pair and codec before restarting the role." };
   expect({ code: original.code, message: original.message }).toEqual(expected);
-  original.code = "KELD-IPC-099";
+  original.code = "KELD-IPC-026";
   original.message = "externally mutated original diagnostic";
   source.dispatch(earlier);
   expect(observed).toHaveLength(1);
@@ -239,7 +239,7 @@ test("source diagnostic values survive mutation without retaining the original E
     const error = diagnostic(action);
     expect({ code: error.code, message: error.message }).toEqual(expected);
     expect(error).not.toBe(original);
-    error.code = "KELD-IPC-098";
+    error.code = "KELD-IPC-027";
     error.message = "externally mutated later diagnostic";
   }
 });
@@ -256,14 +256,14 @@ test("typed terminal diagnostics preserve the first exact values including a non
     const original = linkError(expected.code, "factory detail is replaced by the exact full message");
     original.message = expected.message;
     source.end(original);
-    original.code = "KELD-IPC-099";
+    original.code = "KELD-IPC-026";
     original.message = "externally mutated terminal diagnostic";
     source.end(linkError("KELD-IPC-005", "later terminal error"));
     for (const action of [() => source.get(WINDOW), () => source.all(), () => source.decode(literal("event-created")), () => source.apply(fact)]) {
       const error = diagnostic(action);
       expect({ code: error.code, message: error.message }).toEqual(expected);
       expect(error).not.toBe(original);
-      error.code = "KELD-IPC-098";
+      error.code = "KELD-IPC-027";
       error.message = "externally mutated later terminal diagnostic";
     }
   }
