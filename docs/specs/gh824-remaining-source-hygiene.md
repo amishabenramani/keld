@@ -138,7 +138,7 @@ Implement only the selected slice after approval and a fresh winning claim:
 - Research: the two private research recipes in `justfile`, new
   `tools/research_checkout.sh`, its narrowly scoped local-fixture tests and the
   existing navigation map. Keep public wrappers/reference-run contracts.
-- Required generated reader/census digests may change through canonical rebind.
+- Reader/census digests required by the checks may change through canonical rebind.
 
 Must not touch root `Cargo.toml`, workflows, root/nested instructions, transport
 source, native guardian/job/profile implementations, other owners' worktrees,
