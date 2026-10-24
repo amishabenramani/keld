@@ -1124,7 +1124,12 @@ mod tests {
             assert_ne!(staged_metadata.permissions().mode() & 0o100, 0);
             assert_eq!(staged_metadata.permissions().mode() & 0o222, 0);
         }
+    }
 
+    #[test]
+    fn renderer_declared_stage_preserves_schema_one_descriptor_bytes() {
+        let (_temp, project, source_host) = fixture();
+        let staged = stage_dev_boot(&project, &source_host).expect("stage renderer boot");
         let descriptor: serde_json::Value = serde_json::from_slice(
             &fs::read(staged.root().join("keld.boot.json")).expect("boot descriptor"),
         )
