@@ -103,8 +103,35 @@ path_files() {
     return "$status"
 }
 
+# stdin formatting cannot traverse out-of-line modules. Enumerate each tracked
+# tool separately so a tracked parent cannot format an untracked child. Compare
+# bytes ourselves: rustfmt --check on stdin can report a diff with exit status 0.
+format_tracked_tools() (
+    local mode="$1" path temporary status=0
+    temporary="$(mktemp -d "${TMPDIR:-/tmp}/keld-fmt-tools.XXXXXX")" || return
+    trap 'rm -rf "$temporary"' EXIT
+    git ls-files -z -- 'tools/*.rs' >"$temporary/paths" || return
+    while IFS= read -r -d '' path; do
+        # stdin resolves its normal config from cwd; use the source directory.
+        if ! (cd "$(dirname "$path")" && rustfmt --edition "$edition" \
+            <"$(basename "$path")") >"$temporary/formatted"; then
+            echo "fmt_included: cannot format tracked tool $path." >&2
+            return 1
+        fi
+        if ! cmp -s "$path" "$temporary/formatted"; then
+            if [[ "$mode" == check ]]; then
+                echo "fmt_included: formatting drift in tracked tool $path." >&2
+                status=1
+            else
+                cat "$temporary/formatted" >"$path" || return
+            fi
+        fi
+    done <"$temporary/paths"
+    return "$status"
+)
+
 run() {
-    local mode="$1" included declared standalone path
+    local mode="$1" included declared path
     cd "$(git rev-parse --show-toplevel)"
     included="$(included_files)"
     if [[ -z "$included" ]]; then
@@ -121,14 +148,17 @@ run() {
     fi
     local -a args=(--edition "$edition")
     [[ "$mode" == check ]] && args+=(--check)
-    # Cargo has no targets for standalone tools. Git owns their scope, not a
-    # hand-maintained filename list or untracked/ignored scratch directories.
-    standalone="$(git -c core.quotePath=false ls-files -- 'tools/*.rs')"
     local -a files=()
     while IFS= read -r path; do
-        [[ -z "$path" ]] || files[${#files[@]}]="$path"
-    done < <(printf '%s\n%s\n%s\n' "$included" "$declared" "$standalone" | sort -u)
-    rustfmt "${args[@]}" "${files[@]}"
+        # Tool modules also appear in #[path] discovery. Keep every tools/ path
+        # on the non-recursive, tracked-only route below, including those modules.
+        case "$path" in
+            "" | tools/*) ;;
+            *) files[${#files[@]}]="$path" ;;
+        esac
+    done < <(printf '%s\n%s\n' "$included" "$declared" | sort -u)
+    if ((${#files[@]})); then rustfmt "${args[@]}" "${files[@]}" || return; fi
+    format_tracked_tools "$mode"
 }
 
 if [[ "${1:-}" == test ]]; then
@@ -198,6 +228,44 @@ RS
     cmp -s tools/untracked.rs "$temp/untracked-original" || {
         echo "FAIL: write mode modified an untracked tool" >&2; exit 1;
     }
+    # A tracked parent must not bring an untracked child into formatting scope.
+    printf 'mod scratch_child;\nfn standalone() {}\n' >tools/standalone.rs
+    printf 'fn   child(   ) {}\n' >tools/scratch_child.rs
+    cp tools/scratch_child.rs "$temp/child-original"
+    check || { echo "FAIL: untracked child changed tracked-only check scope" >&2; cat "$temp/out" >&2; exit 1; }
+    tools/fmt_included.sh >/dev/null
+    cmp -s tools/scratch_child.rs "$temp/child-original" || {
+        echo "FAIL: write mode modified an untracked child" >&2; exit 1;
+    }
+    # Even a tools #[path] target stays on the non-recursive route.
+    printf '#[path = "nested/standalone tool.rs"]\nmod nested;\n' >tools/standalone.rs
+    printf 'mod scratch_child;\nfn nested_tool() {}\n' >"tools/nested/standalone tool.rs"
+    cp tools/scratch_child.rs tools/nested/scratch_child.rs
+    check || { echo "FAIL: tools #[path] target traversed untracked children" >&2; cat "$temp/out" >&2; exit 1; }
+    tools/fmt_included.sh >/dev/null
+    cmp -s tools/nested/scratch_child.rs "$temp/child-original" || {
+        echo "FAIL: tools #[path] write modified an untracked child" >&2; exit 1;
+    }
+    # stdin must use the source's nearest config, not only the checkout root.
+    printf 'hard_tabs = true\nnewline_style = "Unix"\n' >tools/nested/rustfmt.toml
+    printf 'fn nested_tool() {\n    let value = 1;\n}\n' >"tools/nested/standalone tool.rs"
+    expect_fail "nearest tool formatting config" 'standalone tool.rs'
+    tools/fmt_included.sh >/dev/null
+    printf 'fn nested_tool() {\n\tlet value = 1;\n}\n' >"$temp/nearest-expected"
+    cmp -s "tools/nested/standalone tool.rs" "$temp/nearest-expected" || {
+        echo "FAIL: nearest tool configuration was ignored" >&2; exit 1;
+    }
+    # Parser failure must never overwrite the original source with partial output.
+    printf 'fn broken(\n' >tools/standalone.rs
+    cp tools/standalone.rs "$temp/broken-original"
+    expect_fail "invalid tracked Rust tool" 'cannot format tracked tool'
+    if tools/fmt_included.sh >"$temp/write-error" 2>&1; then
+        echo "FAIL: malformed tool write returned success" >&2; exit 1;
+    fi
+    cmp -s tools/standalone.rs "$temp/broken-original" || {
+        echo "FAIL: malformed tool source was overwritten" >&2; exit 1;
+    }
+    printf 'fn standalone() {}\n' >tools/standalone.rs
     # Negative control 1: cargo fmt cannot see the include!d file at all.
     printf 'fn split(   ) {}\n' >>crates/demo/src/tests/split.rs
     expect_fail "drift in an include!d file"

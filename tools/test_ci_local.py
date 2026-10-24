@@ -524,8 +524,11 @@ class ExecutorTests(SelectionTests):
                 destination.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copy2(source / relative, destination)
             (root / "src").mkdir()
+            # Managed TMPDIR can be inside Keld; this synthetic crate must not
+            # join an ancestor workspace whose members deliberately exclude it.
             (root / "Cargo.toml").write_bytes(
-                b'[package]\nname = "format-order-control"\nversion = "0.0.0"\nedition = "2024"\n')
+                b'[package]\nname = "format-order-control"\nversion = "0.0.0"\nedition = "2024"\n'
+                b'\n[workspace]\n')
             (root / "src/lib.rs").write_bytes(
                 b'#[path = "../crates/keld-ipc/src/echo.rs"]\nmod echo;\n'
                 b'include!("included.rs");\nmacro_rules! fixture { ($($tokens:tt)*) => {} }\n'
