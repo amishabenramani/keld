@@ -2377,6 +2377,18 @@ fn run_app(
         .arg(&entry_path)
         .arg(entry_metadata.dev().to_string())
         .arg(entry_metadata.ino().to_string())
+        // The verified boot mode selects the facade subscription barrier, not
+        // authority. An app may edit its own env but cannot make the host admit
+        // an unsubscribed or non-primary window CALL. Overwrite inherited values
+        // for renderer boots so callers cannot force a facade Ready barrier.
+        .env(
+            "KELD_NATIVE_WINDOW_FACADE",
+            if ready_trigger == AppReadyTrigger::HostInitialized {
+                "1"
+            } else {
+                "0"
+            },
+        )
         .env_remove(DEV_LEASE_ENV)
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit());

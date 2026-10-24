@@ -34,6 +34,9 @@ export {
 } from "../../kipc/src/transport.ts";
 
 import { resolveEchoCall } from "./echo-call.ts";
+import { attachMirror } from "./mirror.ts";
+import { WindowSource } from "./window-source.ts";
+import type { WindowEvent } from "./window-codec.ts";
 
 import {
   APP_LINK_IO_DEADLINE_MS,
@@ -41,8 +44,11 @@ import {
   FS_CHANNEL,
   AUTH_CHANNEL,
   LIFECYCLE_CHANNEL,
+  WINDOW_CHANNEL,
   WorkerLink,
+  encodeVarint,
   kipcError,
+  linkError,
   quitAndCloseLink,
   type KeldCallError,
   type WorkerReceiveTable,
@@ -73,6 +79,8 @@ function decodeEvent(bytes: Uint8Array): LifecycleEventName {
 export type LifecycleHandler = {
   onReady: () => void;
   onLastWindowClosed: () => void;
+  /** Host-owned window facts, dispatched only after the mirror applied them. */
+  onWindowFact?: (fact: WindowEvent) => void;
   onApplicationCall?: (
     channel: number,
     payload: Uint8Array,
@@ -97,31 +105,59 @@ const LIFECYCLE_RECEIVE: WorkerReceiveTable = {
  */
 export class LifecycleLink {
   readonly #link: WorkerLink;
+  readonly #windowSource: WindowSource | undefined;
   #closed = false;
   /** The error that ended the link without a local close: later quits rethrow it. */
   #dead: KeldCallError | undefined;
   #quitPromise: Promise<void> | undefined;
 
-  private constructor(link: WorkerLink) {
+  private constructor(link: WorkerLink, windowSource?: WindowSource) {
     this.#link = link;
+    this.#windowSource = windowSource;
+  }
+
+  /** Only a completed, accepted replay makes the native window mirror observable. */
+  get windowSource(): WindowSource | undefined {
+    return this.#windowSource;
   }
 
   static async connect(
     link: string,
     handlers: LifecycleHandler,
   ): Promise<LifecycleLink> {
+    // A verified schema-two Host sets the role hint before the Guardian spawns
+    // Bun. This hint does not grant window authority: the existing authenticated
+    // primary link, host Subscribe admission and per-window owner still do that.
+    const facadeWindows = process.env.KELD_NATIVE_WINDOW_FACADE === "1";
     const workerLink = await WorkerLink.open({
       link,
-      receive: LIFECYCLE_RECEIVE,
+      receive: facadeWindows
+        ? { ...LIFECYCLE_RECEIVE, eventChannels: [LIFECYCLE_CHANNEL, WINDOW_CHANNEL] }
+        : LIFECYCLE_RECEIVE,
     });
-    const session = new LifecycleLink(workerLink);
+    const windowSource = facadeWindows
+      ? new WindowSource((fact) => handlers.onWindowFact?.(fact))
+      : undefined;
+    const session = new LifecycleLink(workerLink, windowSource);
+    if (windowSource) attachMirror(workerLink, windowSource);
+    let rawReady = false;
+    let replayComplete = !facadeWindows;
+    let readyPublished = false;
+    const maybePublishReady = (): void => {
+      if (!rawReady || !replayComplete || readyPublished) return;
+      readyPublished = true;
+      handlers.onReady();
+    };
     // A lifecycle EVENT this role cannot decode ends the link (a throwing
     // applier, §4.6) before any listener runs; the listener then dispatches it.
     workerLink.setStateApplier(LIFECYCLE_CHANNEL, (payload) => {
       decodeEvent(payload);
     });
     workerLink.onEvent(LIFECYCLE_CHANNEL, (payload) => {
-      if (decodeEvent(payload) === "ready") handlers.onReady();
+      if (decodeEvent(payload) === "ready") {
+        rawReady = true;
+        maybePublishReady();
+      }
       else handlers.onLastWindowClosed();
     });
     workerLink.setCallHandler(ECHO_CHANNEL, (payload) =>
@@ -131,12 +167,33 @@ export class LifecycleLink {
       if (session.#closed) return;
       session.#closed = true;
       session.#dead = err;
+      windowSource?.end(err);
       try {
         handlers.onLinkDead(err);
       } catch {
         // Isolate: a throwing listener must not escape the transport's task.
       }
     });
+    if (windowSource) {
+      try {
+        // Postcard LifecycleRequest::Subscribe { channel } discriminant=1.
+        // The channel id itself comes only from the generated table. The Host
+        // writes every replayed Created fact before its Subscribed reply on
+        // this same authenticated link; call() applies them before settling.
+        const request = Uint8Array.of(1, ...encodeVarint(WINDOW_CHANNEL));
+        const reply = await workerLink.call(LIFECYCLE_CHANNEL, request, APP_LINK_IO_DEADLINE_MS);
+        if (reply.length !== 1 || reply[0] !== 1) {
+          throw reply[0] === 2 && reply.length === 2
+            ? linkError("KELD-CORE-045", `Host refused native window subscription (reason ${reply[1]}). Do not publish facade Ready.`)
+            : linkError("KELD-IPC-003", "Host returned an invalid native window subscription reply");
+        }
+        replayComplete = true;
+        maybePublishReady();
+      } catch (error) {
+        session.close();
+        throw error;
+      }
+    }
     return session;
   }
 
@@ -182,6 +239,7 @@ export class LifecycleLink {
   close(): void {
     if (this.#closed) return;
     this.#closed = true;
+    this.#windowSource?.end(linkError("KELD-IPC-022", "native window session closed"));
     this.#link.close();
   }
 }
