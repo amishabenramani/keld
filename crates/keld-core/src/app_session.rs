@@ -10,7 +10,7 @@ use self::error::startup_resource_snapshot;
 #[cfg(all(test, windows))]
 use self::boot_contract::decode_digest;
 #[cfg(any(target_os = "macos", target_os = "linux", windows, test))]
-use self::boot_contract::{boot_error, parse_boot_bytes, target_error};
+use self::boot_contract::{InitialWindow, boot_error, parse_boot_bytes, target_error};
 
 #[cfg(target_os = "macos")]
 mod macos_profile_selection;
@@ -392,10 +392,16 @@ struct AppBootSelection {
     name: String,
     entry_path: PathBuf,
     entry_file: File,
-    renderer_html: Vec<u8>,
+    initial_window: ValidatedInitialWindow,
     auth_configuration: AuthConfiguration,
     #[cfg(windows)]
     mode: WindowsBootMode,
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux", windows))]
+enum ValidatedInitialWindow {
+    Renderer(Vec<u8>),
+    None,
 }
 
 /// Which of the two admitted Windows boot states minted the selection (KEL-254 A3 AC2).
@@ -1324,6 +1330,19 @@ struct RetainedMacSession {
     guard: Option<GuardSnapshot>,
 }
 
+#[cfg(any(target_os = "linux", windows))]
+fn ensure_initial_window_supported(initial: &InitialWindow) -> Result<(), HostAppError> {
+    if matches!(initial, InitialWindow::None) {
+        return Err(HostAppError::new(
+            "KELD-CORE-034",
+            "facade boot platform",
+            "schema 2 is supported on macOS only",
+            "Remove initialWindow from keld.config.ts to use a renderer-declared boot on this platform.",
+        ));
+    }
+    Ok(())
+}
+
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 fn validate_from_root(root: &Path) -> Result<ValidatedBootSelection, HostAppError> {
     use nix::sys::stat::fstat;
@@ -1348,11 +1367,20 @@ fn validate_from_root(root: &Path) -> Result<ValidatedBootSelection, HostAppErro
     let boot_file = open_relative_file(&root_fd, Path::new(BOOT_FILE), "boot descriptor")?;
     let boot_bytes = read_bounded(boot_file, MAX_BOOT_BYTES, "boot descriptor")?;
     let parsed = parse_boot_bytes(&boot_bytes)?;
+    #[cfg(target_os = "linux")]
+    ensure_initial_window_supported(&parsed.initial)?;
     let entry_file = open_relative_file(&root_fd, &parsed.entry, "entry")?;
-    let renderer_file = open_relative_file(&root_fd, &parsed.renderer, "renderer")?;
-    let renderer_html = read_target(renderer_file, "renderer")?;
-    std::str::from_utf8(&renderer_html)
-        .map_err(|source| target_error("renderer", format!("HTML is not UTF-8: {source}")))?;
+    let initial_window = match parsed.initial {
+        InitialWindow::Renderer(renderer) => {
+            let renderer_file = open_relative_file(&root_fd, &renderer, "renderer")?;
+            let html = read_target(renderer_file, "renderer")?;
+            std::str::from_utf8(&html).map_err(|source| {
+                target_error("renderer", format!("HTML is not UTF-8: {source}"))
+            })?;
+            ValidatedInitialWindow::Renderer(html)
+        }
+        InitialWindow::None => ValidatedInitialWindow::None,
+    };
     let permissions_file =
         open_relative_file(&root_fd, Path::new(PERMISSIONS_FILE), "permissions file")?;
     Ok(ValidatedBootSelection {
@@ -1361,7 +1389,7 @@ fn validate_from_root(root: &Path) -> Result<ValidatedBootSelection, HostAppErro
             name: parsed.name,
             entry_path: parsed.entry,
             entry_file,
-            renderer_html,
+            initial_window,
             auth_configuration: parsed.auth_configuration,
         },
         permissions_file,
@@ -1410,11 +1438,19 @@ fn validate_windows_boot_files(
     let boot_file = open_relative_file_windows(&root, Path::new(BOOT_FILE), "boot descriptor")?;
     let boot_bytes = read_bounded(boot_file, MAX_BOOT_BYTES, "boot descriptor")?;
     let parsed = parse_boot_bytes(&boot_bytes)?;
+    ensure_initial_window_supported(&parsed.initial)?;
     let entry_file = open_relative_file_windows(&root, &parsed.entry, "entry")?;
-    let renderer_file = open_relative_file_windows(&root, &parsed.renderer, "renderer")?;
-    let renderer_html = read_target(renderer_file, "renderer")?;
-    std::str::from_utf8(&renderer_html)
-        .map_err(|source| target_error("renderer", format!("HTML is not UTF-8: {source}")))?;
+    let initial_window = match parsed.initial {
+        InitialWindow::Renderer(renderer) => {
+            let renderer_file = open_relative_file_windows(&root, &renderer, "renderer")?;
+            let html = read_target(renderer_file, "renderer")?;
+            std::str::from_utf8(&html).map_err(|source| {
+                target_error("renderer", format!("HTML is not UTF-8: {source}"))
+            })?;
+            ValidatedInitialWindow::Renderer(html)
+        }
+        InitialWindow::None => ValidatedInitialWindow::None,
+    };
     let permissions_file =
         open_relative_file_windows(&root, Path::new(PERMISSIONS_FILE), "permissions file")?;
     Ok(ValidatedBootSelection {
@@ -1423,7 +1459,7 @@ fn validate_windows_boot_files(
             name: parsed.name,
             entry_path: parsed.entry,
             entry_file,
-            renderer_html,
+            initial_window,
             auth_configuration: parsed.auth_configuration,
             mode,
         },
@@ -2304,9 +2340,24 @@ fn run_app(
         name,
         entry_path,
         entry_file,
-        renderer_html,
+        initial_window,
         auth_configuration,
     } = boot;
+    // A descriptor may be fully validated before the native Init-turn
+    // implementation is available. Never manufacture a host-owned window
+    // for a facade boot (nor emit a false Ready).
+    let renderer_html = match initial_window {
+        ValidatedInitialWindow::Renderer(html) => html,
+        ValidatedInitialWindow::None => {
+            return Err(HostAppError::new(
+                "KELD-CORE-037",
+                "facade runtime activation",
+                "schema-2 Host Init/Ready and first-window registration are not installed",
+                "Keep this facade boot staged until the native Ready/window runtime is integrated.",
+            )
+            .into());
+        }
+    };
     let html = String::from_utf8(renderer_html).map_err(|source| {
         HostAppError::new(
             "KELD-CORE-036",
@@ -3305,7 +3356,7 @@ fn run_app_direct(
         name,
         entry_path,
         entry_file,
-        renderer_html,
+        initial_window,
         auth_configuration: _auth_configuration,
         #[cfg(windows)]
         mode,
@@ -3316,6 +3367,17 @@ fn run_app_direct(
     let (installed_identity, _installed_package) = match mode {
         WindowsBootMode::DevStage => (None, None),
         WindowsBootMode::Installed { identity, active } => (Some(identity), Some(active)),
+    };
+    let renderer_html = match initial_window {
+        ValidatedInitialWindow::Renderer(html) => html,
+        ValidatedInitialWindow::None => {
+            return Err(HostAppError::new(
+                "KELD-CORE-034",
+                "facade boot platform",
+                "schema 2 is supported on macOS only",
+                "Remove initialWindow from keld.config.ts to use a renderer-declared boot on this platform.",
+            ));
+        }
     };
     let html = String::from_utf8(renderer_html).map_err(|source| {
         HostAppError::new(

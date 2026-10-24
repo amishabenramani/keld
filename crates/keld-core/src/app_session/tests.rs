@@ -13,12 +13,12 @@ use std::process::{Command, Stdio};
 use super::{
     ActivePrimaryGeneration, AppLinkDeadlines, AppWindowCommand, Arc, AtomicBool, AtomicU32,
     BOOT_FILE, BootstrapStream, CorrelationId, Duration, FS_CHANNEL, File, FrameKind,
-    GuardSnapshot, HashMap, HostAppError, Instant, LIFECYCLE_CHANNEL, LifecycleEvent,
-    MAX_BOOT_BYTES, ManifestError, Mutex, Ordering, PERMISSIONS_FILE, PendingFsCall,
-    PlatformPrimaryOwnerHandle, PrimaryLinkIdentity, PrimaryRouter, PrimaryRouterHandle, Receiver,
-    SESSION_CLI_LEASE_LOST, SESSION_LIFECYCLE_QUIT, SESSION_RUNNING, SessionShutdownState,
-    admit_kipc_transport_sidecar, app_detail, io, load_verified_manifest, mpsc, parse_boot_bytes,
-    thread, validate_from_root, write_frame,
+    GuardSnapshot, HashMap, HostAppError, InitialWindow, Instant, LIFECYCLE_CHANNEL,
+    LifecycleEvent, MAX_BOOT_BYTES, ManifestError, Mutex, Ordering, PERMISSIONS_FILE,
+    PendingFsCall, PlatformPrimaryOwnerHandle, PrimaryLinkIdentity, PrimaryRouter,
+    PrimaryRouterHandle, Receiver, SESSION_CLI_LEASE_LOST, SESSION_LIFECYCLE_QUIT, SESSION_RUNNING,
+    SessionShutdownState, ValidatedInitialWindow, admit_kipc_transport_sidecar, app_detail, io,
+    load_verified_manifest, mpsc, parse_boot_bytes, thread, validate_from_root, write_frame,
 };
 
 #[cfg(any(target_os = "macos", windows))]
