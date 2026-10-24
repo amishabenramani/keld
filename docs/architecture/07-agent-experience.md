@@ -87,9 +87,9 @@ task-level, namespaced toolset — not an endpoint wrapper. v1 tools:
 |---|---|---|
 | `keld_docs_search` | search docs/API/error registry; returns titled chunks + URLs | Context7/Stripe pattern: docs live in the same surface as actions |
 | `keld_scaffold_app` | run create-keld with template/features; returns file map + next steps | idempotent into an empty dir |
-| `keld_migrate_analyze` | run the Electron analyzer; returns compat report (score, per-API status, fix list) | read-only |
+| `keld_migrate_analyze` | **Target, not live:** static Electron analysis; returns classified counts, per-API status, fix list and omitted-input reasons, never a product PASS claim | read-only |
 | `keld_doctor` | env/native-module/permission/web-baseline checks; structured findings, each with a `fix` | wraps `keld doctor --json` |
-| `keld_permissions_explain` | why a call was denied + the exact manifest patch that would grant it | reads recorder output (dev) |
+| `keld_permissions_explain` | current: evaluate the supplied app operation against the live manifest and return its allow/deny reason plus proposed patch; recorder-based discovery is future | read-only policy evaluation; v0 rejects channel queries |
 | `keld_dev_inspect` | running dev app: windows (id, title, url, state), app-process status, recent restarts | dev-mode only |
 | `keld_ipc_trace` | recent kipc frames on a channel, decoded, summarized; `sample_limit`/`channel` filters | dev-mode only; JSON debug codec |
 | `keld_logs_search` | query unified log (host/app/renderer, principal-tagged) by pattern/severity/time | `search`, never `read_all` |

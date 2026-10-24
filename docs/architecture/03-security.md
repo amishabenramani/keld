@@ -216,11 +216,18 @@ manifest decoder.
   usage against the manifest and prints exact JSON patches ("your app called
   fs.read('~/Library/…'): add `$APPDATA/**` or change the call"). v0 `keld doctor`
   rejects unknown flags (`KELD-CLI-044`, exit 2); `--permissions` is not live.
-- `keld migrate` seeds the manifest from static analysis of Electron API usage
-  (dialog → fs read of chosen paths, etc.). It never seeds a network grant for updater
-  feeds: `autoUpdater` use maps to the host-owned updater (§5), because application
-  permissions cannot grant update authority and application roles cannot write updater
-  metadata (architecture 06). F09-T5 (#581) owns any future trigger capability.
+- **Target, not live:** `keld migrate` classifies Electron API usage and under
+  explicit `--write` consent may seed only reviewed literal grants. A dialog
+  requires the exact `app.system` dialog grant, **not** an inferred fs-read
+  scope for paths the user may later choose. Electron IPC channels require
+  active main-side literal registrations intersected with reviewed operation
+  demand and must be checked against the actual Host-owned window/document
+  identity before dispatch (#541/#552/#542); `el:*`, wildcard/hostless globs
+  and `$VAR` fs expansion are refused. Updater use does **not** seed a
+  network grant: `autoUpdater` maps to the host-owned updater (§5), because
+  application permissions cannot grant update authority and application roles
+  cannot write updater metadata (architecture 06). F09-T5 (#581) owns any
+  future trigger capability. Static analysis cannot grant OS authority.
 - CI mode (`keld build --frozen-permissions`) fails on any manifest drift — the
   lockfile discipline, applied to authority.
 
