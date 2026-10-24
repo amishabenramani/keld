@@ -14,6 +14,8 @@ mod descriptor_liveness;
 mod dev_lifecycle;
 #[path = "no_flag/macos/facade_ready.rs"]
 mod facade_ready;
+#[path = "no_flag/macos/facade_window.rs"]
+mod facade_window;
 #[path = "no_flag/macos/lifecycle.rs"]
 mod lifecycle;
 #[cfg(feature = "profile-test-hooks")]

@@ -1,4 +1,4 @@
-// @keld/kipc-transport sha256:38c197383c5ece1e6b2907b23274f9a4e7260c55dfae7d3ba1ad6804dcb06744
+// @keld/kipc-transport sha256:d4ee12c427dde69b194d41045a29bcfbe3c3a9c573e5f98e764abbb6b6e0399a
 /**
  * Canonical TypeScript kipc v2 app-link transport (KEL-136).
  *
@@ -46,22 +46,27 @@ export const FS_CHANNEL = 2;
 export const LIFECYCLE_CHANNEL = 3;
 /** Channel `auth` (`keld_ipc::channel_table::AUTH`). */
 export const AUTH_CHANNEL = 4;
+/** Channel `window` (`keld_ipc::channel_table::WINDOW`). */
+export const WINDOW_CHANNEL = 5;
 /** An allocated channel id (`keld_ipc::channel_table::CHANNEL_TABLE`). */
 export type AllocatedChannel =
   | typeof ECHO_CHANNEL
   | typeof FS_CHANNEL
   | typeof LIFECYCLE_CHANNEL
-  | typeof AUTH_CHANNEL;
+  | typeof AUTH_CHANNEL
+  | typeof WINDOW_CHANNEL;
 /** Every allocated channel id, in table order. */
 export const ALLOCATED_CHANNELS: readonly AllocatedChannel[] = Object.freeze([
   ECHO_CHANNEL,
   FS_CHANNEL,
   LIFECYCLE_CHANNEL,
   AUTH_CHANNEL,
+  WINDOW_CHANNEL,
 ]);
 /** Channels whose receive class carries host `EVENT`s (`ReceiveClass::carries_host_events`). */
 export const HOST_EVENT_CHANNELS: readonly AllocatedChannel[] = Object.freeze([
   LIFECYCLE_CHANNEL,
+  WINDOW_CHANNEL,
 ]);
 // @generated-end channel-table
 /** Mirrors `keld_ipc::APP_LINK_IO_DEADLINE` (arch/02 §7). Bun has no `SO_RCVTIMEO`. */
@@ -165,6 +170,15 @@ export const RECEIVE_POLICIES = {
   } as ReceivePolicy,
   lifecycleEventReceiver: eventReceiverOn(LIFECYCLE_CHANNEL),
 } as const;
+
+/**
+ * Host-side window CALL receiver, mirroring `ReceivePolicy::window_receiver`.
+ * Reuses the lifecycle structured CALL rules and the generated window id;
+ * Core owns authenticated principal and subscription admission.
+ */
+export function windowReceiver(): ReceivePolicy {
+  return { ...RECEIVE_POLICIES.lifecycleReceiver, channel: WINDOW_CHANNEL };
+}
 
 export function echoReplyWaiter(corr: number): ReceivePolicy {
   return {
@@ -1093,10 +1107,10 @@ export async function connectKipcSocket(
 
 /** Encodes a `u32` as an unsigned LEB128 varint. Rejects anything outside that range. */
 export function encodeVarint(n: number): Uint8Array {
-  if (!Number.isInteger(n) || n < 0 || n > 0xffff_ffff) {
+  if (typeof n !== "number" || !Number.isInteger(n) || n < 0 || n > 0xffff_ffff) {
     throw kipcError(
       "KELD-IPC-003",
-      `varint value must be an integer in [0, 4294967295], got ${n}`,
+      `varint value must be an integer in [0, 4294967295], got ${typeof n === "number" ? n : typeof n}`,
     );
   }
   const bytes: number[] = [];
@@ -1110,17 +1124,24 @@ export function encodeVarint(n: number): Uint8Array {
   return new Uint8Array(bytes);
 }
 
-function decodeVarintAt(
-  bytes: Uint8Array,
-  offset: number,
-  truncatedDetail: string,
-): [number, number];
-function decodeVarintAt(
-  bytes: Uint8Array,
-  offset: number,
-  truncatedDetail: string,
-  width: 64,
-): [bigint, number];
+/** Encodes an exact Rust u64 as an unsigned LEB128 varint without Number conversion. */
+export function encodeU64Varint(n: bigint): Uint8Array {
+  if (typeof n !== "bigint" || n < 0n || n > 0xffff_ffff_ffff_ffffn) {
+    throw kipcError("KELD-IPC-003", "u64 varint value must be a bigint in [0, 18446744073709551615]");
+  }
+  const bytes: number[] = [];
+  let value = n;
+  do {
+    let byte = Number(value & 0x7fn);
+    value >>= 7n;
+    if (value !== 0n) byte |= 0x80;
+    bytes.push(byte);
+  } while (value !== 0n);
+  return new Uint8Array(bytes);
+}
+
+function decodeVarintAt(bytes: Uint8Array, offset: number, truncatedDetail: string): [number, number];
+function decodeVarintAt(bytes: Uint8Array, offset: number, truncatedDetail: string, width: 64): [bigint, number];
 function decodeVarintAt(
   bytes: Uint8Array,
   offset: number,
@@ -2964,8 +2985,9 @@ export class WorkerLink {
  * reply: one asynchronous CALL carrying `LifecycleRequest::Quit` that never
  * parks the caller (PANEL-P2, #419: `app.quit` returns immediately), and the
  * link closes fully the moment its REPLY or typed failure settles, on every
- * OS. A call still pending then rejects with `KELD-IPC-022`, which callers
- * treat as the host drain's `KELD-IPC-024` (§4.4; both terminal, neither ran).
+ * OS. A call still pending then rejects with `KELD-IPC-022`; its execution
+ * outcome can be unknown, so callers must not replay it. A host drain's
+ * `KELD-IPC-024` is separate proof of nonexecution (§4.4, GH-531 O11).
  * The host reads EOF at once, so its post-Quit drain ends without waiting on
  * its backstop. Resolves once the REPLY is `LifecycleResponse::Quit`; any other
  * REPLY rejects with `KELD-IPC-003`, and a host ERR with its own `CallError`.
