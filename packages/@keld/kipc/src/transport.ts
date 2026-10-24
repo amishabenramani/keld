@@ -1,4 +1,4 @@
-// @keld/kipc-transport sha256:566d45eff3dc569da43786461c72a041fd92adaccf39274f6d74b0a46e3bb13b
+// @keld/kipc-transport sha256:aaf48f66ca16dfb28493103f1579a066e9d5514f9c3fba1c08b0ea97a3359ef2
 /**
  * Canonical TypeScript kipc v2 app-link transport (KEL-136).
  *
@@ -46,12 +46,14 @@ export const FS_CHANNEL = 2;
 export const LIFECYCLE_CHANNEL = 3;
 /** Channel `auth` (`keld_ipc::channel_table::AUTH`). */
 export const AUTH_CHANNEL = 4;
+/** Channel `window` (`keld_ipc::channel_table::WINDOW`). */
+export const WINDOW_CHANNEL = 5;
 /** An allocated channel id (`keld_ipc::channel_table::CHANNEL_TABLE`). */
-export type AllocatedChannel = typeof ECHO_CHANNEL | typeof FS_CHANNEL | typeof LIFECYCLE_CHANNEL | typeof AUTH_CHANNEL;
+export type AllocatedChannel = typeof ECHO_CHANNEL | typeof FS_CHANNEL | typeof LIFECYCLE_CHANNEL | typeof AUTH_CHANNEL | typeof WINDOW_CHANNEL;
 /** Every allocated channel id, in table order. */
-export const ALLOCATED_CHANNELS: readonly AllocatedChannel[] = Object.freeze([ECHO_CHANNEL, FS_CHANNEL, LIFECYCLE_CHANNEL, AUTH_CHANNEL]);
+export const ALLOCATED_CHANNELS: readonly AllocatedChannel[] = Object.freeze([ECHO_CHANNEL, FS_CHANNEL, LIFECYCLE_CHANNEL, AUTH_CHANNEL, WINDOW_CHANNEL]);
 /** Channels whose receive class carries host `EVENT`s (`ReceiveClass::carries_host_events`). */
-export const HOST_EVENT_CHANNELS: readonly AllocatedChannel[] = Object.freeze([LIFECYCLE_CHANNEL]);
+export const HOST_EVENT_CHANNELS: readonly AllocatedChannel[] = Object.freeze([LIFECYCLE_CHANNEL, WINDOW_CHANNEL]);
 // @generated-end channel-table
 /** Mirrors `keld_ipc::APP_LINK_IO_DEADLINE` (arch/02 §7). Bun has no `SO_RCVTIMEO`. */
 export const APP_LINK_IO_DEADLINE_MS = 5_000;
@@ -151,6 +153,15 @@ export const RECEIVE_POLICIES = {
   } as ReceivePolicy,
   lifecycleEventReceiver: eventReceiverOn(LIFECYCLE_CHANNEL),
 } as const;
+
+/**
+ * Host-side window CALL receiver, mirroring `ReceivePolicy::window_receiver`.
+ * Reuses the lifecycle structured CALL rules and the generated window id;
+ * Core owns authenticated principal and subscription admission.
+ */
+export function windowReceiver(): ReceivePolicy {
+  return { ...RECEIVE_POLICIES.lifecycleReceiver, channel: WINDOW_CHANNEL };
+}
 
 export function echoReplyWaiter(corr: number): ReceivePolicy {
   return { channel: ECHO_CHANNEL, kinds: [FrameKind.Reply], corr: { rule: "exactly", id: corr } };
@@ -2584,8 +2595,9 @@ export class WorkerLink {
  * reply: one asynchronous CALL carrying `LifecycleRequest::Quit` that never
  * parks the caller (PANEL-P2, #419: `app.quit` returns immediately), and the
  * link closes fully the moment its REPLY or typed failure settles, on every
- * OS. A call still pending then rejects with `KELD-IPC-022`, which callers
- * treat as the host drain's `KELD-IPC-024` (§4.4; both terminal, neither ran).
+ * OS. A call still pending then rejects with `KELD-IPC-022`; its execution
+ * outcome can be unknown, so callers must not replay it. A host drain's
+ * `KELD-IPC-024` is separate proof of nonexecution (§4.4, GH-531 O11).
  * The host reads EOF at once, so its post-Quit drain ends without waiting on
  * its backstop. Resolves once the REPLY is `LifecycleResponse::Quit`; any other
  * REPLY rejects with `KELD-IPC-003`, and a host ERR with its own `CallError`.

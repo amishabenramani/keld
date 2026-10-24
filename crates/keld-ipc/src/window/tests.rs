@@ -9,7 +9,7 @@ use super::{
     WindowResponse, WindowState,
 };
 use crate::IpcError;
-use crate::codec::{decode, encode};
+use crate::codec::{decode, encode, encode_into};
 
 const VECTORS: &str = include_str!("../../tests/fixtures/window-v0.tsv");
 const WINDOW: WindowRef = WindowRef {
@@ -67,6 +67,12 @@ fn assert_vectors<T: Serialize + DeserializeOwned + Debug + PartialEq>(
             .remove(id)
             .expect("case exists once in shared oracle");
         assert_eq!(encode(value).expect("encode payload"), bytes, "{id}");
+        let mut scratch = [0; 64];
+        assert_eq!(
+            encode_into(value, &mut scratch).expect("encode in fixed storage"),
+            bytes,
+            "{id}"
+        );
         assert_eq!(
             decode::<T>(&bytes).expect("decode literal payload"),
             *value,

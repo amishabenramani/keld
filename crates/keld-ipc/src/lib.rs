@@ -61,7 +61,9 @@ pub use bootstrap::{
 pub use call_error::{CallError, write_call_error};
 pub use echo::{ECHO_CHANNEL, EchoRequest, EchoResponse};
 pub use frame::{ChannelId, CorrelationId, FrameHeader, FrameKind, HeaderError};
-pub use lifecycle::{LIFECYCLE_CHANNEL, LifecycleEvent, LifecycleRequest, LifecycleResponse};
+pub use lifecycle::{
+    LIFECYCLE_CHANNEL, LifecycleEvent, LifecycleRequest, LifecycleResponse, SubscribeRefusal,
+};
 pub use link::AppLinkDeadlines;
 pub use receive::{AbsoluteDeadline, ReceivePolicy, ValidatedFrameHeader};
 pub use session::{
