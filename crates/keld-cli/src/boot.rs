@@ -517,24 +517,21 @@ where
     )?;
     let digest = Sha256::digest(permissions_bytes);
     let mut descriptor = serde_json::json!({
-        "schema": if facade { 2 } else { 1 },
+        "schema": 1,
         "name": name,
         "entry": entry,
+        "renderer": renderer,
         "permissions": {
             "file": PERMISSIONS_FILE,
             "content_sha256": format!("sha256:{digest:x}"),
         }
     });
-    if let Some(renderer) = renderer {
-        descriptor
-            .as_object_mut()
-            .ok_or_else(|| {
-                BootCompileError::new("boot descriptor", "generated root is not an object")
-            })?
-            .insert(
-                String::from("renderer"),
-                serde_json::Value::String(renderer),
-            );
+    if facade {
+        let object = descriptor.as_object_mut().ok_or_else(|| {
+            BootCompileError::new("boot descriptor", "generated root is not an object")
+        })?;
+        object.insert(String::from("schema"), serde_json::Value::from(2));
+        object.remove("renderer");
     }
     // Preserve the byte shape of legacy stages when no auth profile is configured.
     // A configured-but-incomplete profile is nonempty and must be carried unchanged;
@@ -1145,6 +1142,24 @@ mod tests {
         assert_eq!(
             descriptor["permissions"]["content_sha256"],
             format!("sha256:{digest:x}")
+        );
+        // Contract regression: the shipping renderer-declared descriptor is
+        // byte-identical, including the existing JSON map key order.
+        let expected = serde_json::to_vec(&serde_json::json!({
+            "schema": 1,
+            "name": "Stage Fixture",
+            "entry": "src/main.ts",
+            "renderer": "index.html",
+            "permissions": {
+                "file": "keld.permissions.jsonc",
+                "content_sha256": format!("sha256:{digest:x}"),
+            }
+        }))
+        .expect("expected schema-one bytes");
+        assert_eq!(
+            fs::read(staged.root().join("keld.boot.json")).expect("schema-one bytes"),
+            expected,
+            "a facade-only change must preserve the existing schema-one bytes"
         );
     }
 
