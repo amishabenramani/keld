@@ -2,7 +2,7 @@
 import { chmodSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { expect, test } from "bun:test";
+import { describe, expect, test } from "bun:test";
 import {
   APP_LINK_IO_DEADLINE_MS, DrainSignal, ECHO_CHANNEL, FS_CHANNEL, FrameKind, FrameReader,
   LIFECYCLE_CHANNEL, WINDOW_CHANNEL, WriteQueue, encodeCallError, withIoDeadline,
@@ -130,6 +130,7 @@ async function fsBarrier(host: Host): Promise<void> {
   await host.send(FrameKind.Reply, FS_CHANNEL, request.header.corr, Uint8Array.of(1));
 }
 
+describe.skipIf(process.platform === "win32")("LifecycleLink window consumer over a Unix host", () => {
 test("default lifecycle consumer sends no Subscribe and preserves lifecycle-only behavior", async () => {
   const host = await start("default");
   try {
@@ -328,3 +329,4 @@ for (const scenario of ["ignored-before-err", "ignored-after-err", "ignored-pres
     } finally { await host.dispose(); }
   }, TIMEOUT);
 }
+});
