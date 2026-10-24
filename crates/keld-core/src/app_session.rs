@@ -6605,7 +6605,7 @@ impl PrimaryRouterHandle {
             "application call retired by accepted lifecycle Quit",
         )?;
         self.guardian.prepare_accepted_shutdown()?;
-        {
+        let (quit_reply, window_end) = {
             let _transition = self.shutdown.transition_guard();
             if !self
                 .shutdown
@@ -6614,14 +6614,19 @@ impl PrimaryRouterHandle {
             {
                 return Ok(());
             }
+            // Attempt the owed reply before native commands, then always end
+            // managed windows. This hold prevents native receipts interleaving
+            // between accepted Quit and Ending, including on reply failure.
+            let quit_reply = self.write_quit_reply(correlation, reply);
+            let window_end = self.end_window_session_guarded();
+            (quit_reply, window_end)
+        };
+        // TailRun ends outside transition. Preserve the reply as the primary
+        // error if teardown also failed; neither result skips the other attempt.
+        if let Err(primary) = quit_reply {
+            return Err(append_app_cleanup(primary, [window_end]));
         }
-        // A native command failure must not erase the same link's owed Quit
-        // reply. The already-reserved terminal transition stopped admission.
-        self.write_quit_reply(correlation, reply)?;
-        {
-            let _transition = self.shutdown.transition_guard();
-            self.end_window_session_guarded()?;
-        }
+        window_end?;
         #[cfg(target_os = "macos")]
         let auth_retirement = self.retire_auth_for_quit(attempt);
         #[cfg(not(target_os = "macos"))]

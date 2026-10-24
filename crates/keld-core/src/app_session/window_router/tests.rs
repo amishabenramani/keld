@@ -1,11 +1,17 @@
 //! Component proof over real platform sockets and the actual Core handler/writer.
 //! Fixture identities and fake UI commands do not prove Runtime admission or native
 //! windows. Actual app-bound Subscribe admission and GH-446 Init remain separate.
-use super::super::BootstrapStream;
-use super::*;
-use keld_ipc::link::{AppLinkDeadlines as _, read_frame};
-use keld_ipc::window::{WindowEvent, WindowId};
-use keld_wv::WebviewId;
+use super::super::window_registry::WindowOwner;
+use super::super::{BootstrapStream, PrimaryCallerContext, PrimaryRouterHandle};
+use super::{WindowSession, event, native_state, subscription_refusal};
+use keld_ipc::channel_table::{Authority, ReceiveClass};
+use keld_ipc::codec::{decode, encode};
+use keld_ipc::frame::{CorrelationId, FrameKind};
+use keld_ipc::link::{AppLinkDeadlines as _, read_frame, write_frame};
+use keld_ipc::window::{Rect, WindowEvent, WindowId, WindowRequest, WindowResponse, WindowState};
+use keld_ipc::{CallError, LIFECYCLE_CHANNEL, LifecycleEvent, LifecycleResponse, SubscribeRefusal};
+use keld_wv::{AppWindowCommand, AppWindowEvent, WebviewId, WindowSnapshot};
+use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex, mpsc};
 use std::time::Duration;
 
@@ -1091,6 +1097,68 @@ fn window_router_forced_tail_marks_completion_after_managed_teardown_error() -> 
     assert!(
         fixture.handle.shutdown.tail_ended.load(Ordering::Acquire),
         "a forced tail that returned an error must publish completion"
+    );
+    Ok(())
+}
+
+#[test]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+fn window_router_failed_quit_reply_still_ends_managed_windows() -> TestResult {
+    let mut fixture = Fixture::new(Some(true))?;
+    fixture.subscribe()?;
+    fixture.ready()?;
+    fixture.build(1, 7)?;
+    let caller = fixture.caller()?;
+    let mut reader = fixture.reader()?;
+    let handle = fixture.handle.clone();
+    let worker = std::thread::spawn(move || {
+        super::super::read_primary_frames(&mut reader, &handle, &caller)
+    });
+    write_frame(
+        &mut fixture.peer,
+        FrameKind::Call,
+        0,
+        LIFECYCLE_CHANNEL,
+        CorrelationId(78),
+        &encode(&keld_ipc::LifecycleRequest::Quit)?,
+    )?;
+    let OwnerCommand::PrepareAcceptedShutdown(reply) = fixture
+        .owner_commands
+        .recv_timeout(Duration::from_secs(3))
+        .expect("actual Quit reached existing preparation owner")
+    else {
+        panic!("actual Quit must prepare its existing Runtime owner")
+    };
+    // No peer reference survives the acknowledgement: the actual reader must
+    // encounter a failed Quit reply before any UI stop hook or router fallback.
+    fixture.peer.shutdown_app_link()?;
+    drop(fixture.peer);
+    reply
+        .send(Ok(()))
+        .expect("owned preparation acknowledgement");
+    let failure = worker
+        .join()
+        .expect("actual primary reader joins")
+        .expect_err("closed peer must fail the Quit reply write");
+    assert_eq!(failure.code(), "KELD-CORE-037");
+    assert_eq!(failure.phase, "lifecycle Quit reply");
+    let serviceable = fixture
+        .handle
+        .windows
+        .as_ref()
+        .expect("managed service")
+        .lock()
+        .expect("managed registry lock")
+        .registry
+        .mark_ready();
+    let teardown = fixture.commands.try_recv();
+    assert!(
+        !serviceable,
+        "an accepted Quit reply failure must end managed windows before reader return"
+    );
+    assert_eq!(
+        teardown.expect("managed teardown was enqueued before reader return"),
+        AppWindowCommand::DestroyWindow { view: WebviewId(7) }
     );
     Ok(())
 }
