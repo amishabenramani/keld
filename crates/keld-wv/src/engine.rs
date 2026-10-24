@@ -107,8 +107,23 @@ pub enum AppWindowCommand {
 pub enum AppWindowEvent {
     /// Initial renderer navigation completed on the live backend.
     NavigationReady,
+    /// The macOS application loop delivered its actual first Init turn.
+    /// This is not inferred from the first callback, HELLO, or navigation.
+    #[cfg(target_os = "macos")]
+    HostInitialized,
     /// The primary-window count transitioned from one to zero.
     LastWindowClosed,
+}
+
+/// The only permitted source of the initial Host-to-app Ready event.
+/// Renderer-declared apps keep their historical navigation milestone.
+#[cfg(target_os = "macos")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AppReadyTrigger {
+    /// Renderer-declared boot becomes Ready only after first navigation.
+    NavigationReady,
+    /// macOS facade boot becomes Ready on the actual UI-loop Init turn.
+    HostInitialized,
 }
 
 impl Default for WebviewSpec {

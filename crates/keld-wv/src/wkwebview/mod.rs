@@ -28,13 +28,14 @@ use std::time::{Duration, Instant};
 use objc2::MainThreadMarker;
 use objc2::rc::Retained;
 use objc2_app_kit::NSWindow;
-use tao::event::{Event, WindowEvent};
+use tao::event::{Event, StartCause, WindowEvent};
 use tao::event_loop::{ControlFlow, EventLoop, EventLoopBuilder, EventLoopProxy};
 use tao::platform::run_return::EventLoopExtRunReturn;
 use tao::window::{Window, WindowBuilder};
 use wry::WebViewExtMacOS;
 
 use crate::WebviewId;
+pub use crate::engine::AppReadyTrigger;
 pub use crate::engine::{AppWindowCommand, AppWindowEvent};
 use crate::engine::{DevtoolsAction, NavTarget, Rect, WebEngine, WebviewSpec, WkWebViewEngineExt};
 use crate::error::WvError;
@@ -309,6 +310,7 @@ impl WkWebViewEngine {
             commands,
             events,
             None,
+            AppReadyTrigger::NavigationReady,
             &mut |_, _, _| Ok((true, None)),
             &mut unproved,
         )
@@ -339,6 +341,7 @@ impl WkWebViewEngine {
         commands: Receiver<AppWindowCommand>,
         events: Sender<AppWindowEvent>,
         anchor: Option<WebviewId>,
+        ready_trigger: AppReadyTrigger,
         service: &mut F,
         retains_main_custody: &mut bool,
     ) -> Result<(), WvError>
@@ -392,10 +395,20 @@ impl WkWebViewEngine {
         let mut terminal_requested = false;
         let mut closing = Vec::new();
         let mut main_owner_failure = None;
+        let mut host_init_emitted = false;
         let code = event_loop.run_return(|event, _, control_flow| {
             // The existing bridge accepts terminal intent before its proxy event.
             // One terminal state closes renderer dispatch and Native main admission.
             if terminal_intent_in_loop.load(Ordering::Acquire) {
+                terminal_requested = true;
+                destroy_renderer_bridges(&mut renderer_bridges);
+            }
+            if ready_trigger == AppReadyTrigger::HostInitialized
+                && !terminal_requested
+                && first_host_init_turn(&event, &mut host_init_emitted)
+                && events.send(AppWindowEvent::HostInitialized).is_err()
+            {
+                fatal_in_loop.store(true, Ordering::Release);
                 terminal_requested = true;
                 destroy_renderer_bridges(&mut renderer_bridges);
             }
@@ -875,6 +888,16 @@ fn is_terminal_app_event(event: &Event<'_, WkUserEvent>) -> bool {
     )
 }
 
+/// Tao may deliver Opened before the first NewEvents(Init). Only the genuine
+/// applicationDidFinishLaunching Init turn is a readiness milestone, once.
+fn first_host_init_turn(event: &Event<'_, WkUserEvent>, emitted: &mut bool) -> bool {
+    if *emitted || !matches!(event, Event::NewEvents(StartCause::Init)) {
+        return false;
+    }
+    *emitted = true;
+    true
+}
+
 fn mark_terminal_intent(intent: &AtomicBool, command: AppWindowCommand) -> bool {
     let terminal = matches!(command, AppWindowCommand::Quit | AppWindowCommand::Fatal);
     if terminal {
@@ -935,9 +958,30 @@ mod startup_tests {
     use std::sync::{Arc, Mutex};
     use std::time::{Duration, Instant};
 
-    use super::{page_load_trace_handler, run_app_wake_bridge, wry_page_load};
+    use super::{
+        WkUserEvent, first_host_init_turn, page_load_trace_handler, run_app_wake_bridge,
+        wry_page_load,
+    };
     use crate::AppWindowCommand;
     use crate::startup::{PageLoad, StartupPhase, StartupTrace, phase_for_page_load};
+    use tao::event::{Event, StartCause};
+
+    #[test]
+    fn facade_ready_is_only_the_first_real_tao_init_turn() {
+        let mut emitted = false;
+        let opened: Event<'_, WkUserEvent> = Event::Opened { urls: vec![] };
+        assert!(!first_host_init_turn(&opened, &mut emitted));
+        assert!(!emitted, "Opened can precede applicationDidFinishLaunching");
+
+        // StartCause::WaitCancelled is non-exhaustive outside Tao; an
+        // independently constructible non-Init turn checks the same boundary.
+        let later = Event::MainEventsCleared;
+        assert!(!first_host_init_turn(&later, &mut emitted));
+        let init = Event::NewEvents(StartCause::Init);
+        assert!(first_host_init_turn(&init, &mut emitted));
+        assert!(!first_host_init_turn(&init, &mut emitted));
+        assert!(!first_host_init_turn(&later, &mut emitted));
+    }
 
     #[test]
     fn wry_finished_maps_to_nav_finished_started_does_not() {

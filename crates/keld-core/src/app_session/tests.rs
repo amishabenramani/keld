@@ -28,6 +28,32 @@ use super::{ValidatedInitialWindow, WebProfileSelection, startup_resource_snapsh
 #[cfg(target_os = "macos")]
 use super::SESSION_HANDOVER;
 
+#[cfg(target_os = "macos")]
+#[test]
+fn facade_and_renderer_ready_milestones_cannot_cross_or_repeat() {
+    use super::{AppReadyTrigger, accept_boot_ready_trigger};
+
+    for expected in [
+        AppReadyTrigger::NavigationReady,
+        AppReadyTrigger::HostInitialized,
+    ] {
+        let wrong = match expected {
+            AppReadyTrigger::NavigationReady => AppReadyTrigger::HostInitialized,
+            AppReadyTrigger::HostInitialized => AppReadyTrigger::NavigationReady,
+        };
+        let mut accepted = false;
+        let foreign = accept_boot_ready_trigger(expected, wrong, &mut accepted)
+            .expect_err("foreign Ready event must fail before publication");
+        assert_eq!(foreign.code(), "KELD-CORE-044");
+        assert!(!accepted);
+        accept_boot_ready_trigger(expected, expected, &mut accepted)
+            .expect("one correct Ready event");
+        let repeated = accept_boot_ready_trigger(expected, expected, &mut accepted)
+            .expect_err("duplicate Ready is fatal, not silently replayed");
+        assert_eq!(repeated.code(), "KELD-CORE-044");
+    }
+}
+
 #[cfg(any(target_os = "linux", windows))]
 use super::{
     DirectSessionNext, FsDispatchSession, FsInFlight, HandoverClock, HandoverWait,

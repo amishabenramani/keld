@@ -135,8 +135,8 @@ use keld_wv::webkitgtk::WebKitGtkEngine;
 use keld_wv::webview2::WebView2Engine;
 #[cfg(target_os = "macos")]
 use keld_wv::wkwebview::{
-    AppWindowCommand, AppWindowEvent, RendererBridgeEndpoint, RendererBridgeOutcome,
-    RendererBridgeRequest, WkWebViewEngine,
+    AppReadyTrigger, AppWindowCommand, AppWindowEvent, RendererBridgeEndpoint,
+    RendererBridgeOutcome, RendererBridgeRequest, WkWebViewEngine,
 };
 #[cfg(any(target_os = "linux", windows))]
 use keld_wv::{AppWindowCommand, AppWindowEvent};
@@ -2343,29 +2343,20 @@ fn run_app(
         initial_window,
         auth_configuration,
     } = boot;
-    // A descriptor may be fully validated before the native Init-turn
-    // implementation is available. Never manufacture a host-owned window
-    // for a facade boot (nor emit a false Ready).
-    let renderer_html = match initial_window {
-        ValidatedInitialWindow::Renderer(html) => html,
-        ValidatedInitialWindow::None => {
-            return Err(HostAppError::new(
-                "KELD-CORE-037",
-                "facade runtime activation",
-                "schema-2 Host Init/Ready and first-window registration are not installed",
-                "Keep this facade boot staged until the native Ready/window runtime is integrated.",
-            )
-            .into());
+    let (html, ready_trigger) = match initial_window {
+        ValidatedInitialWindow::Renderer(renderer_html) => {
+            let html = String::from_utf8(renderer_html).map_err(|source| {
+                HostAppError::new(
+                    "KELD-CORE-036",
+                    "renderer",
+                    source.to_string(),
+                    "Regenerate the stage with UTF-8 renderer HTML.",
+                )
+            })?;
+            (Some(html), AppReadyTrigger::NavigationReady)
         }
+        ValidatedInitialWindow::None => (None, AppReadyTrigger::HostInitialized),
     };
-    let html = String::from_utf8(renderer_html).map_err(|source| {
-        HostAppError::new(
-            "KELD-CORE-036",
-            "renderer",
-            source.to_string(),
-            "Regenerate the stage with UTF-8 renderer HTML.",
-        )
-    })?;
     // Authenticate the running package, or mint one explicit dev nonce, before
     // starting the guardian child, listener, app-link, or WebKit engine.
     let profile_selection = macos_profile_selection(dev_lease.as_ref())?;
@@ -2443,6 +2434,7 @@ fn run_app(
                 &window_events_rx,
                 &router_handle,
                 &commands_for_events,
+                ready_trigger,
                 |_| Ok(()),
             )
         })
@@ -2490,38 +2482,46 @@ fn run_app(
             .map_err(HostRunFailure::from);
         }
     };
-    let spec = WebviewSpec {
-        title: name,
-        initial: NavTarget::Html(html),
-        ..WebviewSpec::default()
-    };
-    WINDOW_ATTEMPTS.fetch_add(1, Ordering::AcqRel);
-    // The bridge admits exactly the host's echo entry (GH-508 §4.6); the
-    // request loop below re-checks the same id before dispatch.
-    let renderer_endpoint = RendererBridgeEndpoint::new(
-        renderer_requests_tx,
-        renderer_outcomes_rx,
-        keld_ipc::channel_table::ECHO.wire_id(),
-    );
-    let primary_view = match engine.create_app_with_renderer_bridge(
-        &spec,
-        window_events_tx.clone(),
-        renderer_endpoint,
-    ) {
-        Ok(view) => view,
-        Err(source) => {
-            let primary = app_webview_error("initial renderer bridge window", &source);
-            return cleanup_window_start_failure(
-                &primary,
-                guard_snapshot,
-                window_events_tx,
-                event_coordinator,
-                Some(renderer_dispatch),
-                (router, presentation_owner, main_thread),
-                guardian_owner,
-            )
-            .map_err(HostRunFailure::from);
+    // Only renderer-declared boots create a host window. In a facade boot the
+    // first window belongs to the application's later authenticated Create.
+    // Do not fabricate an invisible anchor: a zero-window Init is observable.
+    let primary_view = if let Some(html) = html {
+        let spec = WebviewSpec {
+            title: name,
+            initial: NavTarget::Html(html),
+            ..WebviewSpec::default()
+        };
+        WINDOW_ATTEMPTS.fetch_add(1, Ordering::AcqRel);
+        // GH-508: the renderer bridge admits only the host's echo channel.
+        let renderer_endpoint = RendererBridgeEndpoint::new(
+            renderer_requests_tx,
+            renderer_outcomes_rx,
+            keld_ipc::channel_table::ECHO.wire_id(),
+        );
+        match engine.create_app_with_renderer_bridge(
+            &spec,
+            window_events_tx.clone(),
+            renderer_endpoint,
+        ) {
+            Ok(view) => Some(view),
+            Err(source) => {
+                let primary = app_webview_error("initial renderer bridge window", &source);
+                return cleanup_window_start_failure(
+                    &primary,
+                    guard_snapshot,
+                    window_events_tx,
+                    event_coordinator,
+                    Some(renderer_dispatch),
+                    (router, presentation_owner, main_thread),
+                    guardian_owner,
+                )
+                .map_err(HostRunFailure::from);
+            }
         }
+    } else {
+        drop(renderer_requests_tx);
+        drop(renderer_outcomes_rx);
+        None
     };
     let presentation_router = router.handle();
     let mut presentation_unproved = None;
@@ -2529,7 +2529,8 @@ fn run_app(
     let window_result = engine.run_app_until_quit_with_main_owner(
         window_commands_rx,
         window_events_tx,
-        Some(primary_view),
+        primary_view,
+        ready_trigger,
         &mut |main_thread, anchor, stopping| {
             let stop_scope = presentation_router.prepare_auth_presentation_drive(stopping);
             match presentation_owner.drive(main_thread, &mut |_| anchor(), stop_scope) {
@@ -4486,13 +4487,30 @@ fn coordinate_window_events(
     events: &Receiver<AppWindowEvent>,
     router: &PrimaryRouterHandle,
     commands: &Sender<AppWindowCommand>,
+    #[cfg(target_os = "macos")] ready_trigger: AppReadyTrigger,
     mut on_ready: impl FnMut(&PrimaryRouterHandle) -> Result<(), HostAppError>,
 ) -> Result<(), HostAppError> {
+    #[cfg(target_os = "macos")]
+    let mut ready_signaled = false;
+    #[cfg(target_os = "macos")]
+    let mut signal_once = |observed| {
+        accept_boot_ready_trigger(ready_trigger, observed, &mut ready_signaled)?;
+        router.signal_ready().and_then(|()| on_ready(router))
+    };
     let mut process_event = |event| {
         let result = match event {
             AppWindowEvent::NavigationReady => {
-                router.signal_ready().and_then(|()| on_ready(router))
+                #[cfg(target_os = "macos")]
+                {
+                    signal_once(AppReadyTrigger::NavigationReady)
+                }
+                #[cfg(not(target_os = "macos"))]
+                {
+                    router.signal_ready().and_then(|()| on_ready(router))
+                }
             }
+            #[cfg(target_os = "macos")]
+            AppWindowEvent::HostInitialized => signal_once(AppReadyTrigger::HostInitialized),
             AppWindowEvent::LastWindowClosed => router.signal_last_window_closed().map(drop),
         };
         if let Err(error) = result {
@@ -4523,6 +4541,24 @@ fn coordinate_window_events(
     while let Ok(event) = events.recv() {
         process_event(event)?;
     }
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn accept_boot_ready_trigger(
+    expected: AppReadyTrigger,
+    observed: AppReadyTrigger,
+    already_signaled: &mut bool,
+) -> Result<(), HostAppError> {
+    if expected != observed || *already_signaled {
+        return Err(HostAppError::new(
+            "KELD-CORE-044",
+            "application Ready milestone",
+            format!("unexpected or repeated {observed:?} for {expected:?} boot"),
+            "Deliver exactly the selected boot kind's first Ready milestone.",
+        ));
+    }
+    *already_signaled = true;
     Ok(())
 }
 
