@@ -300,6 +300,11 @@ mod tests {
         assert!(package.contains("\"name\": \"demo\""), "{package}");
         assert!(package.contains("\"type\": \"module\""), "{package}");
         assert!(!package.contains("{{name}}"), "{package}");
+        let manifest: serde_json::Value = serde_json::from_str(&package).expect("package JSON");
+        assert!(
+            manifest["scripts"].get("lint").is_none(),
+            "native lint remains deferred until stable Bun supports it: {package}"
+        );
 
         let html = fs::read_to_string(root.join("index.html")).expect("html");
         assert!(html.contains("<title>demo</title>"), "{html}");
