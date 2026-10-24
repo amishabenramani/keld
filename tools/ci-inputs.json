@@ -315,8 +315,7 @@
     {
       "owner": "Repository hygiene",
       "outputs": [
-        "local_hygiene",
-        "input_hygiene"
+        "local_hygiene"
       ],
       "inputs": [
         "bunfig.toml",
@@ -458,9 +457,10 @@
         "*/.[pP][rR][eE][tT][tT][iI][eE][rR][rR][cC].[tT][oO][mM][lL]",
         ".[eE][dD][iI][tT][oO][rR][cC][oO][nN][fF][iI][gG]",
         "*/.[eE][dD][iI][tT][oO][rR][cC][oO][nN][fF][iI][gG]",
-        ".[pP][rR][eE][tT][tT][iI][eE][rR][iI][gG][nN][oO][rR][eE]"
+        ".[pP][rR][eE][tT][tT][iI][eE][rR][iI][gG][nN][oO][rR][eE]",
+        "packages/@keld/kipc/tsconfig.json"
       ],
-      "contract": "Direct native Bun JS/TS globs use root bunfig.toml and native ignores, including nonignored untracked files locally. The existing echo generator explicitly checks freshness/stamps. Its exact Rust enum/channel inputs select the same gate; hosted hygiene is additively routed by ci_changes.sh. Exact Bun 1.4.4 config basenames use ASCII case classes for Windows discovery; ancestor configs apply recursively, while .prettierignore is cwd-only. This same consumer selects hosted hygiene through input_hygiene.",
+      "contract": "Direct native Bun JS/TS globs use root bunfig.toml and native ignores, including nonignored untracked files locally. The existing echo generator explicitly checks freshness/stamps. Its exact Rust enum/channel inputs select the same gate; hosted hygiene is additively routed by ci_changes.sh. Exact Bun 1.4.4 config basenames use ASCII case classes for Windows discovery; ancestor configs apply recursively, while .prettierignore is cwd-only. This same consumer selects hosted hygiene through input_hygiene. Its existing hosted hygiene output also admits the workflow-tool compiler-input assertion when the KIPC compiler project changes.",
       "reader_set": "policy-readers"
     }
   ],
@@ -511,7 +511,7 @@
         "packages/*",
         "justfile"
       ],
-      "sha256": "23f89a09efe7baec94d7b5012a7e92cf135b925665d5f6c96f438e631f141258"
+      "sha256": "d368794bceddbaa4fd3568524f0837568d9aad53dd248b1dbca8c76db8f75090"
     },
     "policy-readers": {
       "patterns": [

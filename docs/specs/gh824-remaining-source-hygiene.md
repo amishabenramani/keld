@@ -17,7 +17,7 @@ No blanket `tools/` move, stamped transport split, or other-owner branch edits.
 
 ## 2. Spec refs
 
-`docs/architecture/06-runtime-and-tooling.md` ?1 owns the supervisor contract.
+`docs/architecture/06-runtime-and-tooling.md` section 1 owns the supervisor contract.
 Closed KEL-134 and KEL-225 own bounded capture and its literal host-retention
 ceiling. `crates/keld-runtime/AGENTS.md` keeps process-family/unsafe ownership
 unchanged. `.agents/test-layout.md` owns test placement and discovery safeguards.
