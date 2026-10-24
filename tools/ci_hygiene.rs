@@ -532,6 +532,22 @@ fn check_serial_rust_gates(root: &Path) -> Result<(), String> {
             ));
         }
     }
+    for recipe in ["ci", "ci-full"] {
+        if !expanded_gates(&justfile, recipe)
+            .is_some_and(|gates| gates.iter().filter(|gate| **gate == "js-fmt-check").count() == 1)
+            || just_recipe_commands(&justfile, "js-fmt-check").as_deref()
+                != Some(&[
+                    "bun packages/@keld/kipc/scripts/echo-codegen.ts check".to_owned(),
+                    "bun fmt --no-script --check \"**/*.{js,jsx,mjs,cjs,ts,tsx,mts,cts}\""
+                        .to_owned(),
+                ])
+        {
+            return Err(format!(
+                "CI-HYGIENE: `{recipe}` must run js-fmt-check exactly once with codegen freshness and the direct native JS/TS formatter check."
+            ));
+        }
+    }
+
     Ok(())
 }
 
@@ -1236,7 +1252,7 @@ fn check_msrv_avoids_apt(text: &str) -> Result<(), String> {
 fn check_bun_setup_steps(text: &str, job: &str) -> Result<(), String> {
     let invalid = || {
         format!(
-            "CI-HYGIENE: `{WORKFLOW}` `{job}` must have at least one `oven-sh/setup-bun` step, and every such step must pin its own `with.bun-version` to `1.4.2`. Use direct block-style steps and inputs; unrelated job text is not a runtime pin."
+            "CI-HYGIENE: `{WORKFLOW}` `{job}` must have at least one `oven-sh/setup-bun` step, and every such step must pin its own `with.bun-version` to `1.4.4`. Use direct block-style steps and inputs; unrelated job text is not a runtime pin."
         )
     };
     let literal_key = |key: &str| {
@@ -1337,7 +1353,7 @@ fn check_bun_setup_steps(text: &str, job: &str) -> Result<(), String> {
             .iter()
             .filter(|(key, _)| key == "bun-version")
             .collect();
-        if pins.len() != 1 || pins[0].1.trim_matches(['\'', '"']) != "1.4.2" {
+        if pins.len() != 1 || pins[0].1.trim_matches(['\'', '"']) != "1.4.4" {
             return Err(invalid());
         }
     }
@@ -1356,6 +1372,31 @@ fn check_bun_setup_steps(text: &str, job: &str) -> Result<(), String> {
 /// suites the router selected — is tracked in KEL-115, because it is a
 /// behavioural property and no reading of the text settles it.
 fn check_bun_test_job(text: &str) -> Result<(), String> {
+    let format_step = "Native JavaScript formatting";
+    let format_block = workflow_job_block(text, "hygiene").and_then(|job| {
+        (workflow_direct_named_step_count(&job, format_step) == 1)
+            .then(|| workflow_direct_named_step_block(&job, format_step))
+            .flatten()
+    });
+    let format_lines = format_block.as_deref().map(|block| {
+        block
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty() && !line.starts_with('#'))
+            .collect::<Vec<_>>()
+    });
+    if format_lines
+        != Some(vec![
+            "- name: Native JavaScript formatting",
+            "run: |",
+            "bun packages/@keld/kipc/scripts/echo-codegen.ts check",
+            "bun fmt --no-script --check \"**/*.{js,jsx,mjs,cjs,ts,tsx,mts,cts}\"",
+        ])
+    {
+        return Err(format!(
+            "CI-HYGIENE: `{WORKFLOW}` hygiene needs one unconditional codegen freshness and direct native JS/TS formatting step."
+        ));
+    }
     let Some(block) = workflow_job_block(text, "bun-test") else {
         return Err(format!(
             "CI-HYGIENE: `{WORKFLOW}` has no `bun-test` job. The `packages/` TypeScript suites need a lane of their own: the Bun install inside `check` exists so Rust tests can spawn Bun children and never runs `bun test`."

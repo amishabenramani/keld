@@ -14,6 +14,7 @@
     "rustfmt.toml",
     "deny.toml",
     "justfile",
+    "bunfig.toml",
     "llms.txt",
     "llms-full.txt",
     "crates/*",
@@ -82,6 +83,7 @@
         "local_typescript"
       ],
       "inputs": [
+        "bunfig.toml",
         "crates/keld-ipc/tests/fixtures/*",
         "crates/keld-cli/templates/*",
         "crates/*.ts",
@@ -94,9 +96,62 @@
         "crates/keld-native/src/fs.rs",
         "crates/keld-native/src/auth/mod.rs",
         "crates/keld-native/tests/fixtures/fs-payload-v0.tsv",
-        "crates/keld-wv/src/wkwebview/macos_bridge.rs"
+        "crates/keld-wv/src/wkwebview/macos_bridge.rs",
+        ".[gG][iI][tT][iI][gG][nN][oO][rR][eE]",
+        "*/.[gG][iI][tT][iI][gG][nN][oO][rR][eE]",
+        ".[oO][xX][fF][mM][tT][rR][cC].[jJ][sS][oO][nN]",
+        "*/.[oO][xX][fF][mM][tT][rR][cC].[jJ][sS][oO][nN]",
+        ".[oO][xX][fF][mM][tT][rR][cC].[jJ][sS][oO][nN][cC]",
+        "*/.[oO][xX][fF][mM][tT][rR][cC].[jJ][sS][oO][nN][cC]",
+        "[oO][xX][fF][mM][tT].[cC][oO][nN][fF][iI][gG].[tT][sS]",
+        "*/[oO][xX][fF][mM][tT].[cC][oO][nN][fF][iI][gG].[tT][sS]",
+        "[oO][xX][fF][mM][tT].[cC][oO][nN][fF][iI][gG].[mM][tT][sS]",
+        "*/[oO][xX][fF][mM][tT].[cC][oO][nN][fF][iI][gG].[mM][tT][sS]",
+        "[pP][aA][cC][kK][aA][gG][eE].[jJ][sS][oO][nN]",
+        "*/[pP][aA][cC][kK][aA][gG][eE].[jJ][sS][oO][nN]",
+        "[pP][aA][cC][kK][aA][gG][eE].[yY][aA][mM][lL]",
+        "*/[pP][aA][cC][kK][aA][gG][eE].[yY][aA][mM][lL]",
+        ".[pP][rR][eE][tT][tT][iI][eE][rR][rR][cC]",
+        "*/.[pP][rR][eE][tT][tT][iI][eE][rR][rR][cC]",
+        ".[pP][rR][eE][tT][tT][iI][eE][rR][rR][cC].[jJ][sS][oO][nN]",
+        "*/.[pP][rR][eE][tT][tT][iI][eE][rR][rR][cC].[jJ][sS][oO][nN]",
+        ".[pP][rR][eE][tT][tT][iI][eE][rR][rR][cC].[yY][mM][lL]",
+        "*/.[pP][rR][eE][tT][tT][iI][eE][rR][rR][cC].[yY][mM][lL]",
+        ".[pP][rR][eE][tT][tT][iI][eE][rR][rR][cC].[yY][aA][mM][lL]",
+        "*/.[pP][rR][eE][tT][tT][iI][eE][rR][rR][cC].[yY][aA][mM][lL]",
+        ".[pP][rR][eE][tT][tT][iI][eE][rR][rR][cC].[jJ][sS][oO][nN]5",
+        "*/.[pP][rR][eE][tT][tT][iI][eE][rR][rR][cC].[jJ][sS][oO][nN]5",
+        ".[pP][rR][eE][tT][tT][iI][eE][rR][rR][cC].[jJ][sS]",
+        "*/.[pP][rR][eE][tT][tT][iI][eE][rR][rR][cC].[jJ][sS]",
+        "[pP][rR][eE][tT][tT][iI][eE][rR].[cC][oO][nN][fF][iI][gG].[jJ][sS]",
+        "*/[pP][rR][eE][tT][tT][iI][eE][rR].[cC][oO][nN][fF][iI][gG].[jJ][sS]",
+        ".[pP][rR][eE][tT][tT][iI][eE][rR][rR][cC].[tT][sS]",
+        "*/.[pP][rR][eE][tT][tT][iI][eE][rR][rR][cC].[tT][sS]",
+        "[pP][rR][eE][tT][tT][iI][eE][rR].[cC][oO][nN][fF][iI][gG].[tT][sS]",
+        "*/[pP][rR][eE][tT][tT][iI][eE][rR].[cC][oO][nN][fF][iI][gG].[tT][sS]",
+        ".[pP][rR][eE][tT][tT][iI][eE][rR][rR][cC].[mM][jJ][sS]",
+        "*/.[pP][rR][eE][tT][tT][iI][eE][rR][rR][cC].[mM][jJ][sS]",
+        "[pP][rR][eE][tT][tT][iI][eE][rR].[cC][oO][nN][fF][iI][gG].[mM][jJ][sS]",
+        "*/[pP][rR][eE][tT][tT][iI][eE][rR].[cC][oO][nN][fF][iI][gG].[mM][jJ][sS]",
+        ".[pP][rR][eE][tT][tT][iI][eE][rR][rR][cC].[mM][tT][sS]",
+        "*/.[pP][rR][eE][tT][tT][iI][eE][rR][rR][cC].[mM][tT][sS]",
+        "[pP][rR][eE][tT][tT][iI][eE][rR].[cC][oO][nN][fF][iI][gG].[mM][tT][sS]",
+        "*/[pP][rR][eE][tT][tT][iI][eE][rR].[cC][oO][nN][fF][iI][gG].[mM][tT][sS]",
+        ".[pP][rR][eE][tT][tT][iI][eE][rR][rR][cC].[cC][jJ][sS]",
+        "*/.[pP][rR][eE][tT][tT][iI][eE][rR][rR][cC].[cC][jJ][sS]",
+        "[pP][rR][eE][tT][tT][iI][eE][rR].[cC][oO][nN][fF][iI][gG].[cC][jJ][sS]",
+        "*/[pP][rR][eE][tT][tT][iI][eE][rR].[cC][oO][nN][fF][iI][gG].[cC][jJ][sS]",
+        ".[pP][rR][eE][tT][tT][iI][eE][rR][rR][cC].[cC][tT][sS]",
+        "*/.[pP][rR][eE][tT][tT][iI][eE][rR][rR][cC].[cC][tT][sS]",
+        "[pP][rR][eE][tT][tT][iI][eE][rR].[cC][oO][nN][fF][iI][gG].[cC][tT][sS]",
+        "*/[pP][rR][eE][tT][tT][iI][eE][rR].[cC][oO][nN][fF][iI][gG].[cC][tT][sS]",
+        ".[pP][rR][eE][tT][tT][iI][eE][rR][rR][cC].[tT][oO][mM][lL]",
+        "*/.[pP][rR][eE][tT][tT][iI][eE][rR][rR][cC].[tT][oO][mM][lL]",
+        ".[eE][dD][iI][tT][oO][rR][cC][oO][nN][fF][iI][gG]",
+        "*/.[eE][dD][iI][tT][oO][rR][cC][oO][nN][fF][iI][gG]",
+        ".[pP][rR][eE][tT][tT][iI][eE][rR][iI][gG][nN][oO][rR][eE]"
       ],
-      "contract": "Bun reads IPC constants and CLI templates, generates and drift-checks the channel-table region from crates/keld-ipc/src/channel_table.rs, scans production TypeScript and the macOS bridge's injected scripts for channel-id literals, echo declaration ownership scans every production .ts under crates and packages, and transport tests census every public-tree filename ending receiver-semantics-v0.tsv. The bounded native FS generator/check reads crates/keld-native/src/fs.rs, and its semantic tests read crates/keld-native/tests/fixtures/fs-payload-v0.tsv. The bounded native auth generator/check and its semantic tests read crates/keld-native/src/auth/mod.rs. Source-reader drift invalidates exclusions.",
+      "contract": "Bun reads IPC constants and CLI templates, generates and drift-checks the channel-table region from crates/keld-ipc/src/channel_table.rs, scans production TypeScript and the macOS bridge's injected scripts for channel-id literals, echo declaration ownership scans every production .ts under crates and packages, and transport tests census every public-tree filename ending receiver-semantics-v0.tsv. The bounded native FS generator/check reads crates/keld-native/src/fs.rs, and its semantic tests read crates/keld-native/tests/fixtures/fs-payload-v0.tsv. The bounded native auth generator/check and its semantic tests read crates/keld-native/src/auth/mod.rs. Source-reader drift invalidates exclusions. Native formatter configuration and ignore inputs also control destination-aware stdin normalization used by codegen and generated freshness tests.",
       "reader_set": "bun-readers"
     },
     {
@@ -263,6 +318,8 @@
         "local_hygiene"
       ],
       "inputs": [
+        "bunfig.toml",
+        "crates/keld-cli/templates/hello/.gitignore",
         ".github/*",
         ".gitignore",
         ".config/*",
@@ -325,6 +382,84 @@
       ],
       "contract": "",
       "reader_set": "policy-readers"
+    },
+    {
+      "owner": "Native JavaScript formatting",
+      "outputs": [
+        "local_js-fmt-check",
+        "input_hygiene"
+      ],
+      "inputs": [
+        ".[gG][iI][tT][iI][gG][nN][oO][rR][eE]",
+        "*/.[gG][iI][tT][iI][gG][nN][oO][rR][eE]",
+        "*.js",
+        "*.jsx",
+        "*.mjs",
+        "*.cjs",
+        "*.ts",
+        "*.tsx",
+        "*.mts",
+        "*.cts",
+        "justfile",
+        "bunfig.toml",
+        "crates/keld-ipc/src/echo.rs",
+        "crates/keld-ipc/src/channel_table.rs",
+        "crates/keld-native/src/fs.rs",
+        "crates/keld-native/src/auth/mod.rs",
+        ".[oO][xX][fF][mM][tT][rR][cC].[jJ][sS][oO][nN]",
+        "*/.[oO][xX][fF][mM][tT][rR][cC].[jJ][sS][oO][nN]",
+        ".[oO][xX][fF][mM][tT][rR][cC].[jJ][sS][oO][nN][cC]",
+        "*/.[oO][xX][fF][mM][tT][rR][cC].[jJ][sS][oO][nN][cC]",
+        "[oO][xX][fF][mM][tT].[cC][oO][nN][fF][iI][gG].[tT][sS]",
+        "*/[oO][xX][fF][mM][tT].[cC][oO][nN][fF][iI][gG].[tT][sS]",
+        "[oO][xX][fF][mM][tT].[cC][oO][nN][fF][iI][gG].[mM][tT][sS]",
+        "*/[oO][xX][fF][mM][tT].[cC][oO][nN][fF][iI][gG].[mM][tT][sS]",
+        "[pP][aA][cC][kK][aA][gG][eE].[jJ][sS][oO][nN]",
+        "*/[pP][aA][cC][kK][aA][gG][eE].[jJ][sS][oO][nN]",
+        "[pP][aA][cC][kK][aA][gG][eE].[yY][aA][mM][lL]",
+        "*/[pP][aA][cC][kK][aA][gG][eE].[yY][aA][mM][lL]",
+        ".[pP][rR][eE][tT][tT][iI][eE][rR][rR][cC]",
+        "*/.[pP][rR][eE][tT][tT][iI][eE][rR][rR][cC]",
+        ".[pP][rR][eE][tT][tT][iI][eE][rR][rR][cC].[jJ][sS][oO][nN]",
+        "*/.[pP][rR][eE][tT][tT][iI][eE][rR][rR][cC].[jJ][sS][oO][nN]",
+        ".[pP][rR][eE][tT][tT][iI][eE][rR][rR][cC].[yY][mM][lL]",
+        "*/.[pP][rR][eE][tT][tT][iI][eE][rR][rR][cC].[yY][mM][lL]",
+        ".[pP][rR][eE][tT][tT][iI][eE][rR][rR][cC].[yY][aA][mM][lL]",
+        "*/.[pP][rR][eE][tT][tT][iI][eE][rR][rR][cC].[yY][aA][mM][lL]",
+        ".[pP][rR][eE][tT][tT][iI][eE][rR][rR][cC].[jJ][sS][oO][nN]5",
+        "*/.[pP][rR][eE][tT][tT][iI][eE][rR][rR][cC].[jJ][sS][oO][nN]5",
+        ".[pP][rR][eE][tT][tT][iI][eE][rR][rR][cC].[jJ][sS]",
+        "*/.[pP][rR][eE][tT][tT][iI][eE][rR][rR][cC].[jJ][sS]",
+        "[pP][rR][eE][tT][tT][iI][eE][rR].[cC][oO][nN][fF][iI][gG].[jJ][sS]",
+        "*/[pP][rR][eE][tT][tT][iI][eE][rR].[cC][oO][nN][fF][iI][gG].[jJ][sS]",
+        ".[pP][rR][eE][tT][tT][iI][eE][rR][rR][cC].[tT][sS]",
+        "*/.[pP][rR][eE][tT][tT][iI][eE][rR][rR][cC].[tT][sS]",
+        "[pP][rR][eE][tT][tT][iI][eE][rR].[cC][oO][nN][fF][iI][gG].[tT][sS]",
+        "*/[pP][rR][eE][tT][tT][iI][eE][rR].[cC][oO][nN][fF][iI][gG].[tT][sS]",
+        ".[pP][rR][eE][tT][tT][iI][eE][rR][rR][cC].[mM][jJ][sS]",
+        "*/.[pP][rR][eE][tT][tT][iI][eE][rR][rR][cC].[mM][jJ][sS]",
+        "[pP][rR][eE][tT][tT][iI][eE][rR].[cC][oO][nN][fF][iI][gG].[mM][jJ][sS]",
+        "*/[pP][rR][eE][tT][tT][iI][eE][rR].[cC][oO][nN][fF][iI][gG].[mM][jJ][sS]",
+        ".[pP][rR][eE][tT][tT][iI][eE][rR][rR][cC].[mM][tT][sS]",
+        "*/.[pP][rR][eE][tT][tT][iI][eE][rR][rR][cC].[mM][tT][sS]",
+        "[pP][rR][eE][tT][tT][iI][eE][rR].[cC][oO][nN][fF][iI][gG].[mM][tT][sS]",
+        "*/[pP][rR][eE][tT][tT][iI][eE][rR].[cC][oO][nN][fF][iI][gG].[mM][tT][sS]",
+        ".[pP][rR][eE][tT][tT][iI][eE][rR][rR][cC].[cC][jJ][sS]",
+        "*/.[pP][rR][eE][tT][tT][iI][eE][rR][rR][cC].[cC][jJ][sS]",
+        "[pP][rR][eE][tT][tT][iI][eE][rR].[cC][oO][nN][fF][iI][gG].[cC][jJ][sS]",
+        "*/[pP][rR][eE][tT][tT][iI][eE][rR].[cC][oO][nN][fF][iI][gG].[cC][jJ][sS]",
+        ".[pP][rR][eE][tT][tT][iI][eE][rR][rR][cC].[cC][tT][sS]",
+        "*/.[pP][rR][eE][tT][tT][iI][eE][rR][rR][cC].[cC][tT][sS]",
+        "[pP][rR][eE][tT][tT][iI][eE][rR].[cC][oO][nN][fF][iI][gG].[cC][tT][sS]",
+        "*/[pP][rR][eE][tT][tT][iI][eE][rR].[cC][oO][nN][fF][iI][gG].[cC][tT][sS]",
+        ".[pP][rR][eE][tT][tT][iI][eE][rR][rR][cC].[tT][oO][mM][lL]",
+        "*/.[pP][rR][eE][tT][tT][iI][eE][rR][rR][cC].[tT][oO][mM][lL]",
+        ".[eE][dD][iI][tT][oO][rR][cC][oO][nN][fF][iI][gG]",
+        "*/.[eE][dD][iI][tT][oO][rR][cC][oO][nN][fF][iI][gG]",
+        ".[pP][rR][eE][tT][tT][iI][eE][rR][iI][gG][nN][oO][rR][eE]"
+      ],
+      "contract": "Direct native Bun JS/TS globs use root bunfig.toml and native ignores, including nonignored untracked files locally. The existing echo generator explicitly checks freshness/stamps. Its exact Rust enum/channel inputs select the same gate; hosted hygiene is additively routed by ci_changes.sh. Exact Bun 1.4.4 config basenames use ASCII case classes for Windows discovery; ancestor configs apply recursively, while .prettierignore is cwd-only. This same consumer selects hosted hygiene through input_hygiene.",
+      "reader_set": "policy-readers"
     }
   ],
   "reader_sets": {
@@ -367,14 +502,14 @@
         "crates/keld-host/tests/no_flag/macos/public_fs/project.rs",
         "crates/keld-host/tests/no_flag/macos/public_fs.rs"
       ],
-      "sha256": "6143a438ade19c2fe34db696d21dbe1d86611d3d82f8dd509bde3581b172626f"
+      "sha256": "191cd8fccefe4450184eab928079112708216e3c816d6baf31b9b94b59255cd6"
     },
     "bun-readers": {
       "patterns": [
         "packages/*",
         "justfile"
       ],
-      "sha256": "c73984ebfe54bd00a73730144cb233de51537a3e534dba1174fd6a23301303af"
+      "sha256": "241527962899bd365ae25cf1e55f92db894392a19c6c5c0f8b3a48ba4e44725c"
     },
     "policy-readers": {
       "patterns": [
@@ -384,14 +519,14 @@
         ".githooks/*",
         "rust-toolchain.toml"
       ],
-      "sha256": "8af228a90af76551a7394a7d9412335060708a0d49b2eb886870fe93807f9be1"
+      "sha256": "2af68b5dcbe7cdcb5178bf88caeab734c800bd29b83964ad096a54ff9109f69a"
     },
     "audit-readers": {
       "patterns": [
         "docs/audits/*.py",
         "justfile"
       ],
-      "sha256": "a70c8b84f33ef15fd318d4106545f1e478f5e0bccac960725e9e84424739a972"
+      "sha256": "ad9a8171d95dd644cd8eb158636154b77b0eebf5b7de047b0d2cb30310070c2a"
     },
     "rustdoc-readers": {
       "patterns": [
@@ -401,13 +536,13 @@
         "rust-toolchain.toml",
         ".cargo/*"
       ],
-      "sha256": "351c3937ba0c959202150c799a6ff4a9f6b8b6cacb31e5ba8c0fe0fc0e2d7a05"
+      "sha256": "fe8a29d9cfa9c0eff7712be2d3745cc10756969b75ed08d05a4fed03a5ea7b4d"
     },
     "dependency-command": {
       "patterns": [
         "justfile"
       ],
-      "sha256": "24a8d7f3870f0bdaf25f98349b4989cd4cfd0db3ac0937e9d528f6d0d7c4e3c0"
+      "sha256": "6c86664370001bcdc8d3e6f3386ea17a293edad7ea158a4c4695adb73d6ed94f"
     },
     "status-test-readers": {
       "patterns": [
@@ -417,7 +552,7 @@
         "rust-toolchain.toml",
         "justfile"
       ],
-      "sha256": "484701848db56826a51f13835a738a39f5767e9cb82b4317b26c82c4ae284d47"
+      "sha256": "265e56c85ca7f438be8f5d39dc7c763d58b950ad36e7a184693d96124b2dc40b"
     }
   },
   "live_inputs": {

@@ -51,13 +51,11 @@ included_files() {
 # block enclosing an indented line is the last less-indented line above it that
 # is still open; only a macro invocation (`name! {`) is accepted there.
 path_files() {
-    # Initialize even when grep finds no matches. On Bash 5 with `set -u`,
-    # querying the length of an uninitialized empty array aborts instead of
-    # reaching the fail-closed no-declarations check below.
     local -a declaring=()
-    # macOS still ships Bash 3.2, which has no `mapfile`. Read into the same
-    # array without changing discovery or the fail-closed checks below.
-    while IFS= read -r file; do declaring+=("$file"); done < <(git grep -lE \
+    local entry
+    while IFS= read -r entry; do
+        declaring[${#declaring[@]}]="$entry"
+    done < <(git grep -lE \
         '^[[:space:]]*#[[:space:]]*\[[[:space:]]*(path[[:space:]]*[]=]|cfg_attr[[:space:]]*\(.*[(,[:space:]]path[[:space:]]*=)' \
         -- '*.rs' || true)
     ((${#declaring[@]})) || return 0
