@@ -89,6 +89,16 @@ describe("ready and whenReady (pass cells)", () => {
   });
 });
 
+describe("late Ready replay (red until GH-446)", () => {
+  test("app.ready.api-first-late-listener today: facade replays ready to a listener added after the underlying API observed Host Ready", () => {
+    expect(observe("app_surface_api_ready_first.ts")).toEqual({
+      code: 0,
+      stderr: "",
+      lines: ["GH445_API_FIRST_READY hostReady=true lateListener=1"],
+    });
+  });
+});
+
 describe("session facts (red until GH-452)", () => {
   test("app.get-path.user-data-default today: the facade has no getPath, so app.getPath('userData') throws a TypeError", () => {
     expectNoMethod("getPath", "userData");

@@ -2,12 +2,16 @@
   "schema": "keld.compat.denominator/v1",
   "panel": "showcase",
   "corpus_id": "electron-app-v1",
-  "corpus_sha256": "sha256:56956b043913c70564d8013c1c13688ef751134a834be0f815e1777e141df8d8",
+  "corpus_sha256": "sha256:e774d811029b02c98b966d75d4fa40339bf8f94238185981197599e6fc45ba05",
   "kind": "primary_workflow",
   "cells": [
     {
       "operation_id": "app.ready.emitted-once",
       "oracle_id": "electron-v44.4.5.app.event-ready-emitted-once"
+    },
+    {
+      "operation_id": "app.ready.api-first-late-listener",
+      "oracle_id": "electron-v44.4.5.app.event-ready-no-late-replay"
     },
     {
       "operation_id": "app.when-ready.is-ready-agreement",

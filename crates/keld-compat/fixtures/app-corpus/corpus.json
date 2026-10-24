@@ -35,6 +35,23 @@
       "negative_control": "Emitting ready before host Ready, or emitting it again when the link delivers host Ready a second time, makes the mapped case fail."
     },
     {
+      "operation_id": "app.ready.api-first-late-listener",
+      "oracle_id": "electron-v44.4.5.app.event-ready-no-late-replay",
+      "doc_citation": {
+        "url": "https://github.com/electron/electron/blob/694f45852a0f1726cd23bfd379854de489cccb65/docs/api/app.md#event-ready",
+        "quote": "Emitted once, when Electron has finished initializing.",
+        "quote_sha256": "sha256:7a2bff1feb8305c9ec9e082bf905b09a5b05c69586060bace3ddb17134118123"
+      },
+      "expected_verdict": "fail",
+      "implementing_ticket": "GH-446",
+      "platforms": [
+        "macos"
+      ],
+      "test_path": "packages/@keld/electron/src/app-surface.test.ts",
+      "test_name": "app.ready.api-first-late-listener today: facade replays ready to a listener added after the underlying API observed Host Ready",
+      "negative_control": "Current RED: Host Ready is observed by the API before a facade ready listener registers, but the facade delivers a late callback. If production suppresses that replay, this mapped present-behaviour test must fail until GH-446 inverts it and flips this verdict to pass."
+    },
+    {
       "operation_id": "app.when-ready.is-ready-agreement",
       "oracle_id": "electron-v44.4.5.app.when-ready-is-ready-agreement",
       "doc_citation": {
