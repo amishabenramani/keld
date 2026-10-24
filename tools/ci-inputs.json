@@ -315,7 +315,8 @@
     {
       "owner": "Repository hygiene",
       "outputs": [
-        "local_hygiene"
+        "local_hygiene",
+        "input_hygiene"
       ],
       "inputs": [
         "bunfig.toml",
@@ -328,9 +329,10 @@
         "AGENTS.md",
         "*/AGENTS.md",
         "crates/keld-ipc/channel_allocations.txt",
-        "crates/keld-ipc/src/channel_table.rs"
+        "crates/keld-ipc/src/channel_table.rs",
+        "packages/@keld/kipc/tsconfig.json"
       ],
-      "contract": "ci-hygiene check also compares crates/keld-ipc/channel_allocations.txt with its merge base (GH-508 append-only rule); the baseline and channel_table.rs select it, as the hosted router does.",
+      "contract": "ci-hygiene check also compares crates/keld-ipc/channel_allocations.txt with its merge base (GH-508 append-only rule); the baseline and channel_table.rs select it, as the hosted router does. The workflow-tool compiler admission test reads the KIPC compiler project; edits to that project select both hosted and local hygiene.",
       "reader_set": "policy-readers"
     },
     {
@@ -519,7 +521,7 @@
         ".githooks/*",
         "rust-toolchain.toml"
       ],
-      "sha256": "dc64bb738027acd4102f787857172e0269e67abdf12c53cea451f0fd4625561b"
+      "sha256": "a0af6bca71dd74332aa9f4adb024cebd4dd67cf341945ab56973c2c1dc0b2234"
     },
     "audit-readers": {
       "patterns": [
