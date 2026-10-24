@@ -1,13 +1,14 @@
 #!/usr/bin/env bash
 # rustfmt coverage for Rust files `cargo fmt` cannot reach (#834, #1055): the
 # one copy of this check. `cargo fmt --all` follows `mod` items only and never
-# expands macros, so it misses two kinds of file:
+# expands macros and only visits Cargo targets, so it misses:
 #   - a file pulled in by a literal `include!("x.rs")`, and every `mod` file
 #     declared inside it;
 #   - a file declared by `#[path = "x.rs"] mod m;` inside a macro body (for
 #     example `keld_native_fs_observer_items! { ... }`), and every `mod` file
-#     declared inside it, `#[path]` or not.
-# Both kinds are discovered from every tracked `.rs` file, so a new declaration,
+#     declared inside it, `#[path]` or not;
+#   - standalone Git-tracked Rust tooling, including future tools subdirectories.
+# The include/path kinds are discovered from every tracked `.rs` file, so a new declaration,
 # and a `#[path]` nested in a `#[path]` file, is covered without editing a list.
 # Each file is handed to rustfmt, which then also follows the `mod` items
 # declared in it. A `#[path]` file `cargo fmt` already reaches is checked twice,
@@ -103,7 +104,7 @@ path_files() {
 }
 
 run() {
-    local mode="$1" included declared
+    local mode="$1" included declared standalone path
     cd "$(git rev-parse --show-toplevel)"
     included="$(included_files)"
     if [[ -z "$included" ]]; then
@@ -120,8 +121,14 @@ run() {
     fi
     local -a args=(--edition "$edition")
     [[ "$mode" == check ]] && args+=(--check)
-    # shellcheck disable=SC2046 -- one path per line, no spaces in tracked paths
-    rustfmt "${args[@]}" $(printf '%s\n%s\n' "$included" "$declared" | sort -u)
+    # Cargo has no targets for standalone tools. Git owns their scope, not a
+    # hand-maintained filename list or untracked/ignored scratch directories.
+    standalone="$(git -c core.quotePath=false ls-files -- 'tools/*.rs')"
+    local -a files=()
+    while IFS= read -r path; do
+        [[ -z "$path" ]] || files[${#files[@]}]="$path"
+    done < <(printf '%s\n%s\n%s\n' "$included" "$declared" "$standalone" | sort -u)
+    rustfmt "${args[@]}" "${files[@]}"
 }
 
 if [[ "${1:-}" == test ]]; then
@@ -153,6 +160,9 @@ items! {
 RS
     printf '#[path = "inner.rs"]\nmod inner;\nfn outer() {}\n' >crates/demo/src/native/outer.rs
     printf 'fn inner() {}\n' >crates/demo/src/native/inner.rs
+    mkdir -p tools/nested
+    printf 'fn standalone() {}\n' >tools/standalone.rs
+    printf 'fn nested_tool() {}\n' >"tools/nested/standalone tool.rs"
     git add -A >/dev/null
     cp -R crates "$temp/.pristine"
     reset() { # restore the formatted fixture, tree and index
@@ -170,6 +180,24 @@ RS
     }
 
     check || { echo "FAIL: formatted fixture was rejected" >&2; cat "$temp/out" >&2; exit 1; }
+    # Standalone tools are not Cargo targets and have no include/path caller.
+    printf 'fn   standalone(   ) {}\n' >tools/standalone.rs
+    expect_fail "drift in a tracked standalone tool" 'standalone.rs'
+    tools/fmt_included.sh >/dev/null
+    check || { echo "FAIL: write mode did not format the standalone tool" >&2; exit 1; }
+    # A future domain subdirectory must not need a second maintained list.
+    printf 'fn   nested_tool(   ) {}\n' >"tools/nested/standalone tool.rs"
+    expect_fail "drift in a tracked nested tool" 'standalone tool.rs'
+    tools/fmt_included.sh >/dev/null
+    check || { echo "FAIL: write mode did not format the nested tool" >&2; exit 1; }
+    # Scratch is outside the tracked contract: neither check nor write adopts it.
+    printf 'fn   scratch(   ) {}\n' >tools/untracked.rs
+    cp tools/untracked.rs "$temp/untracked-original"
+    check || { echo "FAIL: untracked tool was admitted into check scope" >&2; exit 1; }
+    tools/fmt_included.sh >/dev/null
+    cmp -s tools/untracked.rs "$temp/untracked-original" || {
+        echo "FAIL: write mode modified an untracked tool" >&2; exit 1;
+    }
     # Negative control 1: cargo fmt cannot see the include!d file at all.
     printf 'fn split(   ) {}\n' >>crates/demo/src/tests/split.rs
     expect_fail "drift in an include!d file"
