@@ -17,12 +17,12 @@ use super::{
     LifecycleEvent, MAX_BOOT_BYTES, ManifestError, Mutex, Ordering, PERMISSIONS_FILE,
     PendingFsCall, PlatformPrimaryOwnerHandle, PrimaryLinkIdentity, PrimaryRouter,
     PrimaryRouterHandle, Receiver, SESSION_CLI_LEASE_LOST, SESSION_LIFECYCLE_QUIT, SESSION_RUNNING,
-    SessionShutdownState, ValidatedInitialWindow, admit_kipc_transport_sidecar, app_detail, io,
-    load_verified_manifest, mpsc, parse_boot_bytes, thread, validate_from_root, write_frame,
+    SessionShutdownState, admit_kipc_transport_sidecar, app_detail, io, load_verified_manifest,
+    mpsc, parse_boot_bytes, thread, validate_from_root, write_frame,
 };
 
 #[cfg(any(target_os = "macos", windows))]
-use super::{WebProfileSelection, startup_resource_snapshot};
+use super::{ValidatedInitialWindow, WebProfileSelection, startup_resource_snapshot};
 
 // The every-OS `finish_tail` per-cause test also runs on macOS.
 #[cfg(target_os = "macos")]
