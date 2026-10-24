@@ -2,7 +2,7 @@
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { expect, test } from "bun:test";
-import { WINDOW_CHANNEL } from "../../kipc/src/transport.ts";
+import { APP_LINK_IO_DEADLINE_MS, WINDOW_CHANNEL, withIoDeadline } from "../../kipc/src/transport.ts";
 import { encodeWindowEvent, type WindowEvent, type WindowRef } from "./window-codec.ts";
 import { WindowSource } from "./window-source.ts";
 
@@ -226,3 +226,24 @@ test("multiple host windows keep independent focus facts and stable host-id orde
   accept(source, literal("event-destroyed"));
   expect(source.get(other)).toEqual({ window: other, state: STATE, pending_close: null, host_destroyed: false });
 });
+
+test("standalone source releases replaced and ended snapshot graphs using the same Bun executable", async () => {
+  const runtime = { version: Bun.version, revision: Bun.revision, platform: process.platform, arch: process.arch };
+  const child = Bun.spawn([process.execPath, join(import.meta.dir, "window-source-release.test-role.ts"), Buffer.from(literal("event-created")).toString("hex"), runtime.version, runtime.revision, runtime.platform, runtime.arch], {
+    stdin: "ignore", stdout: "pipe", stderr: "pipe",
+  });
+  try {
+    const [exit, stdout, stderr] = await withIoDeadline(Promise.all([
+      child.exited, new Response(child.stdout).text(), new Response(child.stderr).text(),
+    ]), APP_LINK_IO_DEADLINE_MS);
+    expect({ exit, stderr }).toEqual({ exit: 0, stderr: "" });
+    expect(JSON.parse(stdout)).toEqual({
+      runtime,
+      replacement: { trackedGraphs: 33, oldObjectsLive: 0, currentObjectsLive: 4, sourceAlive: true, externalSnapshotAlive: true, census: 2 },
+      end: { oldObjectsLive: 0, currentObjectsLive: 0, sourceAlive: true, externalSnapshotAlive: true, readsDenied: true },
+    });
+  } finally {
+    if (child.exitCode === null) child.kill();
+    await child.exited;
+  }
+}, APP_LINK_IO_DEADLINE_MS * 2);
