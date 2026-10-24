@@ -1,27 +1,48 @@
 /** Internal host-fact mirror (GH-531 §4.d); deliberately not attached to a link. */
-import { WINDOW_CHANNEL, linkError, type KeldCallError } from "../../kipc/src/transport.ts";
+import {
+  WINDOW_CHANNEL,
+  linkError,
+  type KeldCallError,
+} from "../../kipc/src/transport.ts";
 import type { MirrorSource } from "./mirror.ts";
 import {
   decodeWindowEvent,
-  type Rect, type WindowEvent, type WindowRef, type WindowState,
+  type Rect,
+  type WindowEvent,
+  type WindowRef,
+  type WindowState,
 } from "./window-codec.ts";
 
 /** Source-owned immutable host facts; Electron-facing tombstones are separate. */
 export interface WindowSnapshot {
   readonly window: Readonly<WindowRef>;
-  readonly state: Readonly<Omit<WindowState, "bounds">> & { readonly bounds: Readonly<Rect> };
+  readonly state: Readonly<Omit<WindowState, "bounds">> & {
+    readonly bounds: Readonly<Rect>;
+  };
   readonly pending_close: bigint | null;
   readonly host_destroyed: boolean;
 }
 
-function snapshot(window: WindowRef, state: WindowState, pending_close: bigint | null, host_destroyed: boolean): WindowSnapshot {
+function snapshot(
+  window: WindowRef,
+  state: WindowState,
+  pending_close: bigint | null,
+  host_destroyed: boolean,
+): WindowSnapshot {
   // Copy every object: neither retained dispatch facts nor caller snapshots own
   // aliases into mutable map state, or into the transport's payload storage.
   return Object.freeze({
     window: Object.freeze({ id: window.id, incarnation: window.incarnation }),
     state: Object.freeze({
-      bounds: Object.freeze({ x: state.bounds.x, y: state.bounds.y, width: state.bounds.width, height: state.bounds.height }),
-      focused: state.focused, maximized: state.maximized, full_screen: state.full_screen,
+      bounds: Object.freeze({
+        x: state.bounds.x,
+        y: state.bounds.y,
+        width: state.bounds.width,
+        height: state.bounds.height,
+      }),
+      focused: state.focused,
+      maximized: state.maximized,
+      full_screen: state.full_screen,
     }),
     pending_close,
     host_destroyed,
@@ -46,7 +67,9 @@ export class WindowSource implements MirrorSource<WindowEvent> {
   #failureCode: string | undefined;
   #failureMessage = "";
 
-  constructor(onFact: (fact: WindowEvent) => void) { this.#onFact = onFact; }
+  constructor(onFact: (fact: WindowEvent) => void) {
+    this.#onFact = onFact;
+  }
 
   #diagnostic(code: string): KeldCallError {
     const error = linkError(code, "");
@@ -57,12 +80,17 @@ export class WindowSource implements MirrorSource<WindowEvent> {
   }
 
   #requireLive(): void {
-    if (this.#failureCode !== undefined) throw this.#diagnostic(this.#failureCode);
+    if (this.#failureCode !== undefined)
+      throw this.#diagnostic(this.#failureCode);
   }
 
   #reject(): KeldCallError {
-    if (this.#failureCode !== undefined) return this.#diagnostic(this.#failureCode);
-    const error = linkError("KELD-IPC-005", "window mirror rejected a host fact. Check the host window pair and codec before restarting the role.");
+    if (this.#failureCode !== undefined)
+      return this.#diagnostic(this.#failureCode);
+    const error = linkError(
+      "KELD-IPC-005",
+      "window mirror rejected a host fact. Check the host window pair and codec before restarting the role.",
+    );
     this.#failureMessage = error.message;
     this.#failureCode = error.code;
     return error;
@@ -90,27 +118,53 @@ export class WindowSource implements MirrorSource<WindowEvent> {
   apply(fact: WindowEvent): void {
     this.#requireLive();
     try {
-      if (fact.window.id === 0 || fact.window.incarnation === 0n) throw this.#reject();
+      if (fact.window.id === 0 || fact.window.incarnation === 0n)
+        throw this.#reject();
       const previous = this.#windows.get(fact.window.id);
       if (fact.variant === "Created") {
         if (previous) throw this.#reject();
-        this.#windows.set(fact.window.id, snapshot(fact.window, fact.state, fact.pending_close, false));
+        this.#windows.set(
+          fact.window.id,
+          snapshot(fact.window, fact.state, fact.pending_close, false),
+        );
         return;
       }
-      if (!previous || previous.window.incarnation !== fact.window.incarnation || previous.host_destroyed) throw this.#reject();
+      if (
+        !previous ||
+        previous.window.incarnation !== fact.window.incarnation ||
+        previous.host_destroyed
+      )
+        throw this.#reject();
       let state: WindowState = previous.state;
       let pending_close = previous.pending_close;
       let host_destroyed = false;
       switch (fact.variant) {
-        case "Bounds": state = { ...state, bounds: fact.bounds }; break;
-        case "Focus": state = { ...state, focused: fact.focused }; break;
-        case "Maximized": state = { ...state, maximized: fact.maximized }; break;
-        case "FullScreen": state = { ...state, full_screen: fact.full_screen }; break;
-        case "CloseRequested": pending_close = fact.close_seq; break;
-        case "Destroyed": pending_close = null; host_destroyed = true; break;
-        default: throw this.#reject();
+        case "Bounds":
+          state = { ...state, bounds: fact.bounds };
+          break;
+        case "Focus":
+          state = { ...state, focused: fact.focused };
+          break;
+        case "Maximized":
+          state = { ...state, maximized: fact.maximized };
+          break;
+        case "FullScreen":
+          state = { ...state, full_screen: fact.full_screen };
+          break;
+        case "CloseRequested":
+          pending_close = fact.close_seq;
+          break;
+        case "Destroyed":
+          pending_close = null;
+          host_destroyed = true;
+          break;
+        default:
+          throw this.#reject();
       }
-      this.#windows.set(fact.window.id, snapshot(fact.window, state, pending_close, host_destroyed));
+      this.#windows.set(
+        fact.window.id,
+        snapshot(fact.window, state, pending_close, host_destroyed),
+      );
     } catch {
       throw this.#reject();
     }
@@ -132,7 +186,9 @@ export class WindowSource implements MirrorSource<WindowEvent> {
   /** Immutable host snapshots, including host-destroyed entries, in host-id order. */
   all(): readonly WindowSnapshot[] {
     this.#requireLive();
-    return Object.freeze([...this.#windows.values()].sort((a, b) => a.window.id - b.window.id));
+    return Object.freeze(
+      [...this.#windows.values()].sort((a, b) => a.window.id - b.window.id),
+    );
   }
 
   /** Called by the future link owner only after its retained-record drain. */

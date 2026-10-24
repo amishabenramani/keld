@@ -7,6 +7,14 @@
  */
 import { dispatchApplicationCall } from "./channels.ts";
 import { LifecycleLink } from "./link.ts";
+import { linkError } from "../../kipc/src/transport.ts";
+import type {
+  WindowEvent,
+  WindowRef,
+  WindowRequest,
+  WindowResponse,
+} from "./window-codec.ts";
+import type { WindowSnapshot } from "./window-source.ts";
 
 export type Unsubscribe = () => void;
 
@@ -32,9 +40,22 @@ let readyWaiters: ReadyWaiter[] = [];
  * of retrying into `KELD-IPC-005`.
  */
 let linkPromise: Promise<LifecycleLink> | undefined;
+let connectedLink: LifecycleLink | undefined;
 
 let nextListenerId = 1;
 const lastWindowClosedListeners = new Map<number, () => void>();
+const windowFactListeners = new Set<(fact: WindowEvent) => void>();
+
+function onWindowFact(fact: WindowEvent): void {
+  for (const listener of [...windowFactListeners]) {
+    try {
+      listener(fact);
+    } catch (error) {
+      // One application's event callback cannot stop later Host facts.
+      console.error("KELD window listener error:", error);
+    }
+  }
+}
 
 function onHostReady(): void {
   if (hostReady) return;
@@ -85,6 +106,10 @@ function ensureLink(): Promise<LifecycleLink> {
   linkPromise = LifecycleLink.connect(envLink, {
     onReady: onHostReady,
     onLastWindowClosed,
+    onConnected: (session) => {
+      connectedLink = session;
+    },
+    onWindowFact,
     onApplicationCall: dispatchApplicationCall,
     onLinkDead: failReadyWaiters,
   }).catch((err: unknown) => {
@@ -160,6 +185,52 @@ export const app: AppLifecycle = {
     return sendQuit();
   },
 };
+
+/** The same host-confirmed mirror exposed as a read-only facade snapshot. */
+export function getWindowSnapshot(ref: WindowRef): WindowSnapshot | undefined {
+  if (!hostReady) return undefined;
+  return connectedLink?.windowSource?.get(ref);
+}
+
+/** Returns host identities, never locally allocated BrowserWindow ids. */
+export function getWindowSnapshots(): readonly WindowSnapshot[] {
+  if (!hostReady) return [];
+  return connectedLink?.windowSource?.all() ?? [];
+}
+
+/** Observe window facts only after their state was applied by the one WorkerLink. */
+export function onWindowFactApplied(
+  listener: (fact: WindowEvent) => void,
+): Unsubscribe {
+  windowFactListeners.add(listener);
+  return () => {
+    windowFactListeners.delete(listener);
+  };
+}
+
+/** Host-minted synchronous Create / Destroy, unavailable until the full Ready barrier. */
+export function invokeWindowBlocking(request: WindowRequest): WindowResponse {
+  if (!hostReady || !connectedLink?.windowSource) {
+    throw linkError(
+      "KELD-CORE-040",
+      "native window access requires Host Ready and accepted replay",
+    );
+  }
+  return connectedLink.callWindowBlocking(request);
+}
+
+/** Asynchronous setters and close verdicts do not block the application's event loop. */
+export function invokeWindow(request: WindowRequest): Promise<WindowResponse> {
+  if (!hostReady || !connectedLink?.windowSource) {
+    return Promise.reject(
+      linkError(
+        "KELD-CORE-040",
+        "native window access requires Host Ready and accepted replay",
+      ),
+    );
+  }
+  return connectedLink.callWindow(request);
+}
 
 /** Package-private FS invocation; public exports expose only typed read/write. */
 export async function invokeFs(payload: Uint8Array): Promise<Uint8Array> {

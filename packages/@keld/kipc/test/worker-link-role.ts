@@ -31,7 +31,10 @@ import {
   type WorkerLinkOptions,
   type WorkerReceiveTable,
 } from "../src/transport.ts";
-import { openWorkerLinkForTest, type WorkerLinkTestHooks } from "../src/test-hooks.ts";
+import {
+  openWorkerLinkForTest,
+  type WorkerLinkTestHooks,
+} from "../src/test-hooks.ts";
 import { attachMirror, type MirrorSource } from "../../api/src/mirror.ts";
 import { MIRROR_FACT_MARKER, mirrorRetention } from "./mirror-retention.ts";
 
@@ -139,7 +142,12 @@ function reportOrder(key: string, seqs: readonly number[]): void {
 }
 
 /** Resolves once `n` events have reached the listener `collect` returns. */
-function collector(n: number): { seqs: number[]; accept: (seq: number) => void; listener: (payload: Uint8Array) => void; all: Promise<void> } {
+function collector(n: number): {
+  seqs: number[];
+  accept: (seq: number) => void;
+  listener: (payload: Uint8Array) => void;
+  all: Promise<void>;
+} {
   const seqs: number[] = [];
   let resolve: () => void = () => undefined;
   const all = new Promise<void>((r) => {
@@ -234,8 +242,14 @@ async function wakeRule(): Promise<void> {
   attachMirror(link, {
     channel: LIFECYCLE_CHANNEL,
     decode: seqOf,
-    apply(seq) { mirror = seq; log.push(`applier:${mirror}`); },
-    dispatch(seq) { log.push(`listener:${seq}`); events.accept(seq); },
+    apply(seq) {
+      mirror = seq;
+      log.push(`applier:${mirror}`);
+    },
+    dispatch(seq) {
+      log.push(`listener:${seq}`);
+      events.accept(seq);
+    },
   });
   let timerCallbacks = 0;
   setTimeout(() => {
@@ -253,18 +267,32 @@ async function wakeRule(): Promise<void> {
 
 // GH-531/GH-1142: opaque fixture facts use the existing admitted lifecycle
 // channel. This proves the generic mirror, not production window subscription.
-function mirrorValues(mode: "identity" | "primitives" | "reentrant" | "duplicate"): () => Promise<void> {
+function mirrorValues(
+  mode: "identity" | "primitives" | "reentrant" | "duplicate",
+): () => Promise<void> {
   return async () => {
     const { link, control } = await open();
     type Fact = { seq: number } | null | undefined | 0;
     const applied = new Map<number, Fact>();
     const events = collector(mode === "reentrant" ? 6 : 3);
-    let decodes = 0, applies = 0, dispatches = 0, inFlight = 0, boundChecks = 0, secondDispatches = 0;
-    let receiverExact = true, objectExact = true, primitiveExact = true, boundValid = true;
-    let callbacksCaptured = true, payloadsExact = true;
+    let decodes = 0,
+      applies = 0,
+      dispatches = 0,
+      inFlight = 0,
+      boundChecks = 0,
+      secondDispatches = 0;
+    let receiverExact = true,
+      objectExact = true,
+      primitiveExact = true,
+      boundValid = true;
+    let callbacksCaptured = true,
+      payloadsExact = true;
     const observed: string[] = [];
     const checkBound = (): number => {
-      const matchingRetained = (word(control, WORKER_LINK_CONTROL.W_RECS) - word(control, WORKER_LINK_CONTROL.R_RECS)) >>> 0;
+      const matchingRetained =
+        (word(control, WORKER_LINK_CONTROL.W_RECS) -
+          word(control, WORKER_LINK_CONTROL.R_RECS)) >>>
+        0;
       const held = applies - dispatches + inFlight;
       if (held > matchingRetained) boundValid = false;
       boundChecks += 1;
@@ -277,7 +305,9 @@ function mirrorValues(mode: "identity" | "primitives" | "reentrant" | "duplicate
         const seq = seqOf(payload);
         if (mode === "identity" && seq !== 0) payloadsExact = false;
         decodes += 1;
-        return mode === "primitives" ? ([undefined, null, 0] as const)[seq] : { seq };
+        return mode === "primitives"
+          ? ([undefined, null, 0] as const)[seq]
+          : { seq };
       },
       apply(fact) {
         if (this !== source) receiverExact = false;
@@ -289,39 +319,91 @@ function mirrorValues(mode: "identity" | "primitives" | "reentrant" | "duplicate
         // Report observer failures to the independent Rust oracle. Throwing here
         // would be a user-listener failure and could strand the fixture's wait.
         if (this !== source) receiverExact = false;
-        if (!applied.has(dispatches) || !Object.is(applied.get(dispatches), fact)) objectExact = false;
-        observed.push(fact !== null && typeof fact === "object" ? `object:${fact.seq}` : String(fact));
+        if (
+          !applied.has(dispatches) ||
+          !Object.is(applied.get(dispatches), fact)
+        )
+          objectExact = false;
+        observed.push(
+          fact !== null && typeof fact === "object"
+            ? `object:${fact.seq}`
+            : String(fact),
+        );
         const seq = dispatches;
         applied.delete(seq);
         dispatches += 1;
         inFlight += 1;
         try {
           checkBound();
-          if (mode === "primitives" && !Object.is(fact, ([undefined, null, 0] as const)[seq])) primitiveExact = false;
+          if (
+            mode === "primitives" &&
+            !Object.is(fact, ([undefined, null, 0] as const)[seq])
+          )
+            primitiveExact = false;
           if (mode === "reentrant" && seq === 0) {
-            report("mirror-nested-reply", decoder.decode(link.callBlocking(ECHO_CHANNEL, text("mirror-nested"), 30_000)));
+            report(
+              "mirror-nested-reply",
+              decoder.decode(
+                link.callBlocking(ECHO_CHANNEL, text("mirror-nested"), 30_000),
+              ),
+            );
             report("mirror-nested-held", checkBound());
-            report("mirror-nested-retained", (word(control, WORKER_LINK_CONTROL.W_RECS) - word(control, WORKER_LINK_CONTROL.R_RECS)) >>> 0);
+            report(
+              "mirror-nested-retained",
+              (word(control, WORKER_LINK_CONTROL.W_RECS) -
+                word(control, WORKER_LINK_CONTROL.R_RECS)) >>>
+                0,
+            );
           }
           events.accept(seq);
-        } finally { inFlight -= 1; }
+        } finally {
+          inFlight -= 1;
+        }
       },
     };
     attachMirror(link, source);
     if (mode === "duplicate") {
-      expectThrow("mirror-duplicate", () => attachMirror(link, { ...source, dispatch() { secondDispatches += 1; } }));
+      expectThrow("mirror-duplicate", () =>
+        attachMirror(link, {
+          ...source,
+          dispatch() {
+            secondDispatches += 1;
+          },
+        }),
+      );
     }
     // Replacement callbacks report a capture failure but preserve the observation
     // path, so the host sees a direct mismatch instead of a fixture timeout.
-    const originalDecode = source.decode, originalApply = source.apply, originalDispatch = source.dispatch;
-    source.decode = (payload) => { callbacksCaptured = false; return originalDecode.call(source, payload); };
-    source.apply = (fact) => { callbacksCaptured = false; originalApply.call(source, fact); };
-    source.dispatch = (fact) => { callbacksCaptured = false; originalDispatch.call(source, fact); };
-    report("mirror-reply", decoder.decode(link.callBlocking(ECHO_CHANNEL, text("mirror-values"), 30_000)));
+    const originalDecode = source.decode,
+      originalApply = source.apply,
+      originalDispatch = source.dispatch;
+    source.decode = (payload) => {
+      callbacksCaptured = false;
+      return originalDecode.call(source, payload);
+    };
+    source.apply = (fact) => {
+      callbacksCaptured = false;
+      originalApply.call(source, fact);
+    };
+    source.dispatch = (fact) => {
+      callbacksCaptured = false;
+      originalDispatch.call(source, fact);
+    };
+    report(
+      "mirror-reply",
+      decoder.decode(
+        link.callBlocking(ECHO_CHANNEL, text("mirror-values"), 30_000),
+      ),
+    );
     report("mirror-applies-at-return", applies);
     report("mirror-dispatches-at-return", dispatches);
     await events.all;
-    report("mirror-healthy", decoder.decode(await link.call(ECHO_CHANNEL, text("mirror-healthy"), 30_000)));
+    report(
+      "mirror-healthy",
+      decoder.decode(
+        await link.call(ECHO_CHANNEL, text("mirror-healthy"), 30_000),
+      ),
+    );
     report("mirror-receiver-exact", receiverExact);
     report("mirror-object-exact", objectExact);
     report("mirror-primitive-exact", primitiveExact);
@@ -348,7 +430,9 @@ async function mirrorRelease(): Promise<void> {
   // no Array Index edges. No fact-valued observer arrays/maps are introduced.
   const anchors: Record<string, Fact> = {};
   const events = collector(3);
-  let decodes = 0, applies = 0, getter = -1;
+  let decodes = 0,
+    applies = 0,
+    getter = -1;
   attachMirror(link, {
     channel: LIFECYCLE_CHANNEL,
     decode(payload): Fact {
@@ -358,10 +442,20 @@ async function mirrorRelease(): Promise<void> {
       decodes += 1;
       return fact;
     },
-    apply(fact) { getter = fact.seq; applies += 1; },
-    dispatch(fact) { events.accept(fact.seq); },
+    apply(fact) {
+      getter = fact.seq;
+      applies += 1;
+    },
+    dispatch(fact) {
+      events.accept(fact.seq);
+    },
   });
-  report("mirror-release-reply", decoder.decode(link.callBlocking(ECHO_CHANNEL, text("mirror-release"), 30_000)));
+  report(
+    "mirror-release-reply",
+    decoder.decode(
+      link.callBlocking(ECHO_CHANNEL, text("mirror-release"), 30_000),
+    ),
+  );
   report("mirror-release-getter", getter);
   report("mirror-release-listeners-at-return", events.seqs.length);
   const before = mirrorRetention(Bun.generateHeapSnapshot());
@@ -373,23 +467,49 @@ async function mirrorRelease(): Promise<void> {
   const after = mirrorRetention(Bun.generateHeapSnapshot());
   report("mirror-release-after-facts", after.facts);
   report("mirror-release-after-indexed", after.indexedEdges);
-  report("mirror-release-anchors", Object.keys(anchors).map((key) => anchors[key].seq).join(","));
+  report(
+    "mirror-release-anchors",
+    Object.keys(anchors)
+      .map((key) => anchors[key].seq)
+      .join(","),
+  );
   report("mirror-release-decodes", decodes);
   report("mirror-release-applies", applies);
   reportOrder("mirror-release", events.seqs);
-  report("mirror-release-healthy", decoder.decode(await link.call(ECHO_CHANNEL, text("mirror-release-healthy"), 30_000)));
+  report(
+    "mirror-release-healthy",
+    decoder.decode(
+      await link.call(ECHO_CHANNEL, text("mirror-release-healthy"), 30_000),
+    ),
+  );
 }
 
-function mirrorFailure(mode: "decode" | "apply" | "earlier-answer" | "prior-close"): () => Promise<void> {
+function mirrorFailure(
+  mode: "decode" | "apply" | "earlier-answer" | "prior-close",
+): () => Promise<void> {
   return async () => {
-    let resumeDispatch: () => void = () => { throw new Error("dispatch was not retained"); };
+    let resumeDispatch: () => void = () => {
+      throw new Error("dispatch was not retained");
+    };
     let dispatchReady: () => void = () => undefined;
-    const ready = new Promise<void>((resolve) => { dispatchReady = resolve; });
-    let hold = mode === "prior-close";
-    const { link, control } = await open({}, {
-      deferDispatch(task) { if (hold) { resumeDispatch = task; dispatchReady(); } else task(); },
+    const ready = new Promise<void>((resolve) => {
+      dispatchReady = resolve;
     });
-    let decodes = 0, attempts = 0, applies = 0;
+    let hold = mode === "prior-close";
+    const { link, control } = await open(
+      {},
+      {
+        deferDispatch(task) {
+          if (hold) {
+            resumeDispatch = task;
+            dispatchReady();
+          } else task();
+        },
+      },
+    );
+    let decodes = 0,
+      attempts = 0,
+      applies = 0;
     const events = collector(1);
     type Fact = { [MIRROR_FACT_MARKER]: object; seq: number };
     // Keep decoded facts alive without adding indexed observer references, so a
@@ -401,19 +521,25 @@ function mirrorFailure(mode: "decode" | "apply" | "earlier-answer" | "prior-clos
       decode(payload) {
         const seq = seqOf(payload);
         decodes += 1;
-        if (seq === 1 && mode !== "apply") throw kipcError("KELD-IPC-003", "second fixture record is undecodable");
+        if (seq === 1 && mode !== "apply")
+          throw kipcError(
+            "KELD-IPC-003",
+            "second fixture record is undecodable",
+          );
         const fact = { [MIRROR_FACT_MARKER]: {}, seq };
         anchors[String(seq)] = fact;
         return fact;
       },
       apply(fact) {
         attempts += 1;
-        if (fact.seq === 1) throw kipcError("KELD-IPC-003", "second fixture apply fails");
+        if (fact.seq === 1)
+          throw kipcError("KELD-IPC-003", "second fixture apply fails");
         applies += 1;
         applied.set(fact.seq, fact);
       },
       dispatch(fact) {
-        if (applied.get(fact.seq) !== fact) throw new Error("prior fact identity changed");
+        if (applied.get(fact.seq) !== fact)
+          throw new Error("prior fact identity changed");
         applied.delete(fact.seq);
         events.accept(fact.seq);
       },
@@ -423,9 +549,15 @@ function mirrorFailure(mode: "decode" | "apply" | "earlier-answer" | "prior-clos
       (payload) => report("mirror-answer", decoder.decode(payload)),
       (error) => report("mirror-answer-code", codeOf(error)),
     );
-    const unanswered = expectReject("mirror-unanswered", link.call(ECHO_CHANNEL, text("mirror-unanswered"), 30_000));
+    const unanswered = expectReject(
+      "mirror-unanswered",
+      link.call(ECHO_CHANNEL, text("mirror-unanswered"), 30_000),
+    );
     if (mode === "prior-close") {
-      const parked = expectReject("mirror-parked", link.call(ECHO_CHANNEL, text("mirror-fault"), 30_000));
+      const parked = expectReject(
+        "mirror-parked",
+        link.call(ECHO_CHANNEL, text("mirror-fault"), 30_000),
+      );
       await ready;
       awaitWord(control, WORKER_LINK_CONTROL.W_RECS, (count) => count >= 4);
       link.close();
@@ -433,7 +565,9 @@ function mirrorFailure(mode: "decode" | "apply" | "earlier-answer" | "prior-clos
       resumeDispatch();
       await parked;
     } else {
-      expectThrow("mirror-parked", () => link.callBlocking(ECHO_CHANNEL, text("mirror-fault"), 30_000));
+      expectThrow("mirror-parked", () =>
+        link.callBlocking(ECHO_CHANNEL, text("mirror-fault"), 30_000),
+      );
       report("mirror-listeners-at-throw", events.seqs.length);
     }
     await answer;
@@ -443,7 +577,12 @@ function mirrorFailure(mode: "decode" | "apply" | "earlier-answer" | "prior-clos
     const terminal = mirrorRetention(Bun.generateHeapSnapshot());
     report("mirror-terminal-facts", terminal.facts);
     report("mirror-terminal-indexed", terminal.indexedEdges);
-    report("mirror-terminal-anchors", Object.keys(anchors).map((key) => anchors[key].seq).join(","));
+    report(
+      "mirror-terminal-anchors",
+      Object.keys(anchors)
+        .map((key) => anchors[key].seq)
+        .join(","),
+    );
     report("mirror-end-code", codeOf(end));
     report("mirror-end-cause-005", end.message.includes("KELD-IPC-005"));
     report("mirror-decodes", decodes);
@@ -451,8 +590,15 @@ function mirrorFailure(mode: "decode" | "apply" | "earlier-answer" | "prior-clos
     report("mirror-applies", applies);
     reportOrder("mirror", events.seqs);
     report("mirror-pending-values", applied.size);
-    report("mirror-retained-records", (word(control, WORKER_LINK_CONTROL.W_RECS) - word(control, WORKER_LINK_CONTROL.R_RECS)) >>> 0);
-    expectThrow("mirror-later", () => link.callBlocking(ECHO_CHANNEL, text("mirror-never"), 1_000));
+    report(
+      "mirror-retained-records",
+      (word(control, WORKER_LINK_CONTROL.W_RECS) -
+        word(control, WORKER_LINK_CONTROL.R_RECS)) >>>
+        0,
+    );
+    expectThrow("mirror-later", () =>
+      link.callBlocking(ECHO_CHANNEL, text("mirror-never"), 1_000),
+    );
   };
 }
 

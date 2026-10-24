@@ -259,8 +259,20 @@ describe("GH-527 receive policy mirrors", () => {
   });
 
   test("replyWaiter accepts only channel table ids, by type and at runtime (GH-597)", () => {
-    expect(ALLOCATED_CHANNELS).toEqual([ECHO_CHANNEL, FS_CHANNEL, LIFECYCLE_CHANNEL, AUTH_CHANNEL, WINDOW_CHANNEL]);
-    for (const channel of [ECHO_CHANNEL, FS_CHANNEL, LIFECYCLE_CHANNEL, AUTH_CHANNEL, WINDOW_CHANNEL]) {
+    expect(ALLOCATED_CHANNELS).toEqual([
+      ECHO_CHANNEL,
+      FS_CHANNEL,
+      LIFECYCLE_CHANNEL,
+      AUTH_CHANNEL,
+      WINDOW_CHANNEL,
+    ]);
+    for (const channel of [
+      ECHO_CHANNEL,
+      FS_CHANNEL,
+      LIFECYCLE_CHANNEL,
+      AUTH_CHANNEL,
+      WINDOW_CHANNEL,
+    ]) {
       expect(isAllocatedChannel(channel)).toBe(true);
     }
     for (const unallocated of [HANDSHAKE_CHANNEL, 6, 9, 0xffff, 2.5, -1]) {

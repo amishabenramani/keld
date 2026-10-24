@@ -98,6 +98,129 @@ for await (const command of createInterface({ input: control })) {
 control.end();
 "#;
 
+/// First actual public Electron constructor and cancelable-close proof; the
+/// app-created `WebContents` remains intentionally without draw.io preload.
+const ELECTRON_WINDOW_ROLE: &str = r#"
+import { createConnection } from "node:net";
+import { createInterface } from "node:readline";
+const path = process.env.KELD_T1B_CONTROL;
+if (!path) throw new Error("missing Host acceptance control");
+const seen: string[] = [];
+const onWebContents = () => { seen.push("contents"); };
+const onWindow = () => { seen.push("window"); };
+app.on("web-contents-created", onWebContents);
+app.on("browser-window-created", onWindow);
+app.on("window-all-closed", () => {}); // preserve Host session for native census
+let readyCount = 0;
+app.on("ready", () => { readyCount += 1; });
+const early = app.isReady();
+await app.whenReady();
+for (const prefs of [
+  { nodeIntegration: true },
+  { nodeIntegrationInWorker: true },
+  { nodeIntegrationInSubFrames: true },
+  { contextIsolation: false },
+  { webSecurity: false },
+  { allowRunningInsecureContent: true },
+]) {
+  let code = "accepted";
+  try {
+    new BrowserWindow({ webPreferences: prefs });
+  } catch (error) {
+    code = error instanceof Error && error.message.startsWith("KELD-COMPAT-010:")
+      ? "KELD-COMPAT-010" : "untyped";
+  }
+  if (code !== "KELD-COMPAT-010" || BrowserWindow.getAllWindows().length !== 0) {
+    throw new Error("unsafe webPreferences reached native Create or bypassed triage");
+  }
+}
+const win = new BrowserWindow({
+  width: 640, height: 480,
+  webPreferences: { contextIsolation: true, nodeIntegration: false, webSecurity: true },
+});
+if (early || !app.isReady() || readyCount !== 1) {
+  throw new Error("native Ready/Subscribe completion barrier failed");
+}
+if (win.id !== 1 || win.isDestroyed() || BrowserWindow.getAllWindows()[0] !== win ||
+    win.getSize().join("x") !== "640x480" || seen.join(",") !== "contents,window") {
+  throw new Error("public constructor failed host ID, native mirror or event order");
+}
+const control = createConnection({ path });
+await new Promise<void>((resolve, reject) => {
+  control.once("connect", resolve);
+  control.once("error", reject);
+});
+function report(line: string): void { control.write(`${line}\n`); }
+report(`PUBLIC_CREATED ${process.pid} ${win.id} ${win.getSize().join("x")} ${seen.join(",")}`);
+let closeCount = 0;
+let closedCount = 0;
+let replacement: InstanceType<typeof BrowserWindow> | undefined;
+const veto = (event: { preventDefault(): void }) => {
+  closeCount += 1;
+  event.preventDefault();
+  report(`CLOSE_EVENT ${closeCount}`);
+};
+win.on("close", veto);
+win.on("closed", () => {
+  closedCount += 1;
+  if (!win.isDestroyed() || !win.webContents.isDestroyed()) {
+    throw new Error("normal-close tombstones were not visible inside closed");
+  }
+  report(`CLOSED ${closedCount}`);
+});
+const lines = createInterface({ input: control });
+for await (const command of lines) {
+  if (command === "VETO") {
+    win.close();
+  } else if (command === "VERIFY_VETO") {
+    const ref = getWindowSnapshots()[0]?.window;
+    if (!ref) throw new Error("Host mirror lost a vetoed window");
+    const stale = await invokeWindow({
+      variant: "CloseReply", window: ref, close_seq: 1n, verdict: "Allow",
+    });
+    report(`VETO_VERIFIED ${stale.variant} ${win.isDestroyed()} ${closeCount} ${closedCount}`);
+  } else if (command === "ALLOW") {
+    win.off("close", veto);
+    win.close();
+  } else if (command === "SECOND") {
+    replacement = new BrowserWindow({ width: 320, height: 240 });
+    report(`SECOND ${replacement.id} ${replacement.getSize().join("x")}`);
+  } else if (command === "DESTROY") {
+    if (!replacement) throw new Error("missing second native window");
+    const second = replacement;
+    let closeOnDestroy = 0;
+    let closedOnDestroy = 0;
+    let contentsDestroyed = 0;
+    const contents = second.webContents;
+    second.on("close", () => { closeOnDestroy += 1; });
+    second.on("closed", () => {
+      closedOnDestroy += 1;
+      if (!second.isDestroyed() || second.webContents.isDestroyed()) {
+        throw new Error("Destroy did not stage its two separate tombstones");
+      }
+    });
+    contents.on("destroyed", () => { contentsDestroyed += 1; });
+    second.destroy();
+    let readAfterDestroy = "allowed";
+    try { void second.webContents; } catch (error) {
+      if (error instanceof Error && error.message.includes("Object has been destroyed")) {
+        readAfterDestroy = "refused";
+      }
+    }
+    report(`DESTROY ${closeOnDestroy} ${closedOnDestroy} ${readAfterDestroy}`);
+    await Promise.resolve();
+    report(`CONTENTS_DESTROYED ${contentsDestroyed} ${contents.isDestroyed()}`);
+  } else if (command === "QUIT") {
+    await app.quit();
+    report("QUIT_REPLY");
+    break;
+  } else {
+    throw new Error(`unknown public-window request ${command}`);
+  }
+}
+control.end();
+"#;
+
 fn census(pid: u32) -> Vec<serde_json::Value> {
     let rows = native_window_rows(pid);
     let value: serde_json::Value = serde_json::from_str(&rows).expect("CoreGraphics JSON census");
@@ -120,6 +243,23 @@ fn visible_app_windows(pid: u32) -> Vec<serde_json::Value> {
         .into_iter()
         .filter(|window| window["on_screen"] == true)
         .collect()
+}
+
+fn await_visible_native_close(pid: u32) {
+    let deadline = Instant::now() + EVENT_DEADLINE;
+    loop {
+        let remaining = visible_app_windows(pid);
+        if remaining.is_empty() {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "native window still visible after Host Destroyed: {remaining:?}"
+        );
+        // Observe real CoreGraphics state, not a timer that guesses when
+        // AppKit has removed the published window from the compositor.
+        std::thread::yield_now();
+    }
 }
 
 fn stage(fixture: &ProductFixture) -> keld_cli::boot::DevBootStage {
@@ -157,6 +297,139 @@ fn stage(fixture: &ProductFixture) -> keld_cli::boot::DevBootStage {
     .expect("strict native schema-two config");
     keld_cli::boot::stage_dev_boot(&fixture.project, Path::new(env!("CARGO_BIN_EXE_keld-host")))
         .expect("compile real Host stage")
+}
+
+fn stage_electron(fixture: &ProductFixture) -> keld_cli::boot::DevBootStage {
+    let repo = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(Path::parent)
+        .expect("workspace root");
+    let electron = serde_json::to_string(
+        &repo
+            .join("packages/@keld/electron/src/index.ts")
+            .to_string_lossy(),
+    )
+    .expect("absolute Electron import");
+    let app = serde_json::to_string(&repo.join("packages/@keld/api/src/app.ts").to_string_lossy())
+        .expect("absolute API import");
+    let source = format!(
+        "import {{ app, BrowserWindow }} from {electron};\n\
+         import {{ getWindowSnapshots, invokeWindow }} from {app};\n{ELECTRON_WINDOW_ROLE}"
+    );
+    crate::renderer_bridge::bundle_public_api_entry(
+        &fixture.project,
+        repo,
+        "gh449-electron-window",
+        &source,
+    );
+    fs::write(
+        fixture.project.join("keld.config.ts"),
+        "export default { name: \"KELD public Window acceptance\", entry: \"src/main.ts\", initialWindow: \"none\" } as const;\n",
+    )
+    .expect("strict schema-two facade declaration");
+    keld_cli::boot::stage_dev_boot(&fixture.project, Path::new(env!("CARGO_BIN_EXE_keld-host")))
+        .expect("compile actual Electron window stage")
+}
+
+#[test]
+fn public_electron_browser_window_uses_native_host_and_vetoes_unsaved_close() {
+    let fixture = ProductFixture::new("facade-electron-window");
+    let staged = stage_electron(&fixture);
+    let listener_path = fixture.root.path().join("electron-window.sock");
+    let listener = UnixListener::bind(&listener_path).expect("private control listener");
+    listener.set_nonblocking(true).expect("bounded accept");
+    let child = Command::new(staged.host())
+        .process_group(0)
+        .current_dir(staged.root())
+        .env("KELD_T1B_CONTROL", &listener_path)
+        .env("KELD_DEV_LEASE", "stdin-v1")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("launch real macOS no-flag Host");
+    let mut cleanup = ShippingLaunchCleanup::new(child);
+    let host = cleanup.cli.as_mut().expect("live Host");
+    let host_pid = host.id();
+    let _lease = host.stdin.take().expect("retain dev lease");
+    let stream = accept_before(&listener, Instant::now() + EVENT_DEADLINE);
+    stream
+        .set_read_timeout(Some(EVENT_DEADLINE))
+        .expect("bounded control read");
+    let mut reader = BufReader::new(stream.try_clone().expect("control clone"));
+    let mut writer = stream;
+    let created = read_control_line(&mut reader);
+    let parts: Vec<_> = created.split_whitespace().collect();
+    assert_eq!(parts.first().copied(), Some("PUBLIC_CREATED"), "{created}");
+    let bun_pid = parse_pid(parts.get(1).copied(), &created);
+    cleanup.record_authenticated_groups(process_group(host_pid), process_group(bun_pid));
+    assert_eq!(
+        &parts[2..],
+        ["1", "640x480", "contents,window"],
+        "{created}"
+    );
+    let initial = visible_app_windows(host_pid);
+    assert_eq!(
+        initial.len(),
+        1,
+        "public Create must construct a real visible native app window"
+    );
+
+    writer
+        .write_all(b"VETO\n")
+        .expect("request cancelable close");
+    assert_eq!(read_control_line(&mut reader), "CLOSE_EVENT 1");
+    writer
+        .write_all(b"VERIFY_VETO\n")
+        .expect("probe applied verdict");
+    assert_eq!(
+        read_control_line(&mut reader),
+        "VETO_VERIFIED ReplyStale false 1 0",
+        "a stale Allow must not override the first Cancel verdict"
+    );
+    assert_eq!(
+        visible_app_windows(host_pid),
+        initial,
+        "veto must retain the same native window"
+    );
+
+    writer
+        .write_all(b"ALLOW\n")
+        .expect("accept next close attempt");
+    assert_eq!(read_control_line(&mut reader), "CLOSED 1");
+    await_visible_native_close(host_pid);
+    writer
+        .write_all(b"SECOND\n")
+        .expect("create second host window");
+    assert_eq!(read_control_line(&mut reader), "SECOND 2 320x240");
+    assert_eq!(
+        visible_app_windows(host_pid).len(),
+        1,
+        "second native window absent"
+    );
+    writer
+        .write_all(b"DESTROY\n")
+        .expect("synchronous native Destroy");
+    assert_eq!(
+        read_control_line(&mut reader),
+        "DESTROY 0 1 refused",
+        "Destroy must skip close and synchronously emit closed after native release"
+    );
+    assert_eq!(
+        read_control_line(&mut reader),
+        "CONTENTS_DESTROYED 1 true",
+        "webContents tombstone belongs after Destroy returns"
+    );
+    await_visible_native_close(host_pid);
+    writer.write_all(b"QUIT\n").expect("authenticated Quit");
+    assert_eq!(read_control_line(&mut reader), "QUIT_REPLY");
+    drop(writer);
+    let output = wait_child_output(cleanup.release(), EVENT_DEADLINE);
+    assert!(
+        output.status.success(),
+        "public BrowserWindow Host failed: {output:?}"
+    );
+    await_process_gone(bun_pid);
 }
 
 #[test]

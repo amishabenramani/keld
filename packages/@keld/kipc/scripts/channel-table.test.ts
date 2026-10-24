@@ -349,7 +349,12 @@ describe("criterion 8: the region is the render of channel_table.rs", () => {
           receiveClass: "HostCallWithEvents",
         },
         { rustName: "AUTH", name: "auth", id: 4, receiveClass: "GuardedCall" },
-        { rustName: "WINDOW", name: "window", id: 5, receiveClass: "HostCallWithEvents" },
+        {
+          rustName: "WINDOW",
+          name: "window",
+          id: 5,
+          receiveClass: "HostCallWithEvents",
+        },
       ],
       hostEventClasses: ["HostCallWithEvents"],
     });
@@ -496,14 +501,46 @@ describe("criterion 9: the generator fails closed and names the source line", ()
 
   test("unsupported entry shapes are refused, never guessed", () => {
     const refused: [string, string, string][] = [
-      ["computed name", 'ChannelEntry::new("echo", 1,', "ChannelEntry::new(ECHO_NAME, 1,"],
-      ["uppercase name", 'ChannelEntry::new("echo", 1,', 'ChannelEntry::new("Echo", 1,'],
-      ["literal capability", "Authority::Guarded(&[FS_READ, FS_WRITE])", 'Authority::Guarded(&["fs.read"])'],
-      ["unknown authority form", '    "lifecycle",\n    3,\n    ReceiveClass::HostCallWithEvents,\n    Authority::HostInternal,\n);', '    "lifecycle",\n    3,\n    ReceiveClass::HostCallWithEvents,\n    Authority::HostInternal.clone(),\n);'],
-      ["non-call initializer", "pub const ECHO: ChannelEntry =\n    ChannelEntry::new(", "pub const ECHO: ChannelEntry = make(\n    ChannelEntry::new("],
-      ["private entry", "pub const ECHO: ChannelEntry =", "const ECHO: ChannelEntry ="],
-      ["three arguments", 'ChannelEntry::new("echo", 1, ReceiveClass::HostCall, Authority::HostInternal)', 'ChannelEntry::new("echo", 1, ReceiveClass::HostCall)'],
-      ["unindented argument", 'ChannelEntry::new(\n    "fs",\n', 'ChannelEntry::new(\n"fs",\n'],
+      [
+        "computed name",
+        'ChannelEntry::new("echo", 1,',
+        "ChannelEntry::new(ECHO_NAME, 1,",
+      ],
+      [
+        "uppercase name",
+        'ChannelEntry::new("echo", 1,',
+        'ChannelEntry::new("Echo", 1,',
+      ],
+      [
+        "literal capability",
+        "Authority::Guarded(&[FS_READ, FS_WRITE])",
+        'Authority::Guarded(&["fs.read"])',
+      ],
+      [
+        "unknown authority form",
+        '    "lifecycle",\n    3,\n    ReceiveClass::HostCallWithEvents,\n    Authority::HostInternal,\n);',
+        '    "lifecycle",\n    3,\n    ReceiveClass::HostCallWithEvents,\n    Authority::HostInternal.clone(),\n);',
+      ],
+      [
+        "non-call initializer",
+        "pub const ECHO: ChannelEntry =\n    ChannelEntry::new(",
+        "pub const ECHO: ChannelEntry = make(\n    ChannelEntry::new(",
+      ],
+      [
+        "private entry",
+        "pub const ECHO: ChannelEntry =",
+        "const ECHO: ChannelEntry =",
+      ],
+      [
+        "three arguments",
+        'ChannelEntry::new("echo", 1, ReceiveClass::HostCall, Authority::HostInternal)',
+        'ChannelEntry::new("echo", 1, ReceiveClass::HostCall)',
+      ],
+      [
+        "unindented argument",
+        'ChannelEntry::new(\n    "fs",\n',
+        'ChannelEntry::new(\n"fs",\n',
+      ],
       ["handshake expression", "= ChannelId(0);", "= ChannelId(1 - 1);"],
     ];
     for (const [label, from, to] of refused) {
@@ -515,12 +552,29 @@ describe("criterion 9: the generator fails closed and names the source line", ()
   });
 
   test("CHANNEL_TABLE must list every entry constant exactly once", () => {
-    const list = "pub const CHANNEL_TABLE: &[ChannelEntry] = &[ECHO, FS, LIFECYCLE, AUTH, WINDOW];";
+    const list =
+      "pub const CHANNEL_TABLE: &[ChannelEntry] = &[ECHO, FS, LIFECYCLE, AUTH, WINDOW];";
     for (const [label, replacement, message] of [
-      ["unlisted entry", "pub const CHANNEL_TABLE: &[ChannelEntry] = &[ECHO, FS, AUTH, WINDOW];", "LIFECYCLE is not listed"],
-      ["unknown name", "pub const CHANNEL_TABLE: &[ChannelEntry] = &[ECHO, FS, LIFECYCLE, AUTH, WINDOW, PROBE];", "PROBE, which is not a parsed"],
-      ["listed twice", "pub const CHANNEL_TABLE: &[ChannelEntry] = &[ECHO, FS, FS, LIFECYCLE, AUTH, WINDOW];", "FS more than once"],
-      ["computed list", "pub const CHANNEL_TABLE: &[ChannelEntry] = ENTRIES;", "unsupported CHANNEL_TABLE"],
+      [
+        "unlisted entry",
+        "pub const CHANNEL_TABLE: &[ChannelEntry] = &[ECHO, FS, AUTH, WINDOW];",
+        "LIFECYCLE is not listed",
+      ],
+      [
+        "unknown name",
+        "pub const CHANNEL_TABLE: &[ChannelEntry] = &[ECHO, FS, LIFECYCLE, AUTH, WINDOW, PROBE];",
+        "PROBE, which is not a parsed",
+      ],
+      [
+        "listed twice",
+        "pub const CHANNEL_TABLE: &[ChannelEntry] = &[ECHO, FS, FS, LIFECYCLE, AUTH, WINDOW];",
+        "FS more than once",
+      ],
+      [
+        "computed list",
+        "pub const CHANNEL_TABLE: &[ChannelEntry] = ENTRIES;",
+        "unsupported CHANNEL_TABLE",
+      ],
       ["missing list", "", "missing CHANNEL_TABLE"],
     ] as const) {
       expect(
@@ -529,7 +583,11 @@ describe("criterion 9: the generator fails closed and names the source line", ()
         label,
       ).toThrow(message);
     }
-    const wrapped = replaceOnce(tableSource, list, "pub const CHANNEL_TABLE: &[ChannelEntry] = &[\n    ECHO,\n    FS,\n    LIFECYCLE,\n    AUTH,\n    WINDOW,\n];");
+    const wrapped = replaceOnce(
+      tableSource,
+      list,
+      "pub const CHANNEL_TABLE: &[ChannelEntry] = &[\n    ECHO,\n    FS,\n    LIFECYCLE,\n    AUTH,\n    WINDOW,\n];",
+    );
     expect(renderChannelTableRegion(wrapped)).toBe(expectedRegion);
   });
 

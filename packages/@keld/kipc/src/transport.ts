@@ -1,4 +1,4 @@
-// @keld/kipc-transport sha256:d4ee12c427dde69b194d41045a29bcfbe3c3a9c573e5f98e764abbb6b6e0399a
+// @keld/kipc-transport sha256:c796e1165247df235c0f9c37ab381d73fda040e9911b406f020f74fb03682321
 /**
  * Canonical TypeScript kipc v2 app-link transport (KEL-136).
  *
@@ -1107,7 +1107,12 @@ export async function connectKipcSocket(
 
 /** Encodes a `u32` as an unsigned LEB128 varint. Rejects anything outside that range. */
 export function encodeVarint(n: number): Uint8Array {
-  if (typeof n !== "number" || !Number.isInteger(n) || n < 0 || n > 0xffff_ffff) {
+  if (
+    typeof n !== "number" ||
+    !Number.isInteger(n) ||
+    n < 0 ||
+    n > 0xffff_ffff
+  ) {
     throw kipcError(
       "KELD-IPC-003",
       `varint value must be an integer in [0, 4294967295], got ${typeof n === "number" ? n : typeof n}`,
@@ -1127,7 +1132,10 @@ export function encodeVarint(n: number): Uint8Array {
 /** Encodes an exact Rust u64 as an unsigned LEB128 varint without Number conversion. */
 export function encodeU64Varint(n: bigint): Uint8Array {
   if (typeof n !== "bigint" || n < 0n || n > 0xffff_ffff_ffff_ffffn) {
-    throw kipcError("KELD-IPC-003", "u64 varint value must be a bigint in [0, 18446744073709551615]");
+    throw kipcError(
+      "KELD-IPC-003",
+      "u64 varint value must be a bigint in [0, 18446744073709551615]",
+    );
   }
   const bytes: number[] = [];
   let value = n;
@@ -1140,8 +1148,17 @@ export function encodeU64Varint(n: bigint): Uint8Array {
   return new Uint8Array(bytes);
 }
 
-function decodeVarintAt(bytes: Uint8Array, offset: number, truncatedDetail: string): [number, number];
-function decodeVarintAt(bytes: Uint8Array, offset: number, truncatedDetail: string, width: 64): [bigint, number];
+function decodeVarintAt(
+  bytes: Uint8Array,
+  offset: number,
+  truncatedDetail: string,
+): [number, number];
+function decodeVarintAt(
+  bytes: Uint8Array,
+  offset: number,
+  truncatedDetail: string,
+  width: 64,
+): [bigint, number];
 function decodeVarintAt(
   bytes: Uint8Array,
   offset: number,

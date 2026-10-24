@@ -20,7 +20,10 @@ export interface MirrorSource<Fact> {
  * the ring remains the sole frame admission, ordering and release owner.
  * Decoded heap bytes and aliases require source-specific qualification before use.
  */
-export function attachMirror<Fact>(link: WorkerLink, source: MirrorSource<Fact>): void {
+export function attachMirror<Fact>(
+  link: WorkerLink,
+  source: MirrorSource<Fact>,
+): void {
   const channel = source.channel;
   const decode = source.decode.bind(source);
   const apply = source.apply.bind(source);
@@ -37,12 +40,18 @@ export function attachMirror<Fact>(link: WorkerLink, source: MirrorSource<Fact>)
     } catch {
       // WorkerLink owns first-terminal priority and earlier-answer delivery. Only
       // this source boundary is normalized; unrelated transport causes pass through.
-      throw linkError("KELD-IPC-005", "mirror decode or apply failed. Check the source codec and state contract before restarting the role.");
+      throw linkError(
+        "KELD-IPC-005",
+        "mirror decode or apply failed. Check the source codec and state contract before restarting the role.",
+      );
     }
   });
   link.onEvent(channel, () => {
     if (pending.length === 0) {
-      throw linkError("KELD-IPC-005", "mirror dispatch has no applied fact. Attach the mirror before subscribing to host facts.");
+      throw linkError(
+        "KELD-IPC-005",
+        "mirror dispatch has no applied fact. Attach the mirror before subscribing to host facts.",
+      );
     }
     // Presence is established by length, so an undefined Fact remains exact.
     const fact = pending.shift() as Fact;

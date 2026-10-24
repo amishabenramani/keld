@@ -7,22 +7,27 @@
  */
 import { app as apiApp } from "../../api/src/app.ts";
 
-type AppListener = () => void;
+type AppListener = (...args: never[]) => void;
 
 const listeners = new Map<string, AppListener[]>();
 let readyEventEmitted = false;
 let readyObservation: Promise<void> | undefined;
 
-function emit(event: string): void {
+function emit(event: string, ...args: unknown[]): void {
   const snapshot = listeners.get(event);
   if (!snapshot) return;
   for (const listener of snapshot.slice()) {
     try {
-      listener();
+      Reflect.apply(listener, undefined, args);
     } catch {
       // A user callback must not break lifecycle delivery.
     }
   }
+}
+
+/** Electron event names and application listeners have this single owner. */
+export function emitNativeAppEvent(event: string, ...args: unknown[]): void {
+  emit(event, ...args);
 }
 
 function ignoreIfUnawaited(promise: Promise<unknown>): void {
