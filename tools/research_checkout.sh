@@ -46,7 +46,8 @@ sync_research() {
         if ! research_origin_ok "$origin"; then
             warn_skip "docs/research origin is not 0monish/keld-research (HTTPS or SSH). Fix remote or re-clone; left unchanged."
         fi
-        if git -C "$DEST" pull --ff-only; then
+        branch="$(git -C "$DEST" symbolic-ref --quiet --short HEAD 2>/dev/null)" || warn_skip "docs/research HEAD is detached; left unchanged."
+        if git -C "$DEST" pull --ff-only origin "$branch"; then
             echo "research-sync: updated $DEST"
             exit 0
         fi
@@ -99,9 +100,30 @@ push_research() {
         exit 1
     fi
 
-    if [[ -n "$(git -C "$DEST" status --porcelain 2>/dev/null)" ]]; then
+    # Git can read a different push URL than the fetch URL. Refuse both an
+    # unauthorized destination and ambiguous multi-destination push URLs.
+    push_origin="$(git -C "$DEST" remote get-url --push --all origin 2>/dev/null)" || {
+        echo "error: research-push: docs/research has no origin push URL. Fix remote; Keld parent untouched." >&2
+        exit 1
+    }
+    if [[ -z "$push_origin" || "$push_origin" == *$'\n'* ]] || ! research_origin_ok "$push_origin"; then
+        echo "error: research-push: refusing ? origin push URL is \`$push_origin\`, not one exact 0monish/keld-research destination. Fix remote; Keld parent untouched." >&2
+        exit 1
+    fi
+    branch="$(git -C "$DEST" symbolic-ref --quiet --short HEAD 2>/dev/null)" || {
+        echo "error: research-push: docs/research HEAD is detached. Checkout a branch before pushing; Keld parent untouched." >&2
+        exit 1
+    }
+    pending="$(git -C "$DEST" status --porcelain 2>/dev/null)" || {
+        echo "error: research-push: git status failed inside docs/research. Fix checkout access; Keld parent untouched." >&2
+        exit 1
+    }
+    if [[ -n "$pending" ]]; then
         # Stage/commit only inside the nested repo (cwd = DEST).
-        git -C "$DEST" add -A
+        if ! git -C "$DEST" add -A; then
+            echo "error: research-push: git add failed inside docs/research. Fix checkout access; Keld parent untouched." >&2
+            exit 1
+        fi
         if ! git -C "$DEST" commit -m "$MSG"; then
             echo "error: research-push: commit failed inside docs/research/ (Keld parent untouched)." >&2
             exit 1
@@ -111,7 +133,9 @@ push_research() {
         echo "research-push: no local changes in $DEST"
     fi
 
-    if git -C "$DEST" push; then
+    # Pin both the remote and the destination ref: ignore pushDefault,
+    # branch.pushRemote, upstream, and caller-selected push refspec defaults.
+    if git -C "$DEST" push origin "HEAD:refs/heads/$branch"; then
         echo "research-push: pushed $DEST"
         exit 0
     fi

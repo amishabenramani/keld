@@ -8,6 +8,9 @@ export GIT_ALLOW_PROTOCOL=file
 export GIT_TERMINAL_PROMPT=0
 export GIT_CONFIG_NOSYSTEM=1
 export GIT_CONFIG_GLOBAL=/dev/null
+# A caller's repository selection must not redirect fixture setup Git commands.
+unset GIT_DIR GIT_WORK_TREE GIT_COMMON_DIR GIT_INDEX_FILE
+unset GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_PREFIX
 ROOT="$(git rev-parse --show-toplevel)"
 TOOL="$ROOT/tools/research_checkout.sh"
 REAL_GIT="$(command -v git)"
@@ -31,14 +34,25 @@ DEST="$PARENT/docs/research"
 cat > "$TMP_ROOT/bin/git" <<'SHIM'
 #!/usr/bin/env bash
 set -euo pipefail
+if [[ "${1-}" == -C && "${3-}" == status && "${KELD_FAIL_STATUS:-0}" == 1 ]]; then
+    echo 'simulated git status failure' >&2
+    exit 71
+fi
+if [[ "${1-}" == -C && "${3-}" == add && "${KELD_FAIL_ADD:-0}" == 1 ]]; then
+    echo 'simulated git add failure' >&2
+    exit 72
+fi
+if [[ "${1-}" == -C && "${3-}" == commit ]]; then
+    printf 'commit invoked\n' >> "$KELD_GIT_CALLS"
+fi
 if [[ "${1-}" == -C && "${3-}" == pull ]]; then
-    [[ "${4-}" == --ff-only && "$#" == 4 ]] || exit 89
+    [[ "${4-}" == --ff-only && "${5-}" == origin && "${6-}" == main && "$#" == 6 ]] || exit 89
     "$KELD_REAL_GIT" -C "$2" fetch --quiet "$KELD_BARE" refs/heads/main || exit $?
     exec "$KELD_REAL_GIT" -C "$2" merge --ff-only FETCH_HEAD
 fi
 if [[ "${1-}" == -C && "${3-}" == push ]]; then
-    # A force option must never appear, even under a late remote update.
-    [[ "$#" == 3 ]] || exit 88
+    # Exactly one named remote/ref: never force or infer caller-configured destinations.
+    [[ "${4-}" == origin && "${5-}" == HEAD:refs/heads/main && "$#" == 5 ]] || exit 88
     printf 'unforced push\n' >> "$KELD_GIT_CALLS"
     exec "$KELD_REAL_GIT" -C "$2" push "$KELD_BARE" HEAD:refs/heads/main
 fi
@@ -107,6 +121,82 @@ for admitted in "$HTTPS" "$SSH" 'ssh://git@github.com/0monish/keld-research.git'
 done
 "$REAL_GIT" -C "$DEST" remote set-url origin "$HTTPS"
 
+# Only the three exact URL forms are eligible; a near-match must not commit.
+for denied in 'https://github.com/0monish/keld-research/' 'http://github.com/0monish/keld-research.git' 'https://github.com/0MONISH/keld-research.git' 'https://github.com/0monish/keld-research-other.git'; do
+    "$REAL_GIT" -C "$DEST" remote set-url origin "$denied"
+    before_calls="$(wc -l < "$KELD_GIT_CALLS" | tr -d ' ')"
+    before_remote="$("$REAL_GIT" --git-dir="$KELD_BARE" rev-parse refs/heads/main)"
+    before_local="$("$REAL_GIT" -C "$DEST" rev-parse HEAD)"
+    run push "$PARENT" blocked
+    [[ "$status" == 1 ]]
+    grep -Fq 'refusing' "$TMP_ROOT/stderr"
+    [[ "$(wc -l < "$KELD_GIT_CALLS" | tr -d ' ')" == "$before_calls" ]]
+    [[ "$("$REAL_GIT" --git-dir="$KELD_BARE" rev-parse refs/heads/main)" == "$before_remote" ]]
+    [[ "$("$REAL_GIT" -C "$DEST" rev-parse HEAD)" == "$before_local" ]]
+done
+"$REAL_GIT" -C "$DEST" remote set-url origin "$HTTPS"
+
+# A failed status read must never be mistaken for an empty change list.
+KELD_FAIL_STATUS=1; export KELD_FAIL_STATUS
+before_calls="$(wc -l < "$KELD_GIT_CALLS" | tr -d ' ')"
+run push "$PARENT" status-refusal
+[[ "$status" == 1 ]]
+grep -Fq 'git status failed' "$TMP_ROOT/stderr"
+[[ "$(wc -l < "$KELD_GIT_CALLS" | tr -d ' ')" == "$before_calls" ]]
+unset KELD_FAIL_STATUS
+
+# A failed add must stop before git commit or git push (not reuse staged state).
+printf 'pending add\n' > "$DEST/add-blocked.txt"
+KELD_FAIL_ADD=1; export KELD_FAIL_ADD
+before_calls="$(wc -l < "$KELD_GIT_CALLS" | tr -d ' ')"
+run push "$PARENT" add-refusal
+[[ "$status" == 1 ]]
+grep -Fq 'git add failed' "$TMP_ROOT/stderr"
+[[ "$(wc -l < "$KELD_GIT_CALLS" | tr -d ' ')" == "$before_calls" ]]
+unset KELD_FAIL_ADD
+rm -- "$DEST/add-blocked.txt"
+
+# Fetch URL alone is not sufficient: an origin pushurl may point elsewhere.
+"$REAL_GIT" init --bare --quiet --initial-branch=main "$TMP_ROOT/rogue.git"
+"$REAL_GIT" -C "$DEST" config remote.origin.pushurl "$TMP_ROOT/rogue.git"
+run push "$PARENT" pushurl-refusal
+[[ "$status" == 1 ]]
+grep -Fq 'origin push URL' "$TMP_ROOT/stderr"
+if "$REAL_GIT" --git-dir="$TMP_ROOT/rogue.git" rev-parse --verify refs/heads/main >/dev/null 2>&1; then
+    echo 'FAIL: untrusted push URL received the research branch' >&2
+    exit 1
+fi
+"$REAL_GIT" -C "$DEST" config --unset-all remote.origin.pushurl
+"$REAL_GIT" -C "$DEST" config --add remote.origin.pushurl "$HTTPS"
+"$REAL_GIT" -C "$DEST" config --add remote.origin.pushurl "$SSH"
+run push "$PARENT" ambiguous-multiple-pushurls
+[[ "$status" == 1 ]]
+grep -Fq 'origin push URL' "$TMP_ROOT/stderr"
+"$REAL_GIT" -C "$DEST" config --unset-all remote.origin.pushurl
+
+# Caller pushDefault and pushRemote must not override explicit origin.
+"$REAL_GIT" -C "$DEST" remote add rogue "$TMP_ROOT/rogue.git"
+"$REAL_GIT" -C "$DEST" config remote.pushDefault rogue
+"$REAL_GIT" -C "$DEST" config branch.main.pushRemote rogue
+run push "$PARENT" explicit-origin
+[[ "$status" == 0 ]]
+if "$REAL_GIT" --git-dir="$TMP_ROOT/rogue.git" rev-parse --verify refs/heads/main >/dev/null 2>&1; then
+    echo 'FAIL: pushDefault/branch.pushRemote won over explicit origin' >&2
+    exit 1
+fi
+"$REAL_GIT" -C "$DEST" config --unset remote.pushDefault
+"$REAL_GIT" -C "$DEST" config --unset branch.main.pushRemote
+
+# A detached HEAD cannot authorize a branch push or an implicit pull.
+"$REAL_GIT" -C "$DEST" -c advice.detachedHead=false checkout --quiet --detach HEAD
+run sync "$PARENT"
+[[ "$status" == 0 ]]
+grep -Fq 'HEAD is detached' "$TMP_ROOT/stderr"
+run push "$PARENT" detached-refusal
+[[ "$status" == 1 ]]
+grep -Fq 'HEAD is detached' "$TMP_ROOT/stderr"
+"$REAL_GIT" -C "$DEST" switch --quiet main
+
 # Dirty nested changes commit with exact whitespace-bearing message.
 printf 'nested only\n' > "$DEST/new note.txt"
 run push "$PARENT" 'research: message with spaces'
@@ -133,6 +223,7 @@ HOOK
 chmod +x "$DEST/.git/hooks/pre-push"
 "$REAL_GIT" -C "$DEST" config core.hooksPath "$DEST/.git/hooks"
 export KELD_ACTOR="$TMP_ROOT/other writer"
+late_push_calls="$(grep -c '^unforced push$' "$KELD_GIT_CALLS" || true)"
 run push "$PARENT" 'local candidate must not force remote'
 if [[ "$status" != 1 ]]; then
     echo "UNEXPECTED_LATE_PUSH_EXIT=$status" >&2
@@ -146,7 +237,8 @@ fi
 grep -Fq 'git push failed' "$TMP_ROOT/stderr"
 [[ "$("$REAL_GIT" --git-dir="$KELD_BARE" rev-parse refs/heads/main)" == "$other_head" ]]
 [[ "$("$REAL_GIT" -C "$DEST" log -1 --format=%s)" == 'local candidate must not force remote' ]]
-[[ "$(wc -l < "$KELD_GIT_CALLS" | tr -d ' ')" == 7 ]]
+# Exactly one ordinary unforced attempt, even when the remote moves late.
+[[ "$(grep -c '^unforced push$' "$KELD_GIT_CALLS")" == "$((late_push_calls + 1))" ]]
 assert_parent_untouched
 
 # Divergent pull remains a hook-safe warning; remote and local stay distinct.
