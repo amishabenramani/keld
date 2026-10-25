@@ -361,6 +361,12 @@ fn root_property_slice<'a>(
                             }
                             close = scan.next();
                         }
+                        if close
+                            .as_ref()
+                            .is_some_and(|token| is_word(token, "satisfies"))
+                        {
+                            close = validate_satisfies_type_suffix(&mut scan)?.0;
+                        }
                         if !close.is_some_and(|token| token.kind == ConfigToken::Symbol(')')) {
                             return Err(auth_config_error(
                                 "parenthesized config root must close after its literal object",
@@ -624,6 +630,43 @@ fn root_accessor_error(
     }))
 }
 
+fn advance_exported_root_nesting(
+    token: &SourceToken,
+    source: &str,
+    nesting: &mut Vec<char>,
+    strict_root: bool,
+    may_open_generic: bool,
+    require_balanced: bool,
+) -> Result<(), AuthConfigError> {
+    if strict_root {
+        track_method_type_bracket(token, source, nesting, may_open_generic);
+    }
+    match token.kind {
+        ConfigToken::Symbol(opener @ ('{' | '(' | '[')) => nesting.push(match opener {
+            '{' => '}',
+            '(' => ')',
+            _ => ']',
+        }),
+        ConfigToken::Symbol(closer @ ('}' | ')' | ']'))
+            if nesting.pop() != Some(closer) && require_balanced =>
+        {
+            return Err(auth_config_error("unbalanced exported auth object"));
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+fn next_value_generic_prefix(token: &SourceToken, current: bool, root_value_prefix: bool) -> bool {
+    if root_value_prefix && token.kind == ConfigToken::Symbol(':') {
+        true
+    } else {
+        current
+            && (token.kind == ConfigToken::Symbol(':')
+                || matches!(&token.kind, ConfigToken::Word(word) if word == "async"))
+    }
+}
+
 fn exported_property_slice<'a>(
     source: &'a str,
     scan: &mut SourceScan<'a>,
@@ -633,11 +676,16 @@ fn exported_property_slice<'a>(
     let mut nesting = Vec::new();
     let mut at_key = true;
     let mut value_started = false;
+    // An unrelated value can begin with a generic arrow expression:
+    // helper: <T, renderer>(value: T) => value. Its type-parameter commas
+    // are not exported root-property separators.
+    let mut value_generic_head = false;
     let mut method_signature = false;
     let mut method_modifier = false;
     let mut found = None;
     let mut pending_start = None;
     while let Some(token) = scan.next() {
+        let generic_at_token = value_generic_head;
         if nesting.is_empty() {
             if matches!(token.kind, ConfigToken::Symbol(',' | '}')) {
                 if let Some(start) = pending_start.take() {
@@ -648,6 +696,7 @@ fn exported_property_slice<'a>(
                 }
                 at_key = true;
                 value_started = false;
+                value_generic_head = false;
                 method_modifier = false;
                 method_signature = false;
                 continue;
@@ -657,6 +706,11 @@ fn exported_property_slice<'a>(
             if strict_root && !value_started && !method_signature {
                 validate_facade_root_member_token(&token, source, method_modifier, at_key)?;
             }
+            value_generic_head = next_value_generic_prefix(
+                &token,
+                value_generic_head,
+                !at_key && !value_started && !method_signature,
+            );
             (value_started, method_signature) =
                 update_member_signature(&token, at_key, value_started, method_signature);
             if at_key {
@@ -706,28 +760,16 @@ fn exported_property_slice<'a>(
                 method_modifier = token.kind == ConfigToken::Symbol('*');
             }
         }
-        if strict_root {
-            track_method_type_bracket(
-                &token,
-                source,
-                &mut nesting,
-                !at_key && (!value_started || method_signature),
-            );
-        }
-        match token.kind {
-            ConfigToken::Symbol(opener @ ('{' | '(' | '[')) => nesting.push(match opener {
-                '{' => '}',
-                '(' => ')',
-                _ => ']',
-            }),
-            ConfigToken::Symbol(closer @ ('}' | ')' | ']'))
-                if nesting.pop() != Some(closer)
-                    && (found.is_some() || pending_start.is_some()) =>
-            {
-                return Err(auth_config_error("unbalanced exported auth object"));
-            }
-            _ => {}
-        }
+        let may_open_generic = !at_key
+            && (!value_started || method_signature || generic_at_token || value_generic_head);
+        advance_exported_root_nesting(
+            &token,
+            source,
+            &mut nesting,
+            strict_root,
+            may_open_generic,
+            found.is_some() || pending_start.is_some(),
+        )?;
     }
     if found.is_some() || pending_start.is_some() {
         Err(auth_config_error("unclosed exported auth object"))

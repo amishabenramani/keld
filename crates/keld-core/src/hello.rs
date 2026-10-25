@@ -446,6 +446,8 @@ mod tests {
             "export default ({ initialWindow: 'none' }) as const;",
             "export default (({ initialWindow: 'none' })) as const;",
             "export default ({ initialWindow: 'none' } as const);",
+            "export default ({ initialWindow: 'none' } satisfies App.Config);",
+            "export default ({ initialWindow: 'none' } as const satisfies App.Config);",
             "export default ({ initialWindow: 'none' }) satisfies DynamicConfig;",
             "export default { initialWindow: 'none' } satisfies App.Config;",
             "export default { initialWindow: 'none' } as const satisfies App.Config;",
@@ -503,6 +505,33 @@ mod tests {
                 "line break must not hide a continuing expression: {source}"
             );
         }
+    }
+
+    #[test]
+    fn facade_root_keeps_generic_arrow_value_parameters_out_of_root_keys() {
+        for source in [
+            "export default { initialWindow: 'none', helper: <T, renderer>(x: T): T => x } as const;",
+            "export default { initialWindow: 'none', helper: async <T, auth>(x: T): Promise<T> => x } as const;",
+        ] {
+            assert!(
+                initial_window_from_config_ts(source).expect("unrelated generic arrow value"),
+                "type parameters in an unrelated value must not be root declarations: {source}"
+            );
+        }
+        assert!(
+            !initial_window_from_config_ts(
+                "export default { renderer: 'index.html', helper: <T, auth>(x: T): T => x } as const;"
+            )
+            .expect("renderer boot with unrelated generic arrow value"),
+            "type parameters must not select facade mode"
+        );
+        assert!(
+            initial_window_from_config_ts(
+                "export default { initialWindow: 'none', helper: <T, auth>(x: T): T => x, ...extra } as const;"
+            )
+            .is_err(),
+            "a genuine root spread must still fail after a generic arrow value"
+        );
     }
 
     #[test]
