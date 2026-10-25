@@ -389,10 +389,11 @@ fn root_property_slice<'a>(
 }
 
 fn validate_literal_root_suffix(scan: &mut SourceScan<'_>) -> Result<(), AuthConfigError> {
+    let mut previous_end = scan.position;
     let suffix = scan.next();
     if suffix
         .as_ref()
-        .is_some_and(|token| starts_following_export(scan, token))
+        .is_some_and(|token| starts_following_statement(scan, previous_end, token))
     {
         return Ok(());
     }
@@ -404,18 +405,23 @@ fn validate_literal_root_suffix(scan: &mut SourceScan<'_>) -> Result<(), AuthCon
                     "literal config supports only an optional as const assertion",
                 ));
             }
+            previous_end = scan.position;
             let end = scan.next();
             if end
                 .as_ref()
                 .is_some_and(|token| is_word(token, "satisfies"))
             {
-                validate_satisfies_type_suffix(scan)?
+                let (end, type_end) = validate_satisfies_type_suffix(scan)?;
+                previous_end = type_end;
+                end
             } else {
                 end
             }
         }
         Some(ConfigToken::Word(word)) if word == "satisfies" => {
-            validate_satisfies_type_suffix(scan)?
+            let (end, type_end) = validate_satisfies_type_suffix(scan)?;
+            previous_end = type_end;
+            end
         }
         _ => {
             return Err(auth_config_error(
@@ -424,7 +430,8 @@ fn validate_literal_root_suffix(scan: &mut SourceScan<'_>) -> Result<(), AuthCon
         }
     };
     if end.is_none_or(|token| {
-        token.kind == ConfigToken::Symbol(';') || starts_following_export(scan, &token)
+        token.kind == ConfigToken::Symbol(';')
+            || starts_following_statement(scan, previous_end, &token)
     }) {
         Ok(())
     } else {
@@ -434,42 +441,51 @@ fn validate_literal_root_suffix(scan: &mut SourceScan<'_>) -> Result<(), AuthCon
     }
 }
 
-fn starts_following_export(scan: &SourceScan<'_>, token: &SourceToken) -> bool {
-    // A second export on a new line is an independent module declaration
-    // (automatic semicolon insertion), not part of the default expression.
-    // Operators, member access and calls remain disallowed across newlines.
-    is_word(token, "export")
-        && scan.source.get(..token.start).is_some_and(|prior| {
-            prior
-                .chars()
-                .rev()
-                .take_while(|ch| ch.is_whitespace())
-                .any(config_line_terminator)
-        })
+fn starts_following_statement(
+    scan: &SourceScan<'_>,
+    previous_end: usize,
+    token: &SourceToken,
+) -> bool {
+    // A new statement after a line terminator is separate from the literal
+    // export, even with a comment between the two tokens. Do not mistake
+    // operators, member access or calls across a newline for a new statement.
+    let starts_statement = matches!(
+        &token.kind,
+        ConfigToken::Word(word)
+            if matches!(word.as_str(), "export" | "import" | "const" | "let" | "var"
+                | "class" | "function" | "interface" | "type" | "enum" | "declare" | "namespace")
+    );
+    starts_statement
+        && scan
+            .source
+            .get(previous_end..token.start)
+            .is_some_and(|between| between.chars().any(config_line_terminator))
 }
 
 fn validate_satisfies_type_suffix(
     scan: &mut SourceScan<'_>,
-) -> Result<Option<SourceToken>, AuthConfigError> {
+) -> Result<(Option<SourceToken>, usize), AuthConfigError> {
     // A simple qualified type name is static. Do not permit a runtime
     // operator to modify the exported object after a type assertion.
-    if !scan
-        .next()
-        .is_some_and(|token| matches!(token.kind, ConfigToken::Word(_)))
-    {
+    let Some(type_name) = scan.next() else {
+        return Err(auth_config_error("satisfies requires a static type name"));
+    };
+    if !matches!(type_name.kind, ConfigToken::Word(_)) {
         return Err(auth_config_error("satisfies requires a static type name"));
     }
+    let mut previous_end = type_name.end;
     loop {
         match scan.next() {
             Some(token) if token.kind == ConfigToken::Symbol('.') => {
-                if !scan
-                    .next()
-                    .is_some_and(|segment| matches!(segment.kind, ConfigToken::Word(_)))
-                {
+                let Some(segment) = scan.next() else {
+                    return Err(auth_config_error("invalid qualified type name"));
+                };
+                if !matches!(segment.kind, ConfigToken::Word(_)) {
                     return Err(auth_config_error("invalid qualified type name"));
                 }
+                previous_end = segment.end;
             }
-            end => return Ok(end),
+            end => return Ok((end, previous_end)),
         }
     }
 }
