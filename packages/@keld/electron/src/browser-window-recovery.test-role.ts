@@ -423,6 +423,68 @@ if (mode === "late-import-replay") {
     "maximize",
     "unmaximize",
   ]);
+} else if (mode === "bounds-throwing-move-isolated") {
+  becomeReady();
+  const win = new BrowserWindow();
+  const ref = source.all()[0]?.window;
+  assert.ok(ref);
+  const seen: string[] = [];
+  const reports: unknown[][] = [];
+  const originalError = console.error;
+  console.error = (...args: unknown[]) => {
+    reports.push(args);
+  };
+  try {
+    win.on("move", () => {
+      seen.push("move");
+      throw new Error("untrusted move event listener");
+    });
+    win.on("resize", () => {
+      assert.deepEqual(win.getSize(), [777, 480]);
+      seen.push("resize");
+    });
+    fact({
+      variant: "Bounds",
+      window: ref,
+      bounds: { ...state.bounds, x: 25, width: 777 },
+    });
+    assert.deepEqual(
+      seen,
+      ["move", "resize"],
+      "one throwing move cannot drop this same native fact's resize",
+    );
+    assert.equal(
+      reports.length,
+      1,
+      "exactly one isolated application exception diagnostic",
+    );
+  } finally {
+    console.error = originalError;
+  }
+} else if (mode === "bounds-move-destroys-no-resize") {
+  becomeReady();
+  const win = new BrowserWindow();
+  const ref = source.all()[0]?.window;
+  assert.ok(ref);
+  const seen: string[] = [];
+  win.on("move", () => {
+    seen.push("move");
+    win.destroy();
+  });
+  win.on("closed", () => seen.push("closed"));
+  win.on("resize", () => seen.push("resize"));
+  fact({
+    variant: "Bounds",
+    window: ref,
+    bounds: { ...state.bounds, x: 25, width: 777 },
+  });
+  assert.deepEqual(
+    seen,
+    ["move", "closed"],
+    "no event on wrapper after synchronous Destroy",
+  );
+  assert.equal(win.isDestroyed(), true);
+  assert.deepEqual(BrowserWindow.getAllWindows(), []);
 } else if (mode === "throwing-contents-destroyed") {
   becomeReady();
   const window = new BrowserWindow();

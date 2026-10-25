@@ -381,6 +381,19 @@ export class BrowserWindow extends EventEmitter {
     return value.state;
   }
 
+  /** Isolate each callback step inside one native event. A throwing `move`
+   * cannot discard the same Bounds fact's `resize`, and a reentrant Destroy
+   * suppresses notifications against an already-tombstoned window.
+   */
+  #emitNativeFact(event: string): void {
+    if (this.#destroyed) return;
+    try {
+      this.emit(event);
+    } catch (error) {
+      reportNativeCallbackError(`KELD window ${event} callback failed:`, error);
+    }
+  }
+
   getSize(): number[] {
     const { width, height } = this.#state().bounds;
     return [width, height];
@@ -677,24 +690,25 @@ export class BrowserWindow extends EventEmitter {
                 bounds: fact.bounds,
               });
               if (prior.x !== fact.bounds.x || prior.y !== fact.bounds.y) {
-                window.emit("move");
+                window.#emitNativeFact("move");
               }
               if (
-                prior.width !== fact.bounds.width ||
-                prior.height !== fact.bounds.height
+                !window.#destroyed &&
+                (prior.width !== fact.bounds.width ||
+                  prior.height !== fact.bounds.height)
               ) {
-                window.emit("resize");
+                window.#emitNativeFact("resize");
               }
             }
             break;
           case "Focus":
-            window.emit(fact.focused ? "focus" : "blur");
+            window.#emitNativeFact(fact.focused ? "focus" : "blur");
             break;
           case "Maximized":
-            window.emit(fact.maximized ? "maximize" : "unmaximize");
+            window.#emitNativeFact(fact.maximized ? "maximize" : "unmaximize");
             break;
           case "FullScreen":
-            window.emit(
+            window.#emitNativeFact(
               fact.full_screen ? "enter-full-screen" : "leave-full-screen",
             );
             break;

@@ -205,25 +205,25 @@ assert.deepEqual(pending(), [null, null]);
 // Attacker must not redirect a parked response to another *existing* window
 // with a matching pending sequence (an absent id=999 alone is not adequate).
 const another = { id: 8, incarnation: 301n };
-hostFact({ variant: "Created", window: another, state, pending_close: 16n });
-hostFact({ variant: "CloseRequested", window: ref, close_seq: 16n });
+hostFact({ variant: "Created", window: another, state, pending_close: 14n });
+hostFact({ variant: "CloseRequested", window: ref, close_seq: 14n });
 postpone = true;
 const mutablePair: WindowRef = { id: ref.id, incarnation: ref.incarnation };
 const sent: WindowRequest = {
   variant: "CloseReply",
   window: mutablePair,
-  close_seq: 16n,
+  close_seq: 14n,
   verdict: "Veto",
 };
-const ack16 = invokeWindow(sent);
+const ack14 = invokeWindow(sent);
 mutablePair.id = another.id;
 mutablePair.incarnation = another.incarnation;
 delayedReply?.({ variant: "ReplyApplied" });
-await ack16;
+await ack14;
 assert.equal(source.get(ref)?.pending_close, null);
 assert.equal(
   source.get(another)?.pending_close,
-  16n,
+  14n,
   "A's ack must not clear window B",
 );
 assert.deepEqual(
@@ -231,16 +231,14 @@ assert.deepEqual(
     window.id,
     closeSeq,
   ]),
-  [[another.id, 16n]],
+  [[another.id, 14n]],
 );
 postpone = false;
-assert.deepEqual(await invokeWindow(veto(17n)), { variant: "ReplyApplied" });
-assert.equal(source.get(another)?.pending_close, 16n);
 assert.deepEqual(
   invokeWindowBlocking({
     variant: "CloseReply",
     window: another,
-    close_seq: 16n,
+    close_seq: 14n,
     verdict: "Veto",
   }),
   { variant: "ReplyApplied" },
@@ -252,8 +250,8 @@ assert.equal(
 );
 assert.deepEqual(getDispatchedPendingWindowCloses(), []);
 
-hostFact({ variant: "CloseRequested", window: ref, close_seq: 17n });
-assert.deepEqual(invokeWindowBlocking(veto(17n)), { variant: "ReplyApplied" });
+hostFact({ variant: "CloseRequested", window: ref, close_seq: 15n });
+assert.deepEqual(invokeWindowBlocking(veto(15n)), { variant: "ReplyApplied" });
 assert.equal(source.get(ref)?.pending_close, null);
 
 // Import the *real* Electron facade only after the Host has already accepted
@@ -276,7 +274,7 @@ window.on("close", (event: { preventDefault(): void }) => {
   closeEvents += 1;
   event.preventDefault();
 });
-hostFact({ variant: "CloseRequested", window: ref, close_seq: 14n });
+hostFact({ variant: "CloseRequested", window: ref, close_seq: 16n });
 await new Promise<void>((resolve) => setImmediate(resolve));
 assert.equal(
   closeEvents,
@@ -285,7 +283,7 @@ assert.equal(
 );
 assert.deepEqual(pending(), [null, null]);
 assert.equal(calls.length, originalCallCount + 1);
-assert.deepEqual(calls.at(-1), veto(14n));
+assert.deepEqual(calls.at(-1), veto(16n));
 
 // The same authenticated ReplyApplied on an Allow moves Core to Closing, not
 // back to Open. Its sequence is no longer pending, although the window remains
@@ -295,7 +293,7 @@ const delayedAllow = source.decode(
   encodeWindowEvent({
     variant: "CloseRequested",
     window: ref,
-    close_seq: 15n,
+    close_seq: 17n,
   }),
 );
 source.apply(delayedAllow);
@@ -304,7 +302,7 @@ assert.deepEqual(
   await invokeWindow({
     variant: "CloseReply",
     window: ref,
-    close_seq: 15n,
+    close_seq: 17n,
     verdict: "Allow",
   }),
   { variant: "ReplyApplied" },

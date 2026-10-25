@@ -17,6 +17,8 @@ for (const scenario of [
   "move-only-does-not-resize",
   "pre-ready-bounds-baseline",
   "native-fact-event-parity",
+  "bounds-throwing-move-isolated",
+  "bounds-move-destroys-no-resize",
   "throwing-contents-destroyed",
   "no-public-contents-dispose",
   "throwing-close-and-logger",
@@ -33,6 +35,8 @@ for (const scenario of [
     "move-only-does-not-resize",
     "throwing-contents-destroyed",
     "warning-throws-after-create",
+    "bounds-throwing-move-isolated",
+    "bounds-move-destroys-no-resize",
   ].includes(scenario)
     ? "P2"
     : "P1";
