@@ -121,7 +121,7 @@ export class LifecycleLink {
   /** Authenticated lifecycle apply/dispatch ordinals across a parked CALL. */
   #appliedLastWindowClosed = 0;
   #dispatchedLastWindowClosed = 0;
-  #consumedLastWindowClosed = 0;
+  #handledLastWindowClosed = 0;
 
   private constructor(link: WorkerLink, windowSource?: WindowSource) {
     this.#link = link;
@@ -134,22 +134,19 @@ export class LifecycleLink {
   }
 
   /**
-   * Consume one Host-applied LastWindowClosed after synchronous `closed`.
-   * This method invokes no listeners and mints no lifecycle fact; it only
-   * claims an already applied authenticated record pending dispatch.
+   * Claim authenticated Host LastWindowClosed milestones pre-applied during
+   * synchronous Destroy, after JS `closed` but before Destroy returns. The
+   * cumulative watermark coalesces older pending milestones into one public
+   * callback; their later ring dispatch cannot duplicate the notification.
    */
   consumeAppliedLastWindowClosed(): boolean {
     if (this.#closed) return false;
-    // One older milestone may already have reached onEvent while a newer
-    // milestone was pre-applied during the parked native Destroy CALL. Only
-    // claim the next *undispatched* ordinal; never publish that old event twice.
-    const next =
-      Math.max(
-        this.#dispatchedLastWindowClosed,
-        this.#consumedLastWindowClosed,
-      ) + 1;
-    if (next > this.#appliedLastWindowClosed) return false;
-    this.#consumedLastWindowClosed = next;
+    if (
+      this.#appliedLastWindowClosed <=
+      Math.max(this.#dispatchedLastWindowClosed, this.#handledLastWindowClosed)
+    )
+      return false;
+    this.#handledLastWindowClosed = this.#appliedLastWindowClosed;
     return true;
   }
 
@@ -196,12 +193,14 @@ export class LifecycleLink {
         maybePublishReady();
       } else {
         session.#dispatchedLastWindowClosed += 1;
-        // A parked synchronous Destroy may have delivered this exact applied
-        // record after `closed`. Suppress only its later duplicate callback.
+        // A native Destroy may already have claimed this Host milestone
+        // before returning to JS. Mark an ordinary event handled *before*
+        // application callbacks, which may reenter Destroy or Quit.
         if (
-          session.#dispatchedLastWindowClosed >
-          session.#consumedLastWindowClosed
+          session.#dispatchedLastWindowClosed > session.#handledLastWindowClosed
         ) {
+          session.#handledLastWindowClosed =
+            session.#dispatchedLastWindowClosed;
           handlers.onLastWindowClosed();
         }
       }

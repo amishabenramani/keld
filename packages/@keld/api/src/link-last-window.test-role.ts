@@ -74,4 +74,26 @@ assert.deepEqual(emitted, [
   "all-closed",
 ]);
 assert.equal(session.consumeAppliedLastWindowClosed(), false);
+
+// Multiple already-applied Host milestones are not multiple notifications
+// from the single synchronous Destroy. The cumulative handled watermark
+// suppresses each old EVENT on its eventual separate ring dispatch.
+apply(ch);
+apply(ch);
+assert.equal(session.consumeAppliedLastWindowClosed(), true);
+emitted.push("all-closed");
+assert.equal(session.consumeAppliedLastWindowClosed(), false);
+dispatch(ch);
+dispatch(ch);
+assert.equal(
+  emitted.length,
+  5,
+  "one app callback despite two pending milestones",
+);
+
+// A newly applied real Host event still has its own ordinary dispatch.
+apply(ch);
+dispatch(ch);
+assert.equal(emitted.length, 6);
+assert.equal(session.consumeAppliedLastWindowClosed(), false);
 console.log("PASS correlated-last-window-apply-before-destroy-reply");

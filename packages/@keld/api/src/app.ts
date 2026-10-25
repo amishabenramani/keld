@@ -264,9 +264,7 @@ export function getWindowSnapshots(): readonly WindowSnapshot[] {
 export function flushAppliedLastWindowClosedAfterDestroy(): void {
   const session = connectedLink;
   if (!session) return;
-  while (session.consumeAppliedLastWindowClosed()) {
-    onLastWindowClosed();
-  }
+  if (session.consumeAppliedLastWindowClosed()) onLastWindowClosed();
 }
 
 /** Observe window facts only after their state was applied by the one WorkerLink. */
