@@ -136,6 +136,35 @@ for denied in 'https://github.com/0monish/keld-research/' 'http://github.com/0mo
 done
 "$REAL_GIT" -C "$DEST" remote set-url origin "$HTTPS"
 
+# Reject credential-bearing Git remotes without ever printing the untrusted
+# address. Only synthetic fixture secrets are used; external transport is disabled.
+synthetic_secret='KELD_SYNTHETIC_SECRET_NEVER_LOG'
+credential_origin="https://test-user:${synthetic_secret}@github.com/0monish/keld-research.git"
+before_remote="$("$REAL_GIT" --git-dir="$KELD_BARE" rev-parse refs/heads/main)"
+before_local="$("$REAL_GIT" -C "$DEST" rev-parse HEAD)"
+before_calls="$(wc -l < "$KELD_GIT_CALLS" | tr -d ' ')"
+"$REAL_GIT" -C "$DEST" remote set-url origin "$credential_origin"
+run push "$PARENT" credentialed-origin-refusal
+[[ "$status" == 1 ]]
+grep -Fq 'refusing' "$TMP_ROOT/stderr"
+if grep -Fq "$synthetic_secret" "$TMP_ROOT/stdout" "$TMP_ROOT/stderr"; then
+    echo 'FAIL: rejected origin printed credentials' >&2
+    exit 1
+fi
+"$REAL_GIT" -C "$DEST" remote set-url origin "$HTTPS"
+"$REAL_GIT" -C "$DEST" config remote.origin.pushurl "$credential_origin"
+run push "$PARENT" credentialed-pushurl-refusal
+[[ "$status" == 1 ]]
+grep -Fq 'origin push URL' "$TMP_ROOT/stderr"
+if grep -Fq "$synthetic_secret" "$TMP_ROOT/stdout" "$TMP_ROOT/stderr"; then
+    echo 'FAIL: rejected origin push URL printed credentials' >&2
+    exit 1
+fi
+"$REAL_GIT" -C "$DEST" config --unset-all remote.origin.pushurl
+[[ "$("$REAL_GIT" --git-dir="$KELD_BARE" rev-parse refs/heads/main)" == "$before_remote" ]]
+[[ "$("$REAL_GIT" -C "$DEST" rev-parse HEAD)" == "$before_local" ]]
+[[ "$(wc -l < "$KELD_GIT_CALLS" | tr -d ' ')" == "$before_calls" ]]
+
 # A failed status read must never be mistaken for an empty change list.
 KELD_FAIL_STATUS=1; export KELD_FAIL_STATUS
 before_calls="$(wc -l < "$KELD_GIT_CALLS" | tr -d ' ')"
@@ -282,7 +311,7 @@ grep -Fq 'docs/research origin is not' "$TMP_ROOT/stderr"
 run push "$PARENT" reject
 [[ "$status" == 1 ]]
 grep -Fq 'refusing' "$TMP_ROOT/stderr"
-grep -Fq 'origin is `https://example.invalid/fake.git`' "$TMP_ROOT/stderr"
+grep -Fq 'not 0monish/keld-research' "$TMP_ROOT/stderr"
 [[ "$("$REAL_GIT" -C "$DEST" rev-parse HEAD)" == "$old_local" ]]
 "$REAL_GIT" -C "$DEST" remote remove origin
 run push "$PARENT" reject
