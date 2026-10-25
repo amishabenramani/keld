@@ -100,22 +100,32 @@ function checkOptions(options: BrowserWindowOptions): void {
 }
 
 function ignoredOptionDiagnostics(options: BrowserWindowOptions): void {
+  // Warnings are advisory only. Application code can replace console.warn
+  // with a throwing function; it must never invalidate a committed native
+  // Create or strand a live window without returning its constructor value.
+  const warn = (message: string): void => {
+    try {
+      console.warn(message);
+    } catch {
+      // Diagnostic failure cannot grant or revoke Host window authority.
+    }
+  };
   for (const name of ["backgroundColor", "icon"] as const) {
     if (options[name] !== undefined) {
-      console.warn(
+      warn(
         `KELD window: ${name} is accepted but not yet applied by the native adapter`,
       );
     }
   }
   for (const name of ["disableBlinkFeatures", "spellcheck"] as const) {
     if (options.webPreferences?.[name] !== undefined) {
-      console.warn(
+      warn(
         `KELD window: webPreferences.${name} is accepted but not yet applied`,
       );
     }
   }
   if (options.webPreferences?.preload !== undefined) {
-    console.warn(
+    warn(
       "KELD window: preload execution is not yet implemented for this native window",
     );
   }
@@ -206,6 +216,10 @@ export class BrowserWindow extends EventEmitter {
       ref = replayed;
     } else {
       checkOptions(options);
+      // Read *all* caller-controlled diagnostic getters before the irreversible
+      // authenticated Host Create. A hostile getter cannot throw after the
+      // Host returned Created and strand an unreturned native window.
+      ignoredOptionDiagnostics(options);
       const response = invokeWindowBlocking({
         variant: "Create",
         width: options.width ?? 800,
@@ -257,7 +271,6 @@ export class BrowserWindow extends EventEmitter {
     this.#recovered = replayed !== undefined || adopted;
     windows.set(ref.id, this);
     if (replayed === undefined) {
-      ignoredOptionDiagnostics(options);
       const event = { preventDefault(): void {} };
       emitNativeAppEvent("web-contents-created", event, this.#contents);
       emitNativeAppEvent("browser-window-created", event, this);

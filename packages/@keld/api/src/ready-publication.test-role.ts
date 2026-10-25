@@ -69,4 +69,32 @@ assert.deepEqual(observed, [
 assert.deepEqual(getDispatchedPendingWindowCloses(), [
   { window: ref, closeSeq: 7n },
 ]);
+
+// P1 real-API negative: a user listener and the user-replaceable logger can
+// both throw. The canonical link's next valid fact must still reach another
+// registered callback instead of escaping into WorkerLink's fatal async path.
+let laterFacts = 0;
+const unsubscribeThrower = onWindowFactApplied(() => {
+  throw new Error("untrusted window callback");
+});
+const unsubscribeWitness = onWindowFactApplied(() => {
+  laterFacts += 1;
+});
+const previousLogger = console.error;
+console.error = () => {
+  throw new Error("untrusted diagnostic logger");
+};
+try {
+  hooks.onWindowFact?.({ variant: "Focus", window: ref, focused: true });
+  hooks.onWindowFact?.({ variant: "Focus", window: ref, focused: false });
+} finally {
+  console.error = previousLogger;
+  unsubscribeThrower();
+  unsubscribeWitness();
+}
+assert.equal(
+  laterFacts,
+  2,
+  "both valid native facts must survive the throwing pair",
+);
 console.log("PASS actual-api-ready-microtask");

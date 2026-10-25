@@ -178,7 +178,8 @@ for await (const command of lines) {
     const stale = await invokeWindow({
       variant: "CloseReply", window: ref, close_seq: 1n, verdict: "Allow",
     });
-    report(`VETO_VERIFIED ${stale.variant} ${win.isDestroyed()} ${closeCount} ${closedCount}`);
+    const afterVeto = getWindowSnapshots()[0];
+    report(`VETO_VERIFIED ${stale.variant} ${win.isDestroyed()} ${closeCount} ${closedCount} ${afterVeto?.pending_close === null} ${getDispatchedPendingWindowCloses().length}`);
   } else if (command === "ID_TAMPER") {
     // Independent shipping-Host negative: a second live BrowserWindow must
     // never be able to delete the first window's registered close listeners.
@@ -417,7 +418,7 @@ fn stage_electron(fixture: &ProductFixture) -> keld_cli::boot::DevBootStage {
         .expect("absolute API import");
     let source = format!(
         "import {{ app, BrowserWindow }} from {electron};\n\
-         import {{ getWindowSnapshots, invokeWindow }} from {app};\n{ELECTRON_WINDOW_ROLE}"
+         import {{ getWindowSnapshots, getDispatchedPendingWindowCloses, invokeWindow }} from {app};\n{ELECTRON_WINDOW_ROLE}"
     );
     crate::renderer_bridge::bundle_public_api_entry(
         &fixture.project,
@@ -546,7 +547,7 @@ fn public_electron_browser_window_uses_native_host_and_vetoes_unsaved_close() {
         .expect("probe applied verdict");
     assert_eq!(
         read_control_line(&mut reader),
-        "VETO_VERIFIED ReplyStale false 1 0",
+        "VETO_VERIFIED ReplyStale false 1 0 true 0",
         "a stale Allow must not override the first Cancel verdict"
     );
     assert_eq!(

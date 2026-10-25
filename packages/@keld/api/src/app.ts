@@ -62,7 +62,13 @@ function onWindowFact(fact: WindowEvent): void {
       listener(fact);
     } catch (error) {
       // One application's event callback cannot stop later Host facts.
-      console.error("KELD window listener error:", error);
+      // Even console.error can be replaced by app code: its failure cannot
+      // escape the authenticated WorkerLink drain and kill the Bun role.
+      try {
+        console.error("KELD window listener error:", error);
+      } catch {
+        // Diagnostic delivery has no Host authority or lifecycle effect.
+      }
     }
   }
 }
@@ -273,7 +279,40 @@ export function invokeWindowBlocking(request: WindowRequest): WindowResponse {
       "native window access requires Host Ready and accepted replay",
     );
   }
-  return connectedLink.callWindowBlocking(request);
+  const session = connectedLink;
+  const frozenRequest = snapshotHostCloseVerdict(request);
+  const response = session.callWindowBlocking(frozenRequest);
+  acceptHostCloseReply(frozenRequest, response, session);
+  return response;
+}
+
+/** Copy the exact pair/sequence/verdict sent before a mutable caller can act. */
+function snapshotHostCloseVerdict(request: WindowRequest): WindowRequest {
+  if (request.variant !== "CloseReply") return request;
+  const { id, incarnation } = request.window;
+  const close_seq = request.close_seq;
+  const verdict = request.verdict;
+  return Object.freeze({
+    variant: "CloseReply" as const,
+    window: Object.freeze({ id, incarnation }),
+    close_seq,
+    verdict,
+  });
+}
+
+/** Host reply, not a locally requested verdict, is the only clearing oracle. */
+function acceptHostCloseReply(
+  request: WindowRequest,
+  response: WindowResponse,
+  session: LifecycleLink,
+): void {
+  if (request.variant !== "CloseReply" || response.variant !== "ReplyApplied")
+    return;
+  const liveSource = session.windowSource;
+  const snapshot = liveSource?.get(request.window);
+  if (!liveSource || !snapshot || snapshot.host_destroyed) return;
+  liveSource.acceptHostCloseReply(request.window, request.close_seq);
+  deliveredWindowCloses.acceptHostCloseReply(request.window, request.close_seq);
 }
 
 /** Asynchronous setters and close verdicts do not block the application's event loop. */
@@ -286,7 +325,12 @@ export function invokeWindow(request: WindowRequest): Promise<WindowResponse> {
       ),
     );
   }
-  return connectedLink.callWindow(request);
+  const session = connectedLink;
+  const frozenRequest = snapshotHostCloseVerdict(request);
+  return session.callWindow(frozenRequest).then((response) => {
+    acceptHostCloseReply(frozenRequest, response, session);
+    return response;
+  });
 }
 
 /** Package-private FS invocation; public exports expose only typed read/write. */

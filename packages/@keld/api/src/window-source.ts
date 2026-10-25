@@ -176,6 +176,25 @@ export class WindowSource implements MirrorSource<WindowEvent> {
     this.#onFact(fact);
   }
 
+  /**
+   * Reflect an authenticated, correlated Host `CloseReply -> ReplyApplied`.
+   * This is not an optimistic setter: the caller must have received that exact
+   * Host response. A newer native close sequence wins; an old acknowledgement
+   * can never clear a later `CloseRequested` or a different incarnation.
+   */
+  acceptHostCloseReply(window: WindowRef, closeSeq: bigint): void {
+    this.#requireLive();
+    const previous = this.#windows.get(window.id);
+    if (
+      !previous ||
+      previous.window.incarnation !== window.incarnation ||
+      previous.host_destroyed ||
+      previous.pending_close !== closeSeq
+    )
+      return;
+    this.#windows.set(window.id, snapshot(window, previous.state, null, false));
+  }
+
   /** A local read only; a wrong pair never observes a different incarnation. */
   get(window: WindowRef): WindowSnapshot | undefined {
     this.#requireLive();

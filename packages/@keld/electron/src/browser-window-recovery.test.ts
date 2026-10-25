@@ -25,12 +25,14 @@ for (const scenario of [
   "adopted-without-replay-wrapper",
   "unmaterialized-close",
   "mutable-id",
+  "warning-throws-after-create",
 ]) {
   const severity = [
     "replay-order",
     "replay-link-death",
     "move-only-does-not-resize",
     "throwing-contents-destroyed",
+    "warning-throws-after-create",
   ].includes(scenario)
     ? "P2"
     : "P1";

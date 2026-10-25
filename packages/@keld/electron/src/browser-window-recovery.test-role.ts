@@ -651,6 +651,40 @@ if (mode === "late-import-replay") {
     calls.filter((call) => call.variant === "CloseReply").at(-1)?.variant,
     "CloseReply",
   );
+} else if (mode === "warning-throws-after-create") {
+  becomeReady();
+  const originalWarn = console.warn;
+  console.warn = () => {
+    throw new Error("hostile advisory logger");
+  };
+  let result: InstanceType<typeof BrowserWindow> | undefined;
+  try {
+    result = new BrowserWindow({ backgroundColor: "#fff" });
+  } finally {
+    console.warn = originalWarn;
+  }
+  assert.ok(result, "advisory logger cannot abort the post-Create constructor");
+  assert.equal(result.id, 1);
+  assert.equal(result.isDestroyed(), false);
+  assert.equal(calls.filter((call) => call.variant === "Create").length, 1);
+  assert.equal(BrowserWindow.getAllWindows()[0], result);
+
+  const callerOptions: Record<string, unknown> = {};
+  Object.defineProperty(callerOptions, "backgroundColor", {
+    get() {
+      throw new Error("hostile options getter");
+    },
+  });
+  assert.throws(
+    () => new BrowserWindow(callerOptions),
+    /hostile options getter/,
+  );
+  assert.equal(
+    calls.filter((call) => call.variant === "Create").length,
+    1,
+    "a throwing caller-owned getter must be evaluated before native Create",
+  );
+  assert.equal(BrowserWindow.getAllWindows()[0], result);
 } else {
   throw new Error(`unknown recovery role ${mode}`);
 }

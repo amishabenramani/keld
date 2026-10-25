@@ -823,6 +823,27 @@ channel) and `dispatch` on the same channel's event delivery. The contract:
    `EVENT` arrives (#449). So `isMaximized()` immediately after `maximize()` may still
    be false. Inside the `'maximize'` listener it is true.
 
+**Q5/Q6 CloseReply settlement is not a speculative setter.** The pending `close_seq`
+bookkeeping is retired only after the one correlated, authenticated Host
+`REPLY ReplyApplied` to the exact `CloseReply(window id, incarnation, seq,
+verdict)` call. A successful Q5/Veto response proves the Host has already moved
+the window from `ClosePending(seq)` to `Open`; Q6/Allow proves it moved to
+`Closing` but **does not** yet prove physical release or `Destroyed`. Do not wait
+for a new, unallocated
+wire `EVENT` to clear the previous pending sequence. The API snapshots the
+primitive window pair, sequence and verdict *before encoding/sending* so a
+mutable caller cannot redirect a delayed acknowledgement. The source clears
+only an exact still-pending pair/sequence; a newer pending close is never
+cleared by an old Q5 reply. The dispatched-fact receipt ledger holds one
+monotonic per-incarnation acknowledged sequence watermark so a pre-applied but
+**not yet dispatched** Created/CloseRequested fact cannot resurrect a settled
+old sequence after the correlated Host reply. Denied/stale/lost replies and
+unrelated setter responses do not clear anything. The next unacknowledged
+`CloseRequested(seq + 1)` still requires its own `'close'`/verdict; neither
+mirror may invent an Allow. This is a bounded client interpretation of the
+existing Q5/Q6 Host reply, not an additional Host authority, second transport,
+new wire event or promise of draw.io Quit compatibility.
+
 The window mirror entry keeps the host facts (`WindowState`, live or host-destroyed,
 pending `close_seq`). The Electron-facing tombstones are separate (§4.e).
 

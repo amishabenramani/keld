@@ -129,6 +129,50 @@ test("Created literal supplies the complete host snapshot on the generated chann
   expect(source.get(WINDOW)?.state).toEqual(STATE);
 });
 
+test("Host-acknowledged Veto clears only the exact pending identity and sequence", () => {
+  const source = new WindowSource(() => {});
+  accept(source, literal("event-created-pending-close"));
+  expect(source.get(WINDOW)?.pending_close).toBe(300n);
+  source.acceptHostCloseReply({ ...WINDOW, id: 8 }, 300n);
+  source.acceptHostCloseReply({ ...WINDOW, incarnation: 301n }, 300n);
+  source.acceptHostCloseReply(WINDOW, 301n);
+  expect(source.get(WINDOW)?.pending_close).toBe(300n);
+  source.acceptHostCloseReply(WINDOW, 300n);
+  expect(source.get(WINDOW)?.pending_close).toBeNull();
+
+  accept(
+    source,
+    encodeWindowEvent({
+      variant: "CloseRequested",
+      window: WINDOW,
+      close_seq: 301n,
+    }),
+  );
+  source.acceptHostCloseReply(WINDOW, 300n);
+  expect(source.get(WINDOW)?.pending_close).toBe(301n);
+  source.acceptHostCloseReply(WINDOW, 301n);
+  expect(source.get(WINDOW)?.pending_close).toBeNull();
+
+  accept(
+    source,
+    encodeWindowEvent({
+      variant: "CloseRequested",
+      window: WINDOW,
+      close_seq: 302n,
+    }),
+  );
+  source.acceptHostCloseReply(WINDOW, 302n); // Host ReplyApplied(Allow)
+  expect(source.get(WINDOW)?.pending_close).toBeNull();
+  expect(source.get(WINDOW)?.host_destroyed).toBe(false);
+  accept(source, encodeWindowEvent({ variant: "Destroyed", window: WINDOW }));
+  expect(source.get(WINDOW)?.host_destroyed).toBe(true);
+
+  source.end(linkError("KELD-IPC-022", "role retired"));
+  expect(() => source.acceptHostCloseReply(WINDOW, 301n)).toThrow(
+    "KELD-IPC-022",
+  );
+});
+
 test("every state fact changes only its own host-confirmed field", () => {
   const source = new WindowSource(() => {});
   accept(source, literal("event-created"));
