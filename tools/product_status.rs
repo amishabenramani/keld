@@ -1,5 +1,7 @@
 //! Semantic validator and deterministic renderer for Keld product status.
 
+#![forbid(unsafe_code)]
+
 #[path = "justfile_contract.rs"]
 mod justfile_contract;
 #[path = "repo_path_contract.rs"]

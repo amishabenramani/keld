@@ -1,5 +1,7 @@
 //! Validates Mermaid documentation blocks without adding a workspace dependency.
 
+#![forbid(unsafe_code)]
+
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
