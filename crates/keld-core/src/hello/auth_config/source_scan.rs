@@ -458,8 +458,7 @@ fn starts_following_statement(
     let starts_statement = matches!(
         &token.kind,
         ConfigToken::Word(word)
-            if matches!(word.as_str(), "export" | "import" | "const" | "let" | "var"
-                | "class" | "function" | "interface" | "type" | "enum" | "declare" | "namespace")
+            if !matches!(word.as_str(), "in" | "instanceof" | "as" | "satisfies")
     );
     starts_statement
         && scan
@@ -471,15 +470,17 @@ fn starts_following_statement(
 fn validate_satisfies_type_suffix(
     scan: &mut SourceScan<'_>,
 ) -> Result<(Option<SourceToken>, usize), AuthConfigError> {
-    // A simple qualified type name is static. Do not permit a runtime
-    // operator to modify the exported object after a type assertion.
-    let Some(type_name) = scan.next() else {
-        return Err(auth_config_error("satisfies requires a static type name"));
+    let Some(first) = scan.next() else {
+        return Err(auth_config_error("satisfies requires a static type"));
     };
-    if !matches!(type_name.kind, ConfigToken::Word(_)) {
-        return Err(auth_config_error("satisfies requires a static type name"));
+    let mut previous_end = first.end;
+    match first.kind {
+        ConfigToken::Word(_) => {}
+        ConfigToken::Symbol('{') => {
+            previous_end = consume_static_type_group(scan, '}')?;
+        }
+        _ => return Err(auth_config_error("satisfies requires a static type")),
     }
-    let mut previous_end = type_name.end;
     loop {
         match scan.next() {
             Some(token) if token.kind == ConfigToken::Symbol('.') => {
@@ -491,9 +492,47 @@ fn validate_satisfies_type_suffix(
                 }
                 previous_end = segment.end;
             }
+            Some(token) if token.kind == ConfigToken::Symbol('<') => {
+                previous_end = consume_static_type_group(scan, '>')?;
+            }
+            Some(token) if token.kind == ConfigToken::Symbol('[') => {
+                previous_end = consume_static_type_group(scan, ']')?;
+            }
             end => return Ok((end, previous_end)),
         }
     }
+}
+
+/// Consume inert type syntax, leaving the exported expression's delimiters
+/// outside the group untouched. This scanner never evaluates a type or value.
+fn consume_static_type_group(
+    scan: &mut SourceScan<'_>,
+    closing: char,
+) -> Result<usize, AuthConfigError> {
+    let mut closings = vec![closing];
+    while let Some(token) = scan.next() {
+        let ConfigToken::Symbol(symbol) = token.kind else {
+            continue;
+        };
+        match symbol {
+            '{' => closings.push('}'),
+            '[' => closings.push(']'),
+            '(' => closings.push(')'),
+            '<' => closings.push('>'),
+            // The arrow in a function type is not a generic closer.
+            '>' if scan.source[..token.start].ends_with('=') => {}
+            '}' | ']' | ')' | '>' => {
+                if closings.pop() != Some(symbol) {
+                    return Err(auth_config_error("mismatched static type delimiter"));
+                }
+                if closings.is_empty() {
+                    return Ok(token.end);
+                }
+            }
+            _ => {}
+        }
+    }
+    Err(auth_config_error("unterminated static type"))
 }
 
 /// Only a computed, quoted, unrelated root key is unambiguous. Even a quoted

@@ -535,6 +535,54 @@ mod tests {
     }
 
     #[test]
+    fn static_type_annotations_preserve_boot_mode() {
+        for suffix in [
+            "satisfies Record<string, string>;",
+            "satisfies App.Config<Record<string, string>>;",
+            "satisfies { initialWindow: 'none' };",
+            "satisfies { values: Record<string, { nested: string[] }> };",
+        ] {
+            let facade = format!("export default {{ initialWindow: 'none' }} {suffix}");
+            assert!(initial_window_from_config_ts(&facade).expect("static facade type"));
+            let renderer = format!("export default {{ renderer: 'index.html' }} {suffix}");
+            assert!(!initial_window_from_config_ts(&renderer).expect("static renderer type"));
+        }
+        for suffix in [
+            "satisfies Record<string, string> && other;",
+            "satisfies { initialWindow: 'none' } && other;",
+            "satisfies Record<string, string;",
+        ] {
+            let source = format!("export default {{ initialWindow: 'none' }} {suffix}");
+            assert!(initial_window_from_config_ts(&source).is_err());
+        }
+    }
+
+    #[test]
+    fn next_line_expression_statements_preserve_boot_mode() {
+        for statement in ["console.log('after');", "runAfter();"] {
+            for suffix in ["", "as const", "satisfies App.Config"] {
+                let facade =
+                    format!("export default {{ initialWindow: 'none' }} {suffix}\n{statement}");
+                assert!(initial_window_from_config_ts(&facade).expect("independent statement"));
+                let renderer =
+                    format!("export default {{ renderer: 'index.html' }} {suffix}\n{statement}");
+                assert!(!initial_window_from_config_ts(&renderer).expect("independent statement"));
+            }
+        }
+        for continuation in [
+            "in other",
+            "instanceof Other",
+            "(other)",
+            "['renderer']",
+            ".renderer",
+            "&& other",
+        ] {
+            let source = format!("export default {{ initialWindow: 'none' }}\n{continuation}");
+            assert!(initial_window_from_config_ts(&source).is_err());
+        }
+    }
+
+    #[test]
     fn default_renderer_is_index_html() {
         assert_eq!(DEFAULT_RENDERER, "index.html");
         assert_eq!(DEFAULT_ENTRY, "src/main.ts");
