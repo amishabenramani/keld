@@ -7462,12 +7462,9 @@ impl PrimaryRouter {
             fs,
             #[cfg(test)]
             None,
+            #[cfg(target_os = "macos")]
             BoundSetup {
-                #[cfg(target_os = "macos")]
                 window_native_support: mac_start.facade_windows.then_some(true),
-                #[cfg(not(target_os = "macos"))]
-                window_native_support: None,
-                #[cfg(target_os = "macos")]
                 auth_startup: fs.map(|snapshot| {
                     (
                         snapshot.verified.clone(),
@@ -7475,6 +7472,13 @@ impl PrimaryRouter {
                         mac_start.presentation,
                     )
                 }),
+            },
+            // Linux/Windows have no owned macOS auth startup to move; borrow
+            // the optional native-window policy instead of copying the bundle
+            // by value (Clippy's needless_pass_by_value is deny-by-default).
+            #[cfg(not(target_os = "macos"))]
+            &BoundSetup {
+                window_native_support: None,
             },
         )
     }
@@ -7501,7 +7505,11 @@ impl PrimaryRouter {
         shutdown: SessionShutdownState,
         fs: Option<&GuardSnapshot>,
         #[cfg(test)] fs_worker_test_gate: Option<Arc<FsWorkerTestGate>>,
-        options: BoundSetup,
+        // On macOS the verified auth startup is *consumed* exactly once by
+        // AuthWorker; do not introduce a clone of its native presentation port.
+        #[cfg(target_os = "macos")] options: BoundSetup,
+        // On Linux/Windows BoundSetup contains only Copy policy values.
+        #[cfg(not(target_os = "macos"))] options: &BoundSetup,
     ) -> Result<Self, HostAppError> {
         let identity = PrimaryLinkIdentity::Role(bound.principal());
         let attempt = bound.attempt();
