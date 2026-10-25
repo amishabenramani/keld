@@ -14,21 +14,32 @@ import * as electron from "./index";
 
 /** Read the same public member an application can read, including inherited methods. */
 function member(target: unknown, name: string): unknown {
-  if ((typeof target !== "object" && typeof target !== "function") || target === null) {
+  if (
+    (typeof target !== "object" && typeof target !== "function") ||
+    target === null
+  ) {
     return undefined;
   }
   return Reflect.get(target, name);
 }
 
 /** Observe the real module's missing method and the resulting ordinary application call. */
-function expectMissingListenerMethod(name: "on" | "once" | "removeListener"): void {
+function expectMissingListenerMethod(
+  name: "on" | "once" | "removeListener",
+): void {
   // Check both public shapes; an empty named export must not mask a callable default.
-  for (const ipcMain of [member(electron, "ipcMain"), member(electron.default, "ipcMain")]) {
+  for (const ipcMain of [
+    member(electron, "ipcMain"),
+    member(electron.default, "ipcMain"),
+  ]) {
     const method = member(ipcMain, name);
     expect(typeof method).toBe("undefined");
     const listener = (): void => {};
     expect(() =>
-      Reflect.apply(method as (...args: unknown[]) => unknown, ipcMain, ["rendererReq", listener]),
+      Reflect.apply(method as (...args: unknown[]) => unknown, ipcMain, [
+        "rendererReq",
+        listener,
+      ]),
     ).toThrow(TypeError);
   }
 }
