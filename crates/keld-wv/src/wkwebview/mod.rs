@@ -46,6 +46,10 @@ use crate::startup::{PageLoad, StartupPhase, StartupTrace, trace_enabled};
 
 mod macos_bridge;
 mod macos_profile;
+#[cfg(all(feature = "profile-test-hooks", debug_assertions))]
+mod macos_resource_debug;
+#[cfg(any(test, all(feature = "profile-test-hooks", debug_assertions)))]
+mod macos_resource_intake;
 
 use macos_bridge::{BridgeNavigationHandle, MacRendererBridge};
 pub use macos_bridge::{RendererBridgeEndpoint, RendererBridgeOutcome, RendererBridgeRequest};
@@ -59,6 +63,8 @@ use macos_profile::MacProfileOwner;
 struct View {
     webview: wry::WebView,
     window: Window,
+    #[cfg(all(feature = "profile-test-hooks", debug_assertions))]
+    _resource_probe: Retained<macos_resource_debug::KeldNativeResourceProbe>,
 }
 
 enum WkUserEvent {
@@ -646,6 +652,12 @@ impl WkWebViewEngine {
         let id = self.next_id;
         let webview_id = WebviewId(id);
         let configuration = self.profile.configuration_for_view()?;
+        // GH473 test hook: register one default-deny diagnostic scheme on the
+        // selected configuration *before* Wry constructs WKWebView. It serves
+        // no application bytes and is entirely absent from shipping builds.
+        #[cfg(all(feature = "profile-test-hooks", debug_assertions))]
+        let resource_probe =
+            macos_resource_debug::KeldNativeResourceProbe::install(&configuration)?;
         let installed = renderer_endpoint
             .map(|endpoint| MacRendererBridge::install(webview_id, &configuration, endpoint))
             .transpose()?;
@@ -668,7 +680,15 @@ impl WkWebViewEngine {
         }
         mark_startup(&self.startup, StartupPhase::WebviewAttached);
         self.next_id += 1;
-        self.views.insert(id, View { webview, window });
+        self.views.insert(
+            id,
+            View {
+                webview,
+                window,
+                #[cfg(all(feature = "profile-test-hooks", debug_assertions))]
+                _resource_probe: resource_probe,
+            },
+        );
         Ok(webview_id)
     }
 
