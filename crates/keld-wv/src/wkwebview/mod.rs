@@ -452,20 +452,53 @@ impl WkWebViewEngine {
                         destroy_renderer_bridges(&mut renderer_bridges);
                     }
                     Event::UserEvent(WkUserEvent::App(command)) => {
+                        // Debug+feature-gated real-main-thread hostile fixture:
+                        // a test-controlled maximization request instead calls
+                        // AppKit's genuine `NSWindow.close()` (NOT Tao's
+                        // cancelable `performClose:` / AX red-button path).
+                        // Default/shipping builds compile out this injection,
+                        // and only the dedicated test host opts into it.
+                        #[cfg(all(feature = "profile-test-hooks", debug_assertions))]
+                        let test_external_close = if let AppWindowCommand::SetMaximized {
+                            view,
+                            ..
+                        } = command
+                        {
+                            if std::env::var_os("KELD_T1B_UNEXPECTED_NATIVE_CLOSE").is_some() {
+                                if let Some(window) = views
+                                    .get(&view.0)
+                                    .filter(|view| view.registry_managed)
+                                    .and_then(|view| view.webview.webview().window())
+                                {
+                                    window.close();
+                                    true
+                                } else {
+                                    false
+                                }
+                            } else {
+                                false
+                            }
+                        } else {
+                            false
+                        };
+                        #[cfg(not(all(feature = "profile-test-hooks", debug_assertions)))]
+                        let test_external_close = false;
                         let native = managed_windows::NativeBuild {
                             target,
                             profile,
                             startup: &startup_in_loop,
                             media_seed_allow,
                         };
-                        if let Err(error) = managed_windows::command(
-                            command,
-                            &native,
-                            next_id,
-                            &mut views,
-                            &mut renderer_bridges,
-                            &events,
-                        ) {
+                        if !test_external_close
+                            && let Err(error) = managed_windows::command(
+                                command,
+                                &native,
+                                next_id,
+                                &mut views,
+                                &mut renderer_bridges,
+                                &events,
+                            )
+                        {
                             main_owner_failure.get_or_insert(error);
                             fatal_in_loop.store(true, Ordering::Release);
                             terminal_requested = true;
@@ -530,6 +563,34 @@ impl WkWebViewEngine {
                         }
                         if legacy_closed && views.is_empty() {
                             let _ = events.send(AppWindowEvent::LastWindowClosed);
+                        }
+                    }
+                    Event::WindowEvent {
+                        window_id,
+                        event: WindowEvent::Destroyed,
+                        ..
+                    } => {
+                        // Tao 0.35.3 can report `windowWillClose:` as Destroyed
+                        // after an out-of-band NSWindow.close(), *without* a
+                        // preceding cancelable CloseRequested. Ordinary Keld
+                        // DestroyWindow removes the owned view from `views`
+                        // BEFORE its NSWindow drops, so that path is not here.
+                        // An observed Destroyed while this registry-managed
+                        // view is still present means physical release has
+                        // bypassed Core's close veto and T11 tombstone order.
+                        // No caller or renderer may fabricate a successful
+                        // Released reply or keep a ghost BrowserWindow alive.
+                        if let Some((id, _)) = views.iter().find(|(_, view)| {
+                            view.registry_managed && view.window.id() == window_id
+                        }) {
+                            main_owner_failure.get_or_insert_with(|| {
+                                WvError::EventLoop(format!(
+                                    "unexpected out-of-band native NSWindow close for registry view {id}; fail-closed Host shutdown instead of a ghost window or forged close veto"
+                                ))
+                            });
+                            fatal_in_loop.store(true, Ordering::Release);
+                            terminal_requested = true;
+                            destroy_renderer_bridges(&mut renderer_bridges);
                         }
                     }
                     Event::WindowEvent {

@@ -203,6 +203,24 @@ for await (const command of lines) {
       throw new Error("attacker Destroy evicted the surviving window registry entry");
     }
     report(`ID_TAMPER_SAFE ${win.id} ${closeCount}`);
+  } else if (command === "QUIT_WHILE_OPEN") {
+    let verdict = "unexpected-success";
+    try {
+      await app.quit();
+    } catch (error) {
+      if (error instanceof Error && error.message.startsWith("KELD-COMPAT-012:")) {
+        verdict = "KELD-COMPAT-012";
+      } else {
+        verdict = "untyped";
+      }
+    }
+    report(`QUIT_DENIED ${verdict} ${!win.isDestroyed()} ${BrowserWindow.getAllWindows().length}`);
+  } else if (command === "NATIVE_OUT_OF_BAND_CLOSE") {
+    // In the dedicated profile-test-hooks binary ONLY, the trusted UI-loop
+    // adapter maps this one setter wake into actual NSWindow.close() on main.
+    // The ordinary shipping binary never compiles in that test injection.
+    win.maximize();
+    report(`NATIVE_EXTERNAL_TRIGGER ${win.id} ${closeCount} ${closedCount}`);
   } else if (command === "ALLOW") {
     win.off("close", veto);
     win.close();
@@ -531,6 +549,16 @@ fn public_electron_browser_window_uses_native_host_and_vetoes_unsaved_close() {
     await_visible_native_census(host_pid, &initial);
 
     writer
+        .write_all(b"QUIT_WHILE_OPEN\n")
+        .expect("attempt unsupported non-vetoable application Quit");
+    assert_eq!(
+        read_control_line(&mut reader),
+        "QUIT_DENIED KELD-COMPAT-012 true 1",
+        "app.quit must not bypass close veto while a native document is live"
+    );
+    assert_eq!(visible_app_windows(host_pid), initial);
+
+    writer
         .write_all(b"ALLOW\n")
         .expect("accept next close attempt");
     assert_eq!(read_control_line(&mut reader), "CLOSED 1");
@@ -544,6 +572,77 @@ fn public_electron_browser_window_uses_native_host_and_vetoes_unsaved_close() {
         output.status.success(),
         "public BrowserWindow Host failed: {output:?}"
     );
+    await_process_gone(bun_pid);
+}
+
+/// Only compiled by the explicit debug fixture feature. The tested UI path
+/// is the actual Tao `windowWillClose:` -> Destroyed, not a fake native fact,
+/// synthetic Rust event or cancelable AX/red-button request.
+#[cfg(feature = "profile-test-hooks")]
+#[test]
+fn external_appkit_close_fails_closed_instead_of_leaving_a_ghost_browser_window() {
+    let fixture = ProductFixture::new("facade-external-native-close");
+    let staged = stage_electron(&fixture);
+    let listener_path = fixture.root.path().join("external-window.sock");
+    let listener = UnixListener::bind(&listener_path).expect("private control listener");
+    listener.set_nonblocking(true).expect("bounded accept");
+    let child = Command::new(staged.host())
+        .process_group(0)
+        .current_dir(staged.root())
+        .env("KELD_T1B_CONTROL", &listener_path)
+        .env("KELD_T1B_UNEXPECTED_NATIVE_CLOSE", "1")
+        .env("KELD_DEV_LEASE", "stdin-v1")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("launch real debug-profile macOS Host");
+    let mut cleanup = ShippingLaunchCleanup::new(child);
+    let host = cleanup.cli.as_mut().expect("live Host");
+    let host_pid = host.id();
+    let _lease = host.stdin.take().expect("retain dev lease");
+    let stream = accept_before(&listener, Instant::now() + EVENT_DEADLINE);
+    stream
+        .set_read_timeout(Some(EVENT_DEADLINE))
+        .expect("bounded control read");
+    let mut reader = BufReader::new(stream.try_clone().expect("control clone"));
+    let mut writer = stream;
+    let created = read_control_line(&mut reader);
+    let parts: Vec<_> = created.split_whitespace().collect();
+    assert_eq!(parts.first().copied(), Some("PUBLIC_CREATED"), "{created}");
+    let bun_pid = parse_pid(parts.get(1).copied(), &created);
+    cleanup.record_authenticated_groups(process_group(host_pid), process_group(bun_pid));
+    assert_eq!(
+        &parts[2..],
+        ["1", "640x480", "contents,window"],
+        "{created}"
+    );
+    assert_eq!(visible_app_windows(host_pid).len(), 1);
+
+    writer
+        .write_all(b"NATIVE_OUT_OF_BAND_CLOSE\n")
+        .expect("inject actual AppKit close on UI thread");
+    assert_eq!(
+        read_control_line(&mut reader),
+        "NATIVE_EXTERNAL_TRIGGER 1 0 0",
+        "test stimulus did not traverse the real native setter command"
+    );
+    // `NSWindow.close()` makes no request to the Bun veto listener. The
+    // accepted outcome is a Host fatal with cleanup, never a live ghost or
+    // a fabricated successful user `closed`/LastWindowClosed event.
+    drop(reader);
+    drop(writer);
+    let output = wait_child_output(cleanup.release(), EVENT_DEADLINE);
+    assert!(
+        !output.status.success(),
+        "unmanaged native close was silently accepted: {output:?}"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("unexpected out-of-band native NSWindow close for registry view"),
+        "Host must fail closed specifically on Tao Destroyed, not an unrelated crash: {stderr}"
+    );
+    await_visible_native_close(host_pid);
     await_process_gone(bun_pid);
 }
 
