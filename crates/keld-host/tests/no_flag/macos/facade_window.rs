@@ -207,8 +207,8 @@ for await (const command of lines) {
     win.off("close", veto);
     win.close();
   } else if (command === "SECOND") {
-    replacement = new BrowserWindow({ width: 320, height: 240 });
-    report(`SECOND ${replacement.id} ${replacement.getSize().join("x")}`);
+    replacement = new BrowserWindow({ width: 320, height: 240, x: 37, y: 91 });
+    report(`SECOND ${replacement.id} ${replacement.getSize().join("x")} ${replacement.getPosition().join(",")}`);
   } else if (command === "DESTROY") {
     if (!replacement) throw new Error("missing second native window");
     const second = replacement;
@@ -267,6 +267,47 @@ fn visible_app_windows(pid: u32) -> Vec<serde_json::Value> {
         .into_iter()
         .filter(|window| window["on_screen"] == true)
         .collect()
+}
+
+/// Independent process/SDK oracle: CoreGraphics sees the actual compositor
+/// bounds, and `NSScreen` reports the real `AppKit` point-space display frame.
+/// Neither value comes from Keld's `WindowSnapshot` or fake UI-port receipts.
+fn actual_native_frame_witness(host_pid: u32) -> serde_json::Value {
+    const SWIFT: &str = r#"
+import AppKit
+import CoreGraphics
+import Foundation
+let pid = Int32(ProcessInfo.processInfo.environment["KELD_WINDOW_WITNESS_PID"]!)!
+let all = CGWindowListCopyWindowInfo([.optionAll, .excludeDesktopElements], kCGNullWindowID) as! [[String: Any]]
+let rows = all.compactMap { row -> [String: Any]? in
+  guard (row[kCGWindowOwnerPID as String] as? NSNumber)?.int32Value == pid,
+        (row[kCGWindowLayer as String] as? NSNumber)?.intValue == 0,
+        (row[kCGWindowIsOnscreen as String] as? NSNumber)?.boolValue == true,
+        let bounds = row[kCGWindowBounds as String] as? [String: Any] else { return nil }
+  return ["bounds": bounds, "title": row[kCGWindowName as String] as? String ?? ""]
+}
+let primary = NSScreen.screens.first!
+let frame = primary.frame
+let output: [String: Any] = [
+  "rows": rows,
+  "scale": primary.backingScaleFactor,
+  "primaryPointsHigh": frame.size.height,
+  "cgPixelsHigh": CGDisplayPixelsHigh(CGMainDisplayID()),
+]
+let data = try! JSONSerialization.data(withJSONObject: output, options: [.sortedKeys])
+print(String(data: data, encoding: .utf8)!)
+"#;
+    let output = Command::new("/usr/bin/swift")
+        .arg("-e")
+        .arg(SWIFT)
+        .env("KELD_WINDOW_WITNESS_PID", host_pid.to_string())
+        .output()
+        .expect("independent native CG/AppKit placement observer");
+    assert!(
+        output.status.success(),
+        "Swift CG/AppKit observer failed: {output:?}"
+    );
+    serde_json::from_slice(&output.stdout).expect("native placement witness JSON")
 }
 
 fn await_visible_native_census(pid: u32, expected: &[serde_json::Value]) {
@@ -370,13 +411,37 @@ fn assert_followup_create_destroy(
         .expect("create second host window");
     assert_eq!(
         read_control_line(reader),
-        "SECOND 3 320x240",
+        "SECOND 3 320x240 37,91",
         "the destroyed attacker consumes ID 2; Host IDs must never be recycled"
     );
     assert_eq!(
         visible_app_windows(host_pid).len(),
         1,
         "second native window absent"
+    );
+    let geometry = actual_native_frame_witness(host_pid);
+    let rows = geometry["rows"].as_array().expect("native CGWindow rows");
+    assert_eq!(
+        rows.len(),
+        1,
+        "actual physical compositor window: {geometry}"
+    );
+    let bounds = &rows[0]["bounds"];
+    assert_eq!(bounds["X"].as_f64(), Some(37.0), "native X: {geometry}");
+    assert_eq!(
+        bounds["Y"].as_f64(),
+        Some(91.0),
+        "native top-left Y: {geometry}"
+    );
+    assert_eq!(
+        bounds["Width"].as_f64(),
+        Some(320.0),
+        "native width: {geometry}"
+    );
+    assert_eq!(
+        bounds["Height"].as_f64(),
+        Some(240.0),
+        "native height: {geometry}"
     );
     writer
         .write_all(b"DESTROY\n")

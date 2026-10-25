@@ -946,7 +946,7 @@ test enumerates every pair and asserts its row.
 | C5 | `Closing` | `Reply current` | — | impossible: no request pending in `Closing`; classified as `Reply stale` |
 | C6 | `Closing` | `Reply stale` | `Closing` | `REPLY ReplyStale`, one host diagnostic (T7) |
 | C7 | `Closing` | `Setter` | `Closing` | ERR 038 |
-| C8 | `Closing` | `Destroy` | `Closing` | one more deferred `REPLY Destroyed`, written at the `Released` row |
+| C8 | `Closing` | `Destroy` | `Closing` | If fewer than 64 pending Destroy correlations exist for this window, admit one more deferred `REPLY Destroyed`, written at `Released`; at the 64-call Host capacity, refuse this new correlation immediately with correlated nonterminal `ERR KELD-CORE-046`, without appending or changing native state |
 | C9 | `Closing` | `Released` | `Destroyed` | T11 below |
 | C10 | `Closing` | `Role loss` | `Closing` | nothing; already closing (an earlier `Destroy` reply is not written, because the owner link is retired) |
 | C11 | `Closing` | `Session end` | `Closing` | nothing; already closing |
@@ -977,7 +977,14 @@ when a request is pending and the sequence matches, so in every other state it i
 **T11 (row C9).** In one step on the owner link's single writer, and only while that
 link is live and not retired (after a `Role loss` row nothing is written): `Destroyed`, if a
 `Created` was written for this window; then `LastWindowClosed`, if no live window
-remains and the step is outside a session end; then every deferred `REPLY Destroyed`.
+remains and the step is outside a session end; then every **admitted** deferred
+`REPLY Destroyed`, in correlation/admission order. The new bounded Host admission
+budget is **64 outstanding Destroy correlations per window** while `Closing`;
+attempt 65 receives immediate `ERR KELD-CORE-046` on its own correlation (no
+window effects and no reply from `Released`). The fixed number is a reviewed
+capacity-policy proposal on integration PR #1181, distinct from the Worker
+abandonment and Auth quotas. The original unlimited C8 assumption is unsafe if
+AppKit Release stalls; this amendment requires independent GH531 owner review.
 *Live* means `Opening`, `Open`, `ClosePending` or `Closing`. An `Opening` window counts
 because its `Create` was admitted before this step, as an Electron constructor returns
 before any later close completes; so the session cannot quit before it opens.
@@ -1277,9 +1284,15 @@ export interface CloseEvent { preventDefault(): void; readonly defaultPrevented:
 export interface BrowserWindowEventMap {
   close: [event: CloseEvent];
   closed: [];
+  /** Native Bounds changed x or y (not a resize-only fact). */
+  move: [];
   maximize: [];
   unmaximize: [];
   resize: [];
+  focus: [];
+  blur: [];
+  'enter-full-screen': [];
+  'leave-full-screen': [];
 }
 export interface WebContentsEventMap { destroyed: [] }
 

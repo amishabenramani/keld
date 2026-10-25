@@ -15,6 +15,7 @@ import type {
   WindowResponse,
 } from "./window-codec.ts";
 import type { WindowSnapshot } from "./window-source.ts";
+import { WindowCloseReceipts } from "./window-close-receipts.ts";
 
 export type Unsubscribe = () => void;
 
@@ -31,6 +32,12 @@ type ReadyWaiter = {
 };
 
 let hostReady = false;
+let nativeReadyQueued = false;
+
+/** An authenticated raw Host Ready has arrived, even before public Ready. */
+export function hasObservedHostReady(): boolean {
+  return hostReady || nativeReadyQueued;
+}
 let linkDead: Error | undefined;
 let readyWaiters: ReadyWaiter[] = [];
 /**
@@ -45,8 +52,11 @@ let connectedLink: LifecycleLink | undefined;
 let nextListenerId = 1;
 const lastWindowClosedListeners = new Map<number, () => void>();
 const windowFactListeners = new Set<(fact: WindowEvent) => void>();
+const deliveredWindowCloses = new WindowCloseReceipts();
+const readyWindowCatchUps = new Set<() => void>();
 
 function onWindowFact(fact: WindowEvent): void {
+  deliveredWindowCloses.observe(fact);
   for (const listener of [...windowFactListeners]) {
     try {
       listener(fact);
@@ -57,13 +67,46 @@ function onWindowFact(fact: WindowEvent): void {
   }
 }
 
+/** Only delivered Host close records, never merely mirror-applied frames. */
+export function getDispatchedPendingWindowCloses(): ReturnType<
+  WindowCloseReceipts["pending"]
+> {
+  return hostReady ? deliveredWindowCloses.pending() : [];
+}
 function onHostReady(): void {
-  if (hostReady) return;
-  hostReady = true;
-  linkDead = undefined;
-  const waiters = readyWaiters;
-  readyWaiters = [];
-  for (const waiter of waiters) waiter.resolve();
+  if (hostReady || nativeReadyQueued || linkDead) return;
+  nativeReadyQueued = true;
+  // The canonical WorkerLink can drain Ready followed by Bounds/Focus in one
+  // synchronous task. Delay only *public* Ready publication by one microtask,
+  // never its genuine Host Init source: these later facts remain pre-Ready and
+  // cannot flush a recovered close before application whenReady continuations.
+  // WindowSource applies every record in-order in the existing bounded ring;
+  // no extra fact queue, timer/polling, or second dispatch authority is added.
+  queueMicrotask(() => {
+    nativeReadyQueued = false;
+    if (hostReady || linkDead) return;
+    hostReady = true;
+    const waiters = readyWaiters;
+    readyWaiters = [];
+    for (const waiter of waiters) waiter.resolve();
+    // Late Electron imports get a one-shot authenticated mirror catch-up.
+    for (const catchUp of [...readyWindowCatchUps]) {
+      setImmediate(() => safelyCatchUpWindow(catchUp));
+    }
+  });
+}
+
+function safelyCatchUpWindow(catchUp: () => void): void {
+  if (!hostReady || linkDead !== undefined) return;
+  try {
+    catchUp();
+  } catch (error) {
+    try {
+      console.error("KELD authenticated window catch-up failed:", error);
+    } catch {
+      // User logging must never crash the source/Host lifecycle.
+    }
+  }
 }
 
 function onLastWindowClosed(): void {
@@ -201,10 +244,16 @@ export function getWindowSnapshots(): readonly WindowSnapshot[] {
 /** Observe window facts only after their state was applied by the one WorkerLink. */
 export function onWindowFactApplied(
   listener: (fact: WindowEvent) => void,
+  onReadyCatchUp?: () => void,
 ): Unsubscribe {
   windowFactListeners.add(listener);
+  if (onReadyCatchUp) {
+    readyWindowCatchUps.add(onReadyCatchUp);
+    if (hostReady) setImmediate(() => safelyCatchUpWindow(onReadyCatchUp));
+  }
   return () => {
     windowFactListeners.delete(listener);
+    if (onReadyCatchUp) readyWindowCatchUps.delete(onReadyCatchUp);
   };
 }
 

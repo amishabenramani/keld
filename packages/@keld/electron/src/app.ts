@@ -5,7 +5,7 @@
  * Electron event names, listener behavior, and the default quit on
  * window-all-closed when no user listener is registered.
  */
-import { app as apiApp } from "../../api/src/app.ts";
+import { app as apiApp, hasObservedHostReady } from "../../api/src/app.ts";
 
 type AppListener = (...args: never[]) => void;
 
@@ -40,7 +40,7 @@ function observeReady(): Promise<void> {
   // The API has already consumed the one-shot Host Ready when it is true
   // here. An observer installed later cannot retroactively emit Electron
   // `ready`, even though whenReady() must remain fulfilled.
-  const hostWasReady = apiApp.isReady();
+  const hostWasReady = hasObservedHostReady();
   const ready = apiApp.whenReady();
   readyObservation = ready;
   ignoreIfUnawaited(ready);
@@ -110,7 +110,7 @@ export const app = {
     // A late registration must not join a queued facade Ready notification
     // if the underlying API already observed the Host event. Pre-Ready
     // listeners remain enrolled in the existing one-shot observer.
-    if (event === "ready" && apiApp.isReady()) return;
+    if (event === "ready" && hasObservedHostReady()) return;
     const list = listeners.get(event) ?? [];
     list.push(listener);
     listeners.set(event, list);

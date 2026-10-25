@@ -6,6 +6,7 @@
 import { EventEmitter } from "node:events";
 import {
   app as hostApp,
+  getDispatchedPendingWindowCloses,
   getWindowSnapshot,
   getWindowSnapshots,
   invokeWindow,
@@ -176,6 +177,14 @@ export class BrowserWindow extends EventEmitter {
     number,
     { readonly ref: WindowRef; readonly closeSeq: bigint }
   >();
+  // A Created fact can dispatch before Ready while a later Bounds has already
+  // been applied by the WorkerLink. Retain only the Host-published baseline,
+  // never a locally invented/current authoritative window state.
+  static readonly #receivedBounds = new Map<
+    number,
+    { readonly incarnation: bigint; readonly bounds: Readonly<Rect> }
+  >();
+  static #terminalMirrorReported = false;
   readonly id!: number;
   readonly #ref!: WindowRef;
   readonly #contents = new BrowserWindowWebContents();
@@ -238,7 +247,11 @@ export class BrowserWindow extends EventEmitter {
       configurable: false,
     });
     this.#ref = Object.freeze({ id: ref.id, incarnation: ref.incarnation });
-    this.#lastDispatchedBounds = confirmed.state.bounds;
+    const delivered = BrowserWindow.#receivedBounds.get(ref.id);
+    this.#lastDispatchedBounds =
+      delivered && delivered.incarnation === ref.incarnation
+        ? delivered.bounds
+        : confirmed.state.bounds;
     // An Adopted host window also predates this JS facade, even if application
     // code never called getAllWindows() to materialize its replay wrapper.
     this.#recovered = replayed !== undefined || adopted;
@@ -255,12 +268,64 @@ export class BrowserWindow extends EventEmitter {
     const snapshots = getWindowSnapshots().filter(
       (value) => !value.host_destroyed,
     );
-    return snapshots.map(({ window }) => {
+    const result = snapshots.map(({ window }) => {
       const previous = windows.get(window.id);
       if (previous && previous.#ref.incarnation === window.incarnation)
         return previous;
       return BrowserWindow.#fromReplay(window);
     });
+    BrowserWindow.#catchUpDispatchedCloseFromMirror();
+    return result;
+  }
+
+  /** Reconcile only genuine mirror facts already applied before this module. */
+  static #reconcilePendingSnapshot(
+    ref: WindowRef,
+    closeSeq: bigint | null,
+  ): void {
+    if (closeSeq === null) return;
+    const previous = windows.get(ref.id);
+    if (
+      previous &&
+      previous.#ref.incarnation === ref.incarnation &&
+      previous.#lastCloseSeq === closeSeq
+    )
+      return;
+    const held = BrowserWindow.#heldBeforeReadyCloses.get(ref.id);
+    if (held?.ref.incarnation === ref.incarnation && held.closeSeq === closeSeq)
+      return;
+    BrowserWindow.#receiveNativeClose(ref, closeSeq, true);
+  }
+
+  static #catchUpDispatchedCloseFromMirror(): void {
+    try {
+      for (const receipt of getDispatchedPendingWindowCloses()) {
+        // Applied facts may be ahead of the dispatch cursor during a blocking
+        // CALL. Only a *dispatched* close receipt qualifies for catch-up.
+        const snapshot = getWindowSnapshot(receipt.window);
+        if (
+          snapshot &&
+          !snapshot.host_destroyed &&
+          snapshot.pending_close === receipt.closeSeq
+        ) {
+          BrowserWindow.#reconcilePendingSnapshot(
+            receipt.window,
+            receipt.closeSeq,
+          );
+        }
+      }
+    } catch (error) {
+      BrowserWindow.#reportDeadMirror(
+        "KELD dispatched window close could not be read:",
+        error,
+      );
+    }
+  }
+
+  static #reportDeadMirror(message: string, error: unknown): void {
+    if (BrowserWindow.#terminalMirrorReported) return;
+    BrowserWindow.#terminalMirrorReported = true;
+    reportNativeCallbackError(message, error);
   }
 
   static #fromReplay(window: WindowRef): BrowserWindow {
@@ -419,6 +484,25 @@ export class BrowserWindow extends EventEmitter {
         error,
       );
     }
+    // The application may synchronously call win.destroy() from its `close`
+    // callback. Native Released then wins and retires the pending sequence;
+    // no delayed Allow/Veto for a physically destroyed Host window is legal.
+    if (this.#destroyed) return;
+    try {
+      const snapshot = getWindowSnapshot(this.#ref);
+      if (
+        !snapshot ||
+        snapshot.host_destroyed ||
+        snapshot.pending_close !== close_seq
+      )
+        return;
+    } catch (error) {
+      BrowserWindow.#reportDeadMirror(
+        "KELD close callback lost its Host generation:",
+        error,
+      );
+      return;
+    }
     void invokeWindow({
       variant: "CloseReply",
       window: this.#ref,
@@ -437,7 +521,7 @@ export class BrowserWindow extends EventEmitter {
     } catch (error) {
       // The role/link has ended, so a late scheduled delivery has no legal
       // successor owner and must never send an Allow on its dead generation.
-      reportNativeCallbackError(
+      BrowserWindow.#reportDeadMirror(
         "KELD close verdict abandoned after Host mirror failure:",
         error,
       );
@@ -528,48 +612,87 @@ export class BrowserWindow extends EventEmitter {
   }
 
   static {
-    onWindowFactApplied((fact: WindowEvent) => {
-      if (fact.variant === "Created" && fact.pending_close !== null) {
-        BrowserWindow.#receiveNativeClose(
-          fact.window,
-          fact.pending_close,
-          true,
-        );
-        return;
-      }
-      // An already-applied Bounds/Focus/FullScreen/Destroyed fact may dispatch
-      // before the deferred Ready continuation for an earlier replay Created.
-      // Emit that replay close first, never reverse the host's causal order.
-      BrowserWindow.#flushHeldBeforeReadyClose(fact.window);
-      if (fact.variant === "CloseRequested") {
-        BrowserWindow.#receiveNativeClose(fact.window, fact.close_seq, false);
-        return;
-      }
-      const window = windows.get(fact.window.id);
-      if (!window || window.#ref.incarnation !== fact.window.incarnation)
-        return;
-      switch (fact.variant) {
-        case "Bounds":
-          {
-            const prior = window.#lastDispatchedBounds;
-            window.#lastDispatchedBounds = fact.bounds;
-            if (
-              prior.width !== fact.bounds.width ||
-              prior.height !== fact.bounds.height
-            ) {
-              window.emit("resize");
-            }
+    onWindowFactApplied(
+      (fact: WindowEvent) => {
+        if (fact.variant === "Created") {
+          BrowserWindow.#receivedBounds.set(fact.window.id, {
+            incarnation: fact.window.incarnation,
+            bounds: fact.state.bounds,
+          });
+        }
+        if (fact.variant === "Created" && fact.pending_close !== null) {
+          BrowserWindow.#receiveNativeClose(
+            fact.window,
+            fact.pending_close,
+            true,
+          );
+          return;
+        }
+        // An already-applied Bounds/Focus/FullScreen/Destroyed fact may dispatch
+        // before the deferred Ready continuation for an earlier replay Created.
+        // Emit that replay close first, never reverse the host's causal order.
+        BrowserWindow.#flushHeldBeforeReadyClose(fact.window);
+        if (fact.variant === "CloseRequested") {
+          BrowserWindow.#receiveNativeClose(fact.window, fact.close_seq, false);
+          return;
+        }
+        if (fact.variant === "Destroyed") {
+          BrowserWindow.#receivedBounds.delete(fact.window.id);
+        }
+        if (fact.variant === "Bounds") {
+          const earlier = BrowserWindow.#receivedBounds.get(fact.window.id);
+          if (earlier?.incarnation === fact.window.incarnation) {
+            // The role may receive Bounds before it has materialized a facade
+            // wrapper. That dispatched Host value is the later wrapper's
+            // baseline; a subsequent move cannot fabricate a resize of it.
+            BrowserWindow.#receivedBounds.set(fact.window.id, {
+              incarnation: fact.window.incarnation,
+              bounds: fact.bounds,
+            });
           }
-          break;
-        case "Maximized":
-          window.emit(fact.maximized ? "maximize" : "unmaximize");
-          break;
-        case "Destroyed":
-          window.#closed(false);
-          break;
-        default:
-          break;
-      }
-    });
+        }
+        const window = windows.get(fact.window.id);
+        if (!window || window.#ref.incarnation !== fact.window.incarnation)
+          return;
+        switch (fact.variant) {
+          case "Bounds":
+            {
+              const prior = window.#lastDispatchedBounds;
+              window.#lastDispatchedBounds = fact.bounds;
+              BrowserWindow.#receivedBounds.set(fact.window.id, {
+                incarnation: fact.window.incarnation,
+                bounds: fact.bounds,
+              });
+              if (prior.x !== fact.bounds.x || prior.y !== fact.bounds.y) {
+                window.emit("move");
+              }
+              if (
+                prior.width !== fact.bounds.width ||
+                prior.height !== fact.bounds.height
+              ) {
+                window.emit("resize");
+              }
+            }
+            break;
+          case "Focus":
+            window.emit(fact.focused ? "focus" : "blur");
+            break;
+          case "Maximized":
+            window.emit(fact.maximized ? "maximize" : "unmaximize");
+            break;
+          case "FullScreen":
+            window.emit(
+              fact.full_screen ? "enter-full-screen" : "leave-full-screen",
+            );
+            break;
+          case "Destroyed":
+            window.#closed(false);
+            break;
+          default:
+            break;
+        }
+      },
+      () => BrowserWindow.#catchUpDispatchedCloseFromMirror(),
+    );
   }
 }

@@ -970,6 +970,12 @@ match the crate that already emits the code. Do not invent a third spelling.
 - message: The calling link has not subscribed to host window facts
 - fix: Complete the admitted window subscription on this same live primary link before sending window calls.
 
+## KELD-CORE-046
+
+- crate: keld-core
+- message: One native window has reached its Host-owned limit of 64 outstanding Destroy correlations awaiting physical release
+- fix: Wait for that window's native Released event and its deferred replies, or retire the calling role; do not retry Destroy in a loop while release is outstanding.
+
 ## KELD-UPDATE-001
 
 - crate: keld-update

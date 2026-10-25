@@ -10,16 +10,24 @@ import {
   type WindowResponse,
 } from "../../api/src/window-codec.ts";
 import { WindowSource } from "../../api/src/window-source.ts";
+import { WindowCloseReceipts } from "../../api/src/window-close-receipts.ts";
 
+const mode = process.argv[2];
 let ready = false;
 let signalReady: () => void = () => {};
 const readyPromise = new Promise<void>((resolve) => {
   signalReady = resolve;
 });
 let factListener: (fact: WindowEvent) => void = () => {
+  if (mode === "late-import-replay") return;
   throw new Error("window event listener was not installed");
 };
-const source = new WindowSource((fact) => factListener(fact));
+const readyCatchUps = new Set<() => void>();
+const deliveredCloses = new WindowCloseReceipts();
+const source = new WindowSource((fact) => {
+  deliveredCloses.observe(fact);
+  factListener(fact);
+});
 const calls: WindowRequest[] = [];
 let lastId = 0;
 let adoptNext: WindowRef | undefined;
@@ -42,8 +50,19 @@ function createHostWindow(pending_close: bigint | null = null): WindowRef {
   return window;
 }
 function becomeReady(): void {
+  if (mode === "ready-same-turn-continuation") {
+    // Mirror the real API: raw Ready is applied now, while public readiness
+    // is published in the next microtask, not mid-WorkerLink drain.
+    queueMicrotask(() => {
+      ready = true;
+      signalReady();
+      for (const callback of readyCatchUps) setImmediate(callback);
+    });
+    return;
+  }
   ready = true;
   signalReady();
+  for (const callback of readyCatchUps) setImmediate(callback);
 }
 
 // The mock is only the host transport; WindowSource's wire decode, apply and
@@ -53,8 +72,17 @@ mock.module("../../api/src/app.ts", () => ({
   getWindowSnapshot: (window: WindowRef) =>
     ready ? source.get(window) : undefined,
   getWindowSnapshots: () => (ready ? source.all() : []),
-  onWindowFactApplied: (listener: (event: WindowEvent) => void) => {
+  getDispatchedPendingWindowCloses: () =>
+    ready ? deliveredCloses.pending() : [],
+  onWindowFactApplied: (
+    listener: (event: WindowEvent) => void,
+    catchUp?: () => void,
+  ) => {
     factListener = listener;
+    if (catchUp) {
+      readyCatchUps.add(catchUp);
+      if (ready) setImmediate(catchUp);
+    }
     return () => {};
   },
   invokeWindow: async (request: WindowRequest): Promise<WindowResponse> => {
@@ -82,9 +110,128 @@ mock.module("../../api/src/app.ts", () => ({
 }));
 mock.module("./app.ts", () => ({ emitNativeAppEvent: () => {} }));
 
+let lateReplay: WindowRef | undefined;
+if (mode === "late-import-replay") {
+  // An authenticated WindowSource can apply its Created replay before the
+  // Electron module installs any onWindowFactApplied listener.
+  lateReplay = { id: ++lastId, incarnation: BigInt(100 + lastId) };
+  fact({ variant: "Created", window: lateReplay, state, pending_close: 7n });
+  becomeReady();
+}
 const { BrowserWindow } = await import("./browser-window.ts");
-const mode = process.argv[2];
-if (mode === "recovery-gap") {
+if (mode === "late-import-replay") {
+  assert.ok(lateReplay);
+  const win = BrowserWindow.getAllWindows()[0];
+  assert.equal(win.id, lateReplay.id);
+  let closeEvents = 0;
+  win.on("close", (event: { preventDefault(): void }) => {
+    closeEvents += 1;
+    event.preventDefault();
+  });
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.equal(closeEvents, 1, "late import must reconcile pending Host close");
+  assert.deepEqual(
+    calls.filter((call) => call.variant === "CloseReply"),
+    [
+      {
+        variant: "CloseReply",
+        window: lateReplay,
+        close_seq: 7n,
+        verdict: "Veto",
+      },
+    ],
+  );
+} else if (mode === "ready-same-turn-continuation") {
+  const ref = createHostWindow(7n);
+  const observed: string[] = [];
+  void readyPromise.then(() => {
+    const win = BrowserWindow.getAllWindows()[0];
+    assert.equal(win.id, ref.id);
+    win.on("close", (event: { preventDefault(): void }) => {
+      observed.push("close");
+      event.preventDefault();
+    });
+    win.on("resize", () => observed.push("resize"));
+  });
+  becomeReady();
+  // Same transport dispatch task, without yielding to user Promise handlers.
+  fact({
+    variant: "Bounds",
+    window: ref,
+    bounds: { ...state.bounds, width: 777 },
+  });
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.deepEqual(
+    observed,
+    ["close"],
+    "the pre-Ready Bounds updates the mirror, not a pre-Ready user listener",
+  );
+  assert.deepEqual(BrowserWindow.getAllWindows()[0]?.getSize(), [777, 480]);
+  assert.deepEqual(
+    calls.filter((call) => call.variant === "CloseReply"),
+    [{ variant: "CloseReply", window: ref, close_seq: 7n, verdict: "Veto" }],
+  );
+  fact({
+    variant: "Bounds",
+    window: ref,
+    bounds: { ...state.bounds, width: 888 },
+  });
+  assert.deepEqual(
+    observed,
+    ["close", "resize"],
+    "later facts keep normal listener order",
+  );
+} else if (mode === "applied-ahead-close-order") {
+  const ref = createHostWindow();
+  becomeReady();
+  const win = BrowserWindow.getAllWindows()[0];
+  const observed: string[] = [];
+  win.on("resize", () => observed.push("resize"));
+  win.on("close", (event: { preventDefault(): void }) => {
+    observed.push("close");
+    event.preventDefault();
+  });
+  // GH527 parked synchronous CALL can apply both frames before either reaches
+  // its user-dispatch cursor. Mirror.pending_close=7 is not yet permission
+  // to send CloseReply ahead of the earlier Bounds callback.
+  const bounds = source.decode(
+    encodeWindowEvent({
+      variant: "Bounds",
+      window: ref,
+      bounds: { ...state.bounds, width: 777 },
+    }),
+  );
+  const close = source.decode(
+    encodeWindowEvent({
+      variant: "CloseRequested",
+      window: ref,
+      close_seq: 7n,
+    }),
+  );
+  source.apply(bounds);
+  source.apply(close);
+  assert.equal(source.get(ref)?.pending_close, 7n);
+  BrowserWindow.getAllWindows();
+  assert.deepEqual(
+    calls.filter((call) => call.variant === "CloseReply"),
+    [],
+  );
+  source.dispatch(bounds);
+  source.dispatch(close);
+  assert.deepEqual(observed, ["resize", "close"]);
+  assert.deepEqual(
+    calls.filter((call) => call.variant === "CloseReply"),
+    [{ variant: "CloseReply", window: ref, close_seq: 7n, verdict: "Veto" }],
+  );
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.deepEqual(
+    observed,
+    ["resize", "close"],
+    "catch-up must not reorder or duplicate",
+  );
+} else if (mode === "recovery-gap") {
   // Host replays a gap-native close before the successor's Ready barrier.
   const ref = createHostWindow(7n);
   becomeReady();
@@ -193,6 +340,89 @@ if (mode === "recovery-gap") {
     bounds: { x: 25, y: 48, width: 777, height: 480 },
   });
   assert.deepEqual(resized, ["777x480"], "no duplicate resize for same bounds");
+} else if (mode === "pre-ready-bounds-baseline") {
+  const ref = createHostWindow();
+  // Native Bounds is dispatched while there is no public Ready and no JS
+  // wrapper; its Host-confirmed dimensions become the wrapper's baseline.
+  fact({
+    variant: "Bounds",
+    window: ref,
+    bounds: { ...state.bounds, width: 777 },
+  });
+  becomeReady();
+  const win = BrowserWindow.getAllWindows()[0];
+  assert.deepEqual(win.getSize(), [777, 480]);
+  const seen: string[] = [];
+  win.on("move", () => seen.push("move"));
+  win.on("resize", () => seen.push("resize"));
+  fact({
+    variant: "Bounds",
+    window: ref,
+    bounds: { ...state.bounds, width: 777, x: 25 },
+  });
+  assert.deepEqual(
+    seen,
+    ["move"],
+    "a later move must not replay pre-Ready resize",
+  );
+} else if (mode === "native-fact-event-parity") {
+  becomeReady();
+  const win = new BrowserWindow();
+  const ref = source.all()[0]?.window;
+  assert.ok(ref);
+  const seen: string[] = [];
+  win.on("move", () => {
+    seen.push(`move:${win.getPosition().join(",")}`);
+  });
+  win.on("resize", () => {
+    seen.push(`resize:${win.getSize().join("x")}`);
+  });
+  win.on("focus", () => {
+    assert.equal(BrowserWindow.getFocusedWindow(), win);
+    seen.push("focus");
+  });
+  win.on("blur", () => {
+    assert.equal(BrowserWindow.getFocusedWindow(), null);
+    seen.push("blur");
+  });
+  win.on("enter-full-screen", () => {
+    assert.equal(win.isFullScreen(), true);
+    seen.push("enter-full-screen");
+  });
+  win.on("leave-full-screen", () => {
+    assert.equal(win.isFullScreen(), false);
+    seen.push("leave-full-screen");
+  });
+  win.on("maximize", () => {
+    assert.equal(win.isMaximized(), true);
+    seen.push("maximize");
+  });
+  win.on("unmaximize", () => {
+    assert.equal(win.isMaximized(), false);
+    seen.push("unmaximize");
+  });
+  fact({ variant: "Bounds", window: ref, bounds: { ...state.bounds, x: 55 } });
+  fact({
+    variant: "Bounds",
+    window: ref,
+    bounds: { ...state.bounds, x: 55, width: 777 },
+  });
+  fact({ variant: "Focus", window: ref, focused: true });
+  fact({ variant: "Focus", window: ref, focused: false });
+  fact({ variant: "FullScreen", window: ref, full_screen: true });
+  fact({ variant: "FullScreen", window: ref, full_screen: false });
+  fact({ variant: "Maximized", window: ref, maximized: true });
+  fact({ variant: "Maximized", window: ref, maximized: false });
+  assert.deepEqual(seen, [
+    "move:55,30",
+    "resize:777x480",
+    "focus",
+    "blur",
+    "enter-full-screen",
+    "leave-full-screen",
+    "maximize",
+    "unmaximize",
+  ]);
 } else if (mode === "throwing-contents-destroyed") {
   becomeReady();
   const window = new BrowserWindow();
@@ -285,6 +515,26 @@ if (mode === "recovery-gap") {
     "a logging failure must never suppress the one terminal close verdict",
   );
   assert.equal(win.isDestroyed(), false);
+} else if (mode === "close-listener-sync-destroy") {
+  becomeReady();
+  const win = new BrowserWindow();
+  const ref = source.all()[0]?.window;
+  assert.ok(ref);
+  let closed = 0;
+  win.on("close", () => win.destroy());
+  win.on("closed", () => {
+    closed += 1;
+  });
+  fact({ variant: "CloseRequested", window: ref, close_seq: 31n });
+  assert.equal(closed, 1);
+  assert.equal(win.isDestroyed(), true);
+  assert.equal(source.get(ref)?.host_destroyed, true);
+  assert.equal(calls.filter((call) => call.variant === "Destroy").length, 1);
+  assert.deepEqual(
+    calls.filter((call) => call.variant === "CloseReply"),
+    [],
+    "a synchronous Host Destroy from close listener retires pending seq; send no stale verdict",
+  );
 } else if (mode === "replay-link-death") {
   createHostWindow(7n);
   becomeReady();
@@ -304,7 +554,11 @@ if (mode === "recovery-gap") {
       0,
     );
     assert.equal(errors.length, 1, "record one terminal diagnostic");
-    assert.match(String(errors[0]?.[0]), /Host mirror failure/);
+    assert.match(
+      String(errors[0]?.[0]),
+      /Host mirror failure|late window replay could not be read|dispatched window close could not be read/,
+      "only the first terminal mirror observation may report a diagnostic",
+    );
   } finally {
     console.error = originalError;
   }

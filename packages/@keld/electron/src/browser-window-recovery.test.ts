@@ -8,13 +8,19 @@ import {
 } from "../../kipc/src/transport.ts";
 
 for (const scenario of [
+  "late-import-replay",
+  "ready-same-turn-continuation",
+  "applied-ahead-close-order",
   "recovery-gap",
   "replay-order",
   "pre-ready-close-order",
   "move-only-does-not-resize",
+  "pre-ready-bounds-baseline",
+  "native-fact-event-parity",
   "throwing-contents-destroyed",
   "no-public-contents-dispose",
   "throwing-close-and-logger",
+  "close-listener-sync-destroy",
   "replay-link-death",
   "adopted-without-replay-wrapper",
   "unmaterialized-close",

@@ -50,6 +50,7 @@ pub(super) enum WindowError {
     Exhausted(WindowCounter),
     NotReady,
     WrongOwner,
+    PendingDestroyCapacity,
 }
 impl WindowError {
     pub(super) const fn code(self) -> &'static str {
@@ -58,6 +59,7 @@ impl WindowError {
             Self::Exhausted(_) => "KELD-CORE-039",
             Self::NotReady => "KELD-CORE-040",
             Self::WrongOwner => "KELD-CORE-043",
+            Self::PendingDestroyCapacity => "KELD-CORE-046",
         }
     }
 }
@@ -79,6 +81,9 @@ impl fmt::Display for WindowError {
             }
             Self::WrongOwner => {
                 "window belongs to another or retired role generation; use the successor's subscribed replay"
+            }
+            Self::PendingDestroyCapacity => {
+                "this window has too many Destroy calls waiting for physical release; wait for Released or drop a timed-out call"
             }
         };
         write!(formatter, "{}: {detail}", self.code())
@@ -216,6 +221,14 @@ struct Entry {
     destroy_calls: Vec<PendingWindowCall>,
     phase: Phase,
 }
+
+/// One physical native release can be delayed indefinitely. Do not permit an
+/// authenticated primary to retain arbitrarily many distinct deferred reply
+/// correlations for that one window. This is a new Host-owned admission budget
+/// (not gh527's abandoned-Worker limit or the Auth call budget). 64 pending
+/// calls need under 2 KiB of plain metadata per window and bound the linear
+/// correlation check to a small, deterministic cost during a stalled release.
+pub(super) const MAX_PENDING_DESTROYS_PER_WINDOW: usize = 64;
 impl Entry {
     fn view(&self) -> Option<WebviewId> {
         match self.phase {
@@ -639,6 +652,13 @@ impl WindowRegistry {
         mut abandoned: impl FnMut(AbandonedClose),
     ) -> Result<CloseOutcome, WindowError> {
         let entry = self.admitted_entry(owner, window)?;
+        // Refuse before abandoning an existing close, enqueuing a correlation,
+        // or sending an additional UI command. Prior admitted calls retain
+        // their eventual correlated replies; this fresh call receives a typed
+        // nonterminal ERR over the same authenticated writer.
+        if entry.destroy_calls.len() >= MAX_PENDING_DESTROYS_PER_WINDOW {
+            return Err(WindowError::PendingDestroyCapacity);
+        }
         let native = match entry.phase {
             Phase::Open(native) => Some(native),
             Phase::ClosePending(native, close_seq) => {
