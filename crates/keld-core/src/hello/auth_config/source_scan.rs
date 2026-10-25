@@ -299,6 +299,24 @@ pub(super) fn root_named_property_slice<'a>(
     source: &'a str,
     property: &str,
 ) -> Result<Option<&'a str>, AuthConfigError> {
+    root_property_slice(source, property, false)
+}
+
+/// Facade selection must not silently ignore root spreads or unresolved keys:
+/// either could supply `initialWindow`, `renderer`, or `auth` at runtime.
+/// Keep the existing permissive auth-absent reader unchanged for schema one.
+pub(super) fn root_facade_property_slice<'a>(
+    source: &'a str,
+    property: &str,
+) -> Result<Option<&'a str>, AuthConfigError> {
+    root_property_slice(source, property, true)
+}
+
+fn root_property_slice<'a>(
+    source: &'a str,
+    property: &str,
+    strict_root: bool,
+) -> Result<Option<&'a str>, AuthConfigError> {
     let mut scan = SourceScan::new(source);
     let mut nesting = Vec::new();
     while let Some(token) = scan.next() {
@@ -313,7 +331,7 @@ pub(super) fn root_named_property_slice<'a>(
                 return Ok(None);
             };
             if open.kind == ConfigToken::Symbol('{') {
-                return exported_property_slice(source, &mut scan, property);
+                return exported_property_slice(source, &mut scan, property, strict_root);
             }
         }
         match token.kind {
@@ -325,6 +343,18 @@ pub(super) fn root_named_property_slice<'a>(
         }
     }
     Ok(None)
+}
+
+/// Only a computed, quoted, unrelated root key is unambiguous. Even a quoted
+/// reserved key must use normal property syntax, so it cannot escape facade
+/// selection or the forbidden-field check through a method/accessor prefix.
+fn harmless_computed_root_key(source_after_open: &str) -> bool {
+    let mut preview = SourceScan::new(source_after_open);
+    preview.next().is_some_and(|token| {
+        matches!(&token.kind, ConfigToken::Text(key) if !matches!(key.as_str(), "initialWindow" | "renderer" | "auth"))
+    }) && preview
+        .next()
+        .is_some_and(|token| token.kind == ConfigToken::Symbol(']'))
 }
 
 fn property_accessor_prefix(source: &str, property: &str) -> bool {
@@ -352,9 +382,11 @@ fn exported_property_slice<'a>(
     source: &'a str,
     scan: &mut SourceScan<'a>,
     property: &str,
+    strict_root: bool,
 ) -> Result<Option<&'a str>, AuthConfigError> {
     let mut nesting = Vec::new();
     let mut at_key = true;
+    let mut value_started = false;
     let mut found = None;
     let mut pending_start = None;
     while let Some(token) = scan.next() {
@@ -367,7 +399,26 @@ fn exported_property_slice<'a>(
                     return Ok(found);
                 }
                 at_key = true;
+                value_started = false;
                 continue;
+            }
+            // A root member may begin with `get`, `set`, `async`, or `*`,
+            // before its computed key. Check until its top-level value colon,
+            // not just the first token, and never inspect nested values.
+            if strict_root
+                && !value_started
+                && (token.kind == ConfigToken::Symbol('.')
+                    || (token.kind == ConfigToken::Symbol('[')
+                        && !harmless_computed_root_key(
+                            source.get(token.end..).unwrap_or_default(),
+                        )))
+            {
+                return Err(auth_config_error(
+                    "unresolved computed root key or object spread",
+                ));
+            }
+            if token.kind == ConfigToken::Symbol(':') {
+                value_started = true;
             }
             if at_key {
                 at_key = false;
@@ -409,6 +460,7 @@ fn exported_property_slice<'a>(
                         ));
                     }
                     pending_start = Some(colon.end);
+                    value_started = true;
                     continue;
                 }
             }

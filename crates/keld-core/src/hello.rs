@@ -330,6 +330,12 @@ mod tests {
             )
             .expect("nested declaration must not select facade mode")
         );
+        assert!(
+            initial_window_from_config_ts(
+                "export default { ['unrelated']: 1, nested: { ...options, ['renderer']: 'nested' }, initialWindow: 'none' } as const;"
+            )
+            .expect("unambiguous unrelated keys and nested spreads are harmless")
+        );
         for source in [
             "export default { initialWindow: 'renderer' } as const;",
             "export default { initialWindow: false } as const;",
@@ -337,6 +343,15 @@ mod tests {
             "export default { ['initialWindow']: 'none' } as const;",
             "export default { initialWindow: 'none', renderer: 'index.html' } as const;",
             "export default { initialWindow: 'none', auth: {} } as const;",
+            "export default { ['initial' + 'Window']: 'none' } as const;",
+            "export default { ...{ initialWindow: 'none' } } as const;",
+            "export default { ...options, initialWindow: 'none' } as const;",
+            "export default { initialWindow: 'none', ...{ renderer: 'index.html' } } as const;",
+            "export default { initialWindow: 'none', ...options } as const;",
+            "export default { initialWindow: 'none', [dynamicKey]: true } as const;",
+            "export default { initialWindow: 'none', get ['ren' + 'derer']() { return 'index.html' } } as const;",
+            "export default { initialWindow: 'none', async ['renderer']() { return 'index.html' } } as const;",
+            "export default { initialWindow: 'none', [`renderer`]: 'index.html' } as const;",
         ] {
             assert!(
                 initial_window_from_config_ts(source).is_err(),

@@ -1240,6 +1240,24 @@ mod tests {
         assert!(!project.join(".keld/dev").exists());
     }
 
+    #[test]
+    fn ambiguous_facade_root_refuses_before_staging_on_every_platform() {
+        let (_temp, project, source_host) = fixture();
+        for source in [
+            "export default { ['initial' + 'Window']: 'none' } as const;",
+            "export default { ...{ initialWindow: 'none' } } as const;",
+            "export default { initialWindow: 'none', ...{ renderer: 'index.html' } } as const;",
+            "export default { initialWindow: 'none', [dynamicKey]: 'renderer' } as const;",
+        ] {
+            fs::write(project.join("keld.config.ts"), source).expect("ambiguous config");
+            let error = stage_dev_boot(&project, &source_host)
+                .expect_err("ambiguous root must refuse before staging");
+            assert!(error.to_string().starts_with("KELD-CLI-047"), "{error}");
+            assert!(error.to_string().contains("initialWindow"), "{error}");
+            assert!(!project.join(".keld/dev").exists(), "{source}");
+        }
+    }
+
     #[cfg(target_os = "linux")]
     #[test]
     fn unsupported_facade_target_refuses_before_stage_allocation() {
