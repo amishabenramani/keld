@@ -3,7 +3,7 @@
 
 mod source_scan;
 
-use self::source_scan::{root_auth_slice, root_named_property_slice};
+use self::source_scan::{root_auth_slice, root_facade_property_slice};
 
 /// Static-auth configuration syntax error; no configuration code was executed.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -55,7 +55,7 @@ pub fn initial_window_from_config_ts(source: &str) -> Result<bool, InitialWindow
     let scan_error = |_| InitialWindowConfigError {
         detail: "the root property must be unique and literal",
     };
-    let Some(value) = root_named_property_slice(source, "initialWindow").map_err(scan_error)?
+    let Some(value) = root_facade_property_slice(source, "initialWindow").map_err(scan_error)?
     else {
         return Ok(false);
     };
@@ -66,7 +66,7 @@ pub fn initial_window_from_config_ts(source: &str) -> Result<bool, InitialWindow
         });
     }
     for field in ["renderer", "auth"] {
-        if root_named_property_slice(source, field)
+        if root_facade_property_slice(source, field)
             .map_err(scan_error)?
             .is_some()
         {

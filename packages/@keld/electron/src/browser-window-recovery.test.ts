@@ -25,6 +25,7 @@ for (const scenario of [
   "close-listener-sync-destroy",
   "replay-link-death",
   "adopted-without-replay-wrapper",
+  "adopted-after-replay-wrapper",
   "unmaterialized-close",
   "mutable-id",
   "warning-throws-after-create",

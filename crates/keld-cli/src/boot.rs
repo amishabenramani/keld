@@ -1224,6 +1224,27 @@ mod tests {
         );
     }
 
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn parenthesized_facade_stage_still_emits_schema_two_without_renderer() {
+        let (_temp, project, source_host) = fixture();
+        fs::write(
+            project.join("keld.config.ts"),
+            "export default ({ name: 'Stage Fixture', entry: 'src/main.ts', initialWindow: 'none' }) as const;",
+        )
+        .expect("parenthesized facade config");
+        fs::remove_file(project.join("index.html")).expect("no renderer source");
+        let stage = stage_dev_boot(&project, &source_host).expect("facade stage");
+        let descriptor: serde_json::Value = serde_json::from_slice(
+            &fs::read(stage.root().join("keld.boot.json")).expect("boot descriptor"),
+        )
+        .expect("JSON descriptor");
+        assert_eq!(descriptor["schema"], 2);
+        assert!(descriptor.get("renderer").is_none());
+        assert_eq!(descriptor.as_object().expect("object").len(), 4);
+        assert!(!stage.root().join("index.html").exists());
+    }
+
     #[test]
     fn facade_stage_refuses_conflicting_renderer_before_creating_stage() {
         let (_temp, project, source_host) = fixture();
@@ -1238,6 +1259,41 @@ mod tests {
         assert!(error.to_string().contains("initialWindow"), "{error}");
         assert!(error.to_string().contains("renderer"), "{error}");
         assert!(!project.join(".keld/dev").exists());
+    }
+
+    #[test]
+    fn ambiguous_facade_root_refuses_before_staging_on_every_platform() {
+        let (_temp, project, source_host) = fixture();
+        for source in [
+            "export default { ['initial' + 'Window']: 'none' } as const;",
+            "export default { ...{ initialWindow: 'none' } } as const;",
+            "export default { initialWindow: 'none', ...{ renderer: 'index.html' } } as const;",
+            "export default { initialWindow: 'none', [dynamicKey]: 'renderer' } as const;",
+        ] {
+            fs::write(project.join("keld.config.ts"), source).expect("ambiguous config");
+            let error = stage_dev_boot(&project, &source_host)
+                .expect_err("ambiguous root must refuse before staging");
+            assert!(error.to_string().starts_with("KELD-CLI-047"), "{error}");
+            assert!(error.to_string().contains("initialWindow"), "{error}");
+            assert!(!project.join(".keld/dev").exists(), "{source}");
+        }
+    }
+
+    #[test]
+    fn hidden_reserved_root_keys_fail_before_stage_allocation() {
+        let (_temp, project, source_host) = fixture();
+        for source in [
+            "export default { initialWindow: 'none', async renderer() {} } as const;",
+            "export default { initialWindow: 'none', *auth() {} } as const;",
+            r"export default { initialWindow: 'none', 'ren\x64erer': 'index.html' } as const;",
+            r"export default { initia\u006cWindow: 'none' } as const;",
+        ] {
+            fs::write(project.join("keld.config.ts"), source).expect("config");
+            let error = stage_dev_boot(&project, &source_host)
+                .expect_err("ambiguous root requires refusal before staging");
+            assert!(error.to_string().starts_with("KELD-CLI-047"), "{error}");
+            assert!(!project.join(".keld/dev").exists(), "{source}");
+        }
     }
 
     #[cfg(target_os = "linux")]

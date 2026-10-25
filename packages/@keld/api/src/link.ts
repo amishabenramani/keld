@@ -174,10 +174,12 @@ export class LifecycleLink {
       resolveEchoCall(ECHO_CHANNEL, payload, handlers.onApplicationCall),
     );
     workerLink.onEnd((err: KeldCallError) => {
+      // onEnd follows the earlier-record drain even when local Quit already
+      // marked the session closed. Always release the retained source here.
+      windowSource?.end(err);
       if (session.#closed) return;
       session.#closed = true;
       session.#dead = err;
-      windowSource?.end(err);
       try {
         handlers.onLinkDead(err);
       } catch {

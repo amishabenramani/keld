@@ -138,6 +138,7 @@ function ignoredOptionDiagnostics(options: BrowserWindowOptions): void {
 const hostContentsRelease = new WeakMap<BrowserWindowWebContents, () => void>();
 
 class BrowserWindowWebContents extends EventEmitter {
+  #creationPublished = false;
   #destroyed = false;
 
   constructor() {
@@ -241,6 +242,7 @@ export class BrowserWindow extends EventEmitter {
         previous.#ref.incarnation === ref.incarnation &&
         !previous.isDestroyed()
       ) {
+        previous.#publishCreation();
         return previous;
       }
     }
@@ -270,11 +272,16 @@ export class BrowserWindow extends EventEmitter {
     // code never called getAllWindows() to materialize its replay wrapper.
     this.#recovered = replayed !== undefined || adopted;
     windows.set(ref.id, this);
-    if (replayed === undefined) {
-      const event = { preventDefault(): void {} };
-      emitNativeAppEvent("web-contents-created", event, this.#contents);
-      emitNativeAppEvent("browser-window-created", event, this);
-    }
+    if (replayed === undefined) this.#publishCreation();
+  }
+
+  #publishCreation(): void {
+    if (this.#creationPublished) return;
+    // Mark before invoking application callbacks, including reentrant Create.
+    this.#creationPublished = true;
+    const event = { preventDefault(): void {} };
+    emitNativeAppEvent("web-contents-created", event, this.#contents);
+    emitNativeAppEvent("browser-window-created", event, this);
   }
 
   static getAllWindows(): BrowserWindow[] {

@@ -108,7 +108,12 @@ mock.module("../../api/src/app.ts", () => ({
     throw new Error(`unexpected blocking call ${request.variant}`);
   },
 }));
-mock.module("./app.ts", () => ({ emitNativeAppEvent: () => {} }));
+const creationEvents: { name: string; value: unknown }[] = [];
+mock.module("./app.ts", () => ({
+  emitNativeAppEvent: (name: string, _event: unknown, value: unknown) => {
+    creationEvents.push({ name, value });
+  },
+}));
 
 let lateReplay: WindowRef | undefined;
 if (mode === "late-import-replay") {
@@ -624,6 +629,27 @@ if (mode === "late-import-replay") {
   } finally {
     console.error = originalError;
   }
+} else if (mode === "adopted-after-replay-wrapper") {
+  const ref = createHostWindow();
+  becomeReady();
+  const previous = BrowserWindow.getAllWindows()[0];
+  assert.equal(creationEvents.length, 0, "enumeration must not emit creation");
+  adoptNext = ref;
+  const adopted = new BrowserWindow();
+  assert.equal(adopted, previous, "adoption preserves the replay wrapper");
+  assert.deepEqual(
+    creationEvents.map(({ name }) => name),
+    ["web-contents-created", "browser-window-created"],
+    "adoption publishes the ordered pair before returning",
+  );
+  assert.equal(creationEvents[0]?.value, previous.webContents);
+  assert.equal(creationEvents[1]?.value, previous);
+  adoptNext = ref;
+  assert.equal(new BrowserWindow(), previous);
+  assert.equal(creationEvents.length, 2, "creation is published once per wrapper");
+  const fresh = new BrowserWindow();
+  assert.notEqual(fresh, previous);
+  assert.equal(creationEvents.length, 4, "new windows still publish creation");
 } else if (mode === "adopted-without-replay-wrapper") {
   const ref = createHostWindow();
   adoptNext = ref;
