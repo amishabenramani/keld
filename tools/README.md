@@ -44,6 +44,7 @@ Use [`CONTRIBUTING.md`](../CONTRIBUTING.md) for contributor steps, [`docs/agents
 
 | Files | Responsibility and verified entrypoint |
 | --- | --- |
+| [`research_checkout.sh`](research_checkout.sh), [`test_research_checkout.sh`](test_research_checkout.sh) | Maintainer nested-research Git sync/push under the existing `reference-run` lock. `just research-sync`, `just research-push`, `just research-test`; tests use only disposable local bare remotes. |
 | [`workspace.py`](workspace.py), [`test_workspace.py`](test_workspace.py) | Managed Git worktrees and session scratch; `just work-start`, `work-status`, `work-run`, `work-finish`, `work-clean`, `work-check`, and `work-test`. This is cooperative task coordination, not a filesystem sandbox. |
 | [`worktree_cache.rs`](worktree_cache.rs), [`worktree_cache_delete.rs`](worktree_cache_delete.rs), [`worktree_cache_delete_tests.rs`](worktree_cache_delete_tests.rs) | Git-registered Cargo cache inventory and guarded opt-in deletion, with included native tests; `just cache-check`, `just cache-delete`, `just cache-check-test`. |
 | [`cache_tool_provenance_test.sh`](cache_tool_provenance_test.sh) | Ensures cache commands use newly compiled, verified source rather than a retained binary; `just cache-check-test`. |

@@ -1,6 +1,6 @@
 # Spec: Remaining source-hygiene ownership slices
-Status: draft
-Linear: GH-824 (#517) | Owner: repository owner | Updated: 2026-10-24
+Status: implementing
+Linear: GH-824 (#517) | Owner: repository owner | Updated: 2026-10-25
 
 ## 1. Goal & non-goals
 
@@ -148,10 +148,10 @@ workflow writer's authority. Root file ownership conflict blocks only that slice
 
 ## 6. Tasks (ordered vertical slices)
 
-- [ ] T1. Record exact current source, claims, consumers, compiled test names and
+- [x] T1. Record exact current source, claims, consumers, compiled test names and
       unchanged public aliases before the capture move; implement and validate
       the private module and its adjacent pure tests as one reviewable unit.
-- [ ] T2. After reference-owner/Just overlap reconciliation, extract the existing
+- [x] T2. After reference-owner/Just overlap reconciliation, extract the existing
       research operations with one origin predicate and local-only failure proofs.
 - [ ] T3. Reconcile source/reader hashes, navigation, exact-diff independent review
       and relevant real-platform results. Consolidate reviewed changes through
@@ -188,8 +188,9 @@ with an unmeasured speed/memory claim.
 
 ## 10. Open questions
 
-Human sign-off is required for T1 and/or T2's exact source-migration scope before
-implementation. The draft does not authorize its author to mark it approved.
-The separate exact-unsafe-path admission/instruction-format gap and any numeric
-source-cap proposal require their own explicit reviewed invariant; neither is
-silently approved here. The standing GH-824 owner merge hold remains unchanged.
+None for the approved T1/T2 implementation scope. On 2026-10-25 the repository
+owner explicitly authorized implementation of both slices on Windows in the current
+conversation; the authorized exact scope and receipt are posted to GH #824. This does
+not approve a PR merge. The separately owned unsafe-path admission/instruction-format
+decision and numeric source-size caps remain outside this spec, with their own
+approval criteria. The standing GH-824 no-merge hold remains unchanged.
