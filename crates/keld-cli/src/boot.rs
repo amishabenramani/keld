@@ -1224,6 +1224,27 @@ mod tests {
         );
     }
 
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn parenthesized_facade_stage_still_emits_schema_two_without_renderer() {
+        let (_temp, project, source_host) = fixture();
+        fs::write(
+            project.join("keld.config.ts"),
+            "export default ({ name: 'Stage Fixture', entry: 'src/main.ts', initialWindow: 'none' }) as const;",
+        )
+        .expect("parenthesized facade config");
+        fs::remove_file(project.join("index.html")).expect("no renderer source");
+        let stage = stage_dev_boot(&project, &source_host).expect("facade stage");
+        let descriptor: serde_json::Value = serde_json::from_slice(
+            &fs::read(stage.root().join("keld.boot.json")).expect("boot descriptor"),
+        )
+        .expect("JSON descriptor");
+        assert_eq!(descriptor["schema"], 2);
+        assert!(descriptor.get("renderer").is_none());
+        assert_eq!(descriptor.as_object().expect("object").len(), 4);
+        assert!(!stage.root().join("index.html").exists());
+    }
+
     #[test]
     fn facade_stage_refuses_conflicting_renderer_before_creating_stage() {
         let (_temp, project, source_host) = fixture();

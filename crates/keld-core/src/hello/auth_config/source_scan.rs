@@ -334,11 +334,47 @@ fn root_property_slice<'a>(
             if !is_word(&default, "default") {
                 continue;
             }
-            let Some(open) = scan.next() else {
+            let Some(mut open) = scan.next() else {
                 return Ok(None);
             };
+            // Facade boot mode follows an exported object literal even when
+            // the literal is wrapped in redundant grouping parentheses.
+            // The old permissive auth reader deliberately retains its
+            // direct-literal-only behavior for legacy renderer configurations.
+            let mut grouping = 0_usize;
+            while strict_root && open.kind == ConfigToken::Symbol('(') {
+                grouping += 1;
+                open = scan
+                    .next()
+                    .ok_or_else(|| auth_config_error("unfinished parenthesized config root"))?;
+            }
             if open.kind == ConfigToken::Symbol('{') {
-                return exported_property_slice(source, &mut scan, property, strict_root);
+                let selected = exported_property_slice(source, &mut scan, property, strict_root)?;
+                if grouping != 0 {
+                    for _ in 0..grouping {
+                        let mut close = scan.next();
+                        if close.as_ref().is_some_and(|token| is_word(token, "as")) {
+                            if !scan.next().is_some_and(|token| is_word(&token, "const")) {
+                                return Err(auth_config_error(
+                                    "only as const is supported inside grouped config roots",
+                                ));
+                            }
+                            close = scan.next();
+                        }
+                        if !close.is_some_and(|token| token.kind == ConfigToken::Symbol(')')) {
+                            return Err(auth_config_error(
+                                "parenthesized config root must close after its literal object",
+                            ));
+                        }
+                    }
+                }
+                // Both direct and parenthesized object roots must export the
+                // literal itself. A subsequent `&&`, member access or call
+                // could change the selected initial-window mode at runtime.
+                if strict_root {
+                    validate_literal_root_suffix(&mut scan)?;
+                }
+                return Ok(selected);
             }
         }
         match token.kind {
@@ -350,6 +386,92 @@ fn root_property_slice<'a>(
         }
     }
     Ok(None)
+}
+
+fn validate_literal_root_suffix(scan: &mut SourceScan<'_>) -> Result<(), AuthConfigError> {
+    let suffix = scan.next();
+    if suffix
+        .as_ref()
+        .is_some_and(|token| starts_following_export(scan, token))
+    {
+        return Ok(());
+    }
+    let end = match suffix.as_ref().map(|token| &token.kind) {
+        None | Some(ConfigToken::Symbol(';')) => return Ok(()),
+        Some(ConfigToken::Word(word)) if word == "as" => {
+            if !scan.next().is_some_and(|token| is_word(&token, "const")) {
+                return Err(auth_config_error(
+                    "literal config supports only an optional as const assertion",
+                ));
+            }
+            let end = scan.next();
+            if end
+                .as_ref()
+                .is_some_and(|token| is_word(token, "satisfies"))
+            {
+                validate_satisfies_type_suffix(scan)?
+            } else {
+                end
+            }
+        }
+        Some(ConfigToken::Word(word)) if word == "satisfies" => {
+            validate_satisfies_type_suffix(scan)?
+        }
+        _ => {
+            return Err(auth_config_error(
+                "config root must directly export the literal",
+            ));
+        }
+    };
+    if end.is_none_or(|token| {
+        token.kind == ConfigToken::Symbol(';') || starts_following_export(scan, &token)
+    }) {
+        Ok(())
+    } else {
+        Err(auth_config_error(
+            "config root has an unsupported expression suffix",
+        ))
+    }
+}
+
+fn starts_following_export(scan: &SourceScan<'_>, token: &SourceToken) -> bool {
+    // A second export on a new line is an independent module declaration
+    // (automatic semicolon insertion), not part of the default expression.
+    // Operators, member access and calls remain disallowed across newlines.
+    is_word(token, "export")
+        && scan.source.get(..token.start).is_some_and(|prior| {
+            prior
+                .chars()
+                .rev()
+                .take_while(|ch| ch.is_whitespace())
+                .any(config_line_terminator)
+        })
+}
+
+fn validate_satisfies_type_suffix(
+    scan: &mut SourceScan<'_>,
+) -> Result<Option<SourceToken>, AuthConfigError> {
+    // A simple qualified type name is static. Do not permit a runtime
+    // operator to modify the exported object after a type assertion.
+    if !scan
+        .next()
+        .is_some_and(|token| matches!(token.kind, ConfigToken::Word(_)))
+    {
+        return Err(auth_config_error("satisfies requires a static type name"));
+    }
+    loop {
+        match scan.next() {
+            Some(token) if token.kind == ConfigToken::Symbol('.') => {
+                if !scan
+                    .next()
+                    .is_some_and(|segment| matches!(segment.kind, ConfigToken::Word(_)))
+                {
+                    return Err(auth_config_error("invalid qualified type name"));
+                }
+            }
+            end => return Ok(end),
+        }
+    }
 }
 
 /// Only a computed, quoted, unrelated root key is unambiguous. Even a quoted
@@ -393,6 +515,7 @@ fn validate_facade_root_member_token(
     token: &SourceToken,
     source: &str,
     method_modifier: bool,
+    at_key: bool,
 ) -> Result<(), AuthConfigError> {
     if token.undecodable_string || token.kind == ConfigToken::Symbol('\\') {
         return Err(auth_config_error(
@@ -410,8 +533,13 @@ fn validate_facade_root_member_token(
             "reserved root method is unsupported for facade boot",
         ));
     }
-    if token.kind == ConfigToken::Symbol('.')
-        || (token.kind == ConfigToken::Symbol('[')
+    if (at_key
+        && token.kind == ConfigToken::Symbol('.')
+        && source
+            .get(token.start..)
+            .is_some_and(|remaining| remaining.starts_with("...")))
+        || ((at_key || method_modifier)
+            && token.kind == ConfigToken::Symbol('[')
             && !harmless_computed_root_key(source.get(token.end..).unwrap_or_default()))
     {
         return Err(auth_config_error(
@@ -419,6 +547,65 @@ fn validate_facade_root_member_token(
         ));
     }
     Ok(())
+}
+
+/// Type parameters on a root method do not create new object members.
+/// The closing `>` remains a parser boundary, including nested generics.
+fn track_method_type_bracket(
+    token: &SourceToken,
+    source: &str,
+    nesting: &mut Vec<char>,
+    may_open_generic: bool,
+) {
+    match token.kind {
+        ConfigToken::Symbol('<')
+            if nesting.last() == Some(&'>') || (nesting.is_empty() && may_open_generic) =>
+        {
+            nesting.push('>');
+        }
+        ConfigToken::Symbol('>')
+            if nesting.last() == Some(&'>')
+                && !source
+                    .get(..token.start)
+                    .is_some_and(|before| before.ends_with('=')) =>
+        {
+            nesting.pop();
+        }
+        _ => {}
+    }
+}
+
+fn update_member_signature(
+    token: &SourceToken,
+    at_key: bool,
+    value_started: bool,
+    method_signature: bool,
+) -> (bool, bool) {
+    if token.kind == ConfigToken::Symbol('(') && !at_key && !value_started {
+        (value_started, true)
+    } else if token.kind == ConfigToken::Symbol(':') && !method_signature {
+        (true, method_signature)
+    } else {
+        (value_started, method_signature)
+    }
+}
+
+fn root_accessor_error(
+    token: &SourceToken,
+    source: &str,
+    property: &str,
+    duplicate: bool,
+) -> Option<AuthConfigError> {
+    if !matches!(&token.kind, ConfigToken::Word(word) if matches!(word.as_str(), "get" | "set"))
+        || !property_accessor_prefix(source.get(token.end..).unwrap_or_default(), property)
+    {
+        return None;
+    }
+    Some(auth_config_error(if duplicate {
+        "duplicate root auth property/accessor"
+    } else {
+        "root auth accessor is unsupported; use a literal property"
+    }))
 }
 
 fn exported_property_slice<'a>(
@@ -430,6 +617,7 @@ fn exported_property_slice<'a>(
     let mut nesting = Vec::new();
     let mut at_key = true;
     let mut value_started = false;
+    let mut method_signature = false;
     let mut method_modifier = false;
     let mut found = None;
     let mut pending_start = None;
@@ -445,21 +633,21 @@ fn exported_property_slice<'a>(
                 at_key = true;
                 value_started = false;
                 method_modifier = false;
+                method_signature = false;
                 continue;
             }
             // Before the value colon, method modifiers and ambiguous key
             // escapes must be examined even after the first root token.
-            if strict_root && !value_started {
-                validate_facade_root_member_token(&token, source, method_modifier)?;
+            if strict_root && !value_started && !method_signature {
+                validate_facade_root_member_token(&token, source, method_modifier, at_key)?;
             }
-            if token.kind == ConfigToken::Symbol(':') {
-                value_started = true;
-            }
+            (value_started, method_signature) =
+                update_member_signature(&token, at_key, value_started, method_signature);
             if at_key {
                 at_key = false;
                 method_modifier = strict_root
                     && (token.kind == ConfigToken::Symbol('*')
-                        || matches!(&token.kind, ConfigToken::Word(word) if word == "async"));
+                        || matches!(&token.kind, ConfigToken::Word(word) if matches!(word.as_str(), "async" | "get" | "set")));
                 let named = matches!(&token.kind, ConfigToken::Word(key) | ConfigToken::Text(key) if key == property);
                 if token.kind == ConfigToken::Symbol('[') {
                     let mut preview = SourceScan::new(source.get(token.end..).unwrap_or_default());
@@ -472,18 +660,13 @@ fn exported_property_slice<'a>(
                         return Err(auth_config_error("computed root auth keys are unsupported"));
                     }
                 }
-                if matches!(&token.kind, ConfigToken::Word(word) if word == "get" || word == "set")
-                    && property_accessor_prefix(
-                        source.get(token.end..).unwrap_or_default(),
-                        property,
-                    )
-                {
-                    let detail = if found.is_some() || pending_start.is_some() {
-                        "duplicate root auth property/accessor"
-                    } else {
-                        "root auth accessor is unsupported; use a literal property"
-                    };
-                    return Err(auth_config_error(detail));
+                if let Some(error) = root_accessor_error(
+                    &token,
+                    source,
+                    property,
+                    found.is_some() || pending_start.is_some(),
+                ) {
+                    return Err(error);
                 }
                 if named {
                     if found.is_some() || pending_start.is_some() {
@@ -506,6 +689,14 @@ fn exported_property_slice<'a>(
                 // read, further words belong to signatures or type metadata.
                 method_modifier = token.kind == ConfigToken::Symbol('*');
             }
+        }
+        if strict_root {
+            track_method_type_bracket(
+                &token,
+                source,
+                &mut nesting,
+                !at_key && (!value_started || method_signature),
+            );
         }
         match token.kind {
             ConfigToken::Symbol(opener @ ('{' | '(' | '[')) => nesting.push(match opener {
