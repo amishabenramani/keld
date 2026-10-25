@@ -49,9 +49,20 @@ function live(refs: readonly WeakRef<object>[]): number {
   return refs.filter((ref) => ref.deref() !== undefined).length;
 }
 
-const source = new WindowSource(() => {
-  throw new Error("standalone source must not dispatch");
-});
+// The Source owns one application callback that captures an external object.
+// A live Source must retain it, but a terminated Source still held by the
+// LifecycleLink must sever this capture after all prior records drain.
+const captured = (() => {
+  const witness = { reason: "source callback owns this independent object" };
+  return {
+    weak: new WeakRef(witness),
+    source: new WindowSource((fact) => {
+      if (fact.variant === "Created" && witness.reason.length === 0)
+        throw new Error("callback capture is missing");
+    }),
+  };
+})();
+const source = captured.source;
 const anchors: {
   source: WindowSource;
   externalSnapshot: WindowSnapshot | undefined;
@@ -71,6 +82,7 @@ await nextJob(() => {
     "wrong Rust Created fixture",
   );
   source.apply(fact);
+  source.dispatch(fact); // Prove the callback actually reads its captured object.
   refs.push(track(source.get(window)!));
   for (let index = 0; index < 32; index += 1) {
     source.apply(
@@ -110,6 +122,7 @@ const replacement = await nextJob(() => {
       .reduce((count, graph) => count + live(graph), 0),
     currentObjectsLive: live(refs[refs.length - 1]!),
     sourceAlive: anchors.source === source,
+    callbackCaptureAlive: captured.weak.deref() !== undefined,
     externalSnapshotAlive:
       anchors.externalSnapshot?.window.id === 3 &&
       anchors.externalSnapshot.state.bounds.width === 640,
@@ -122,6 +135,7 @@ const replacement = await nextJob(() => {
   requireFact(
     observation.currentObjectsLive === 4 &&
       observation.sourceAlive &&
+      observation.callbackCaptureAlive &&
       observation.externalSnapshotAlive &&
       observation.census === 2,
     "replacement strong current/source/external controls failed",
@@ -151,13 +165,16 @@ const end = await nextJob(() => {
       .reduce((count, graph) => count + live(graph), 0),
     currentObjectsLive: live(refs[refs.length - 1]!),
     sourceAlive: anchors.source === source,
+    callbackCaptureAlive: captured.weak.deref() !== undefined,
     externalSnapshotAlive:
       anchors.externalSnapshot?.window.id === 3 &&
       anchors.externalSnapshot.state.bounds.width === 640,
     readsDenied,
   };
   requireFact(
-    observation.oldObjectsLive === 0 && observation.currentObjectsLive === 0,
+    observation.oldObjectsLive === 0 &&
+      observation.currentObjectsLive === 0 &&
+      !observation.callbackCaptureAlive,
     "source retained current snapshot objects after end and one later-job GC",
   );
   requireFact(

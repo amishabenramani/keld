@@ -51,6 +51,7 @@ pub(super) enum WindowError {
     NotReady,
     WrongOwner,
     PendingDestroyCapacity,
+    SessionWindowCapacity,
 }
 impl WindowError {
     pub(super) const fn code(self) -> &'static str {
@@ -60,6 +61,7 @@ impl WindowError {
             Self::NotReady => "KELD-CORE-040",
             Self::WrongOwner => "KELD-CORE-043",
             Self::PendingDestroyCapacity => "KELD-CORE-046",
+            Self::SessionWindowCapacity => "KELD-CORE-047",
         }
     }
 }
@@ -84,6 +86,9 @@ impl fmt::Display for WindowError {
             }
             Self::PendingDestroyCapacity => {
                 "this window has too many Destroy calls waiting for physical release; wait for Released or drop a timed-out call"
+            }
+            Self::SessionWindowCapacity => {
+                "this Host session has reached its cumulative distinct-window admission limit; end the session to mint another identity"
             }
         };
         write!(formatter, "{}: {detail}", self.code())
@@ -229,6 +234,11 @@ struct Entry {
 /// calls need under 2 KiB of plain metadata per window and bound the linear
 /// correlation check to a small, deterministic cost during a stalled release.
 pub(super) const MAX_PENDING_DESTROYS_PER_WINDOW: usize = 64;
+/// GH1149 review-only candidate: distinct Host identities over one session,
+/// including failed and destroyed Create attempts. It is NOT a reviewed heap
+/// byte budget or a stand-in for GH1142 source/callback/alias qualification.
+/// Never turn the functional proposal into merge approval without GH1149 AC5.
+pub(super) const PROPOSED_MAX_CUMULATIVE_WINDOW_IDS: usize = 1024;
 impl Entry {
     fn view(&self) -> Option<WebviewId> {
         match self.phase {
@@ -299,6 +309,14 @@ impl WindowRegistry {
             .last_incarnation
             .checked_add(1)
             .ok_or(WindowError::Exhausted(WindowCounter::Incarnation))?;
+        // A Host-approved admission must precede the new native window. The
+        // registry retains destroyed tombstones for the entire Host session;
+        // this ceiling bounds distinct identities without recycling a pair.
+        // Preserve original counter-exhaustion error precedence when both
+        // limits are reached, and never mutate either half on refusal.
+        if self.entries.len() >= PROPOSED_MAX_CUMULATIVE_WINDOW_IDS {
+            return Err(WindowError::SessionWindowCapacity);
+        }
         let window = WindowRef {
             id: WindowId(id),
             incarnation: WindowGeneration(incarnation),

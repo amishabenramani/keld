@@ -1,4 +1,4 @@
-/** Internal host-fact mirror (GH-531 §4.d); deliberately not attached to a link. */
+/** Internal host-fact mirror (GH-531 §4.d); attached to the native facade link. */
 import {
   WINDOW_CHANNEL,
   linkError,
@@ -22,6 +22,14 @@ export interface WindowSnapshot {
   readonly pending_close: bigint | null;
   readonly host_destroyed: boolean;
 }
+
+/**
+ * GH1149 review-only cumulative HOST-session admission proposal.
+ * Must match the Rust registry's lifetime count after independent policy
+ * approval; this cardinality alone is NOT a retained-heap byte budget.
+ * Keep Destroyed tombstones and never interpret this as a live-window quota.
+ */
+export const PROPOSED_MAX_CUMULATIVE_WINDOW_IDS = 1024;
 
 function snapshot(
   window: WindowRef,
@@ -57,13 +65,14 @@ function snapshot(
  * strings are closed literals. These graphs retain no payload, buffer or view.
  * Diagnostics retain the first primitive code/full message, not an Error object;
  * their string backing and the callback's captures still need qualification.
- * These shapes are not a heap-byte budget: production attachment still requires
- * independent retained-fact, map-census, heap and alias/lifetime qualification.
+ * These shapes and the proposed map-count bound are NOT a heap-byte budget.
+ * Production attachment still requires independently qualified heap bytes,
+ * callback/record aliases and lifetimes per approved GH1142/1149.
  */
 export class WindowSource implements MirrorSource<WindowEvent> {
   readonly channel = WINDOW_CHANNEL;
   readonly #windows = new Map<number, WindowSnapshot>();
-  readonly #onFact: (fact: WindowEvent) => void;
+  #onFact: ((fact: WindowEvent) => void) | undefined;
   #failureCode: string | undefined;
   #failureMessage = "";
 
@@ -122,7 +131,11 @@ export class WindowSource implements MirrorSource<WindowEvent> {
         throw this.#reject();
       const previous = this.#windows.get(fact.window.id);
       if (fact.variant === "Created") {
-        if (previous) throw this.#reject();
+        if (
+          previous ||
+          this.#windows.size >= PROPOSED_MAX_CUMULATIVE_WINDOW_IDS
+        )
+          throw this.#reject();
         this.#windows.set(
           fact.window.id,
           snapshot(fact.window, fact.state, fact.pending_close, false),
@@ -173,7 +186,9 @@ export class WindowSource implements MirrorSource<WindowEvent> {
   /** Existing dispatch owns ordering and isolates listener exceptions. */
   dispatch(fact: WindowEvent): void {
     // Earlier applied records still drain after a later source fact fails.
-    this.#onFact(fact);
+    // After terminal end the transport has already drained earlier records:
+    // never revive its former application callback/closure via a stale source.
+    this.#onFact?.(fact);
   }
 
   /**
@@ -217,5 +232,8 @@ export class WindowSource implements MirrorSource<WindowEvent> {
       this.#failureCode = error.code;
     }
     this.#windows.clear();
+    // LifecycleLink still holds the terminated Source. It must not, in turn,
+    // retain the captured application handler and its complete external graph.
+    this.#onFact = undefined;
   }
 }

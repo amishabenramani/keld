@@ -93,6 +93,7 @@
         "crates/keld-ipc/src/echo.rs",
         "crates/keld-ipc/src/lifecycle.rs",
         "crates/keld-ipc/src/channel_table.rs",
+        "crates/keld-core/src/app_session/window_registry.rs",
         "crates/keld-native/src/fs.rs",
         "crates/keld-native/src/auth/mod.rs",
         "crates/keld-native/tests/fixtures/fs-payload-v0.tsv",
@@ -511,7 +512,7 @@
         "packages/*",
         "justfile"
       ],
-      "sha256": "766ab31011a345d76eba85ae2577fb5b636b07e69c3163f10e3bca7e54d76616"
+      "sha256": "ad1e59f201e8c15da4b8459adc0e8dc92a21032a5c5720e68955be86493c34c7"
     },
     "policy-readers": {
       "patterns": [
