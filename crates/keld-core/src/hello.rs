@@ -361,6 +361,53 @@ mod tests {
     }
 
     #[test]
+    fn facade_rejects_hidden_reserved_root_keys() {
+        let mut accepted = Vec::new();
+        for source in [
+            "export default { initialWindow: 'none', async renderer() {} } as const;",
+            "export default { initialWindow: 'none', *auth() {} } as const;",
+            "export default { initialWindow: 'none', async *renderer() {} } as const;",
+            "export default { initialWindow: 'none', async initialWindow() {} } as const;",
+            "export default { initialWindow: 'none', async /*comment*/ renderer() {} } as const;",
+            "export default { initialWindow: 'none', * /*comment*/ auth() {} } as const;",
+            "export default { initialWindow: 'none', get renderer() { return 'index.html' } } as const;",
+            "export default { initialWindow: 'none', set auth(value) {} } as const;",
+            r"export default { initialWindow: 'none', rend\u0065rer: 'index.html' } as const;",
+            r"export default { initia\u006cWindow: 'none' } as const;",
+            r"export default { initialWindow: 'none', render\u0065r() {} } as const;",
+            r"export default { initialWindow: 'none', 'ren\x64erer': 'index.html' } as const;",
+            r"export default { initialWindow: 'none', ['ren\x64erer']: 'index.html' } as const;",
+            r"export default { initialWindow: 'none', ['rend\u0065rer']: 'index.html' } as const;",
+            r#"export default { initialWindow: 'none', "rend\u{65}rer": 'index.html' } as const;"#,
+        ] {
+            if initial_window_from_config_ts(source).is_ok() {
+                accepted.push(source);
+            }
+        }
+        assert!(
+            accepted.is_empty(),
+            "obscured reserved root members accepted:\n{}",
+            accepted.join("\n")
+        );
+    }
+
+    #[test]
+    fn facade_allows_unrelated_root_methods_and_nested_keys() {
+        assert!(
+            initial_window_from_config_ts(
+                "export default { initialWindow: 'none', async unrelated() { return 1 }, *other() { yield 2 }, get safe() { return { renderer: 1 } }, set safe(value) { this.x = value } } as const;"
+            )
+            .expect("unrelated methods are not reserved boot fields")
+        );
+        assert!(
+            initial_window_from_config_ts(
+                r"export default { initialWindow: 'none', async: 'data', 'unrel\u0061ted': 1, ['unrel\u0061ted']: 2, name: 'A\x61', nested: { 'ren\x64erer': 3 } } as const;"
+            )
+            .expect("static unrelated keys, value escapes, and nested data remain allowed")
+        );
+    }
+
+    #[test]
     fn default_renderer_is_index_html() {
         assert_eq!(DEFAULT_RENDERER, "index.html");
         assert_eq!(DEFAULT_ENTRY, "src/main.ts");

@@ -1258,6 +1258,23 @@ mod tests {
         }
     }
 
+    #[test]
+    fn hidden_reserved_root_keys_fail_before_stage_allocation() {
+        let (_temp, project, source_host) = fixture();
+        for source in [
+            "export default { initialWindow: 'none', async renderer() {} } as const;",
+            "export default { initialWindow: 'none', *auth() {} } as const;",
+            r"export default { initialWindow: 'none', 'ren\x64erer': 'index.html' } as const;",
+            r"export default { initia\u006cWindow: 'none' } as const;",
+        ] {
+            fs::write(project.join("keld.config.ts"), source).expect("config");
+            let error = stage_dev_boot(&project, &source_host)
+                .expect_err("ambiguous root requires refusal before staging");
+            assert!(error.to_string().starts_with("KELD-CLI-047"), "{error}");
+            assert!(!project.join(".keld/dev").exists(), "{source}");
+        }
+    }
+
     #[cfg(target_os = "linux")]
     #[test]
     fn unsupported_facade_target_refuses_before_stage_allocation() {

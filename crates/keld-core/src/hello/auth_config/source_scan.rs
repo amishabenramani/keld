@@ -11,6 +11,7 @@ struct SourceToken {
     kind: ConfigToken,
     start: usize,
     end: usize,
+    undecodable_string: bool,
 }
 
 struct SourceScan<'a> {
@@ -198,10 +199,15 @@ impl<'a> SourceScan<'a> {
             if ch == '/' && self.comment() {
                 continue;
             }
+            let mut undecodable_string = false;
             let kind = if ch == '\'' || ch == '"' {
                 self.raw_string(ch);
                 let raw = self.source.get(start + ch.len_utf8()..self.position)?;
                 let decoded = config_string(&mut raw.chars().peekable(), ch);
+                // Legacy parsing intentionally treats malformed unrelated strings
+                // as opaque. The facade root scanner must not mistake a valid JS
+                // \xNN key for a different, harmless property name.
+                undecodable_string = decoded.is_err();
                 self.regex_allowed = false;
                 self.last_word = None;
                 self.last_symbol = None;
@@ -281,6 +287,7 @@ impl<'a> SourceScan<'a> {
                 kind,
                 start,
                 end: self.position,
+                undecodable_string,
             });
         }
     }
@@ -351,7 +358,8 @@ fn root_property_slice<'a>(
 fn harmless_computed_root_key(source_after_open: &str) -> bool {
     let mut preview = SourceScan::new(source_after_open);
     preview.next().is_some_and(|token| {
-        matches!(&token.kind, ConfigToken::Text(key) if !matches!(key.as_str(), "initialWindow" | "renderer" | "auth"))
+        !token.undecodable_string
+            && matches!(&token.kind, ConfigToken::Text(key) if !matches!(key.as_str(), "initialWindow" | "renderer" | "auth"))
     }) && preview
         .next()
         .is_some_and(|token| token.kind == ConfigToken::Symbol(']'))
@@ -378,6 +386,41 @@ fn property_accessor_prefix(source: &str, property: &str) -> bool {
             .is_some_and(|open| open.kind == ConfigToken::Symbol('('))
 }
 
+/// Inspect only the root member's key/header, not its nested value. A JS
+/// Unicode escape in an identifier or a quoted key escape we cannot decode
+/// could spell a forbidden boot field, so it must not become an absent key.
+fn validate_facade_root_member_token(
+    token: &SourceToken,
+    source: &str,
+    method_modifier: bool,
+) -> Result<(), AuthConfigError> {
+    if token.undecodable_string || token.kind == ConfigToken::Symbol('\\') {
+        return Err(auth_config_error(
+            "unresolved escape in exported root property name",
+        ));
+    }
+    if method_modifier
+        && matches!(
+            &token.kind,
+            ConfigToken::Word(key) | ConfigToken::Text(key)
+                if matches!(key.as_str(), "initialWindow" | "renderer" | "auth")
+        )
+    {
+        return Err(auth_config_error(
+            "reserved root method is unsupported for facade boot",
+        ));
+    }
+    if token.kind == ConfigToken::Symbol('.')
+        || (token.kind == ConfigToken::Symbol('[')
+            && !harmless_computed_root_key(source.get(token.end..).unwrap_or_default()))
+    {
+        return Err(auth_config_error(
+            "unresolved computed root key or object spread",
+        ));
+    }
+    Ok(())
+}
+
 fn exported_property_slice<'a>(
     source: &'a str,
     scan: &mut SourceScan<'a>,
@@ -387,6 +430,7 @@ fn exported_property_slice<'a>(
     let mut nesting = Vec::new();
     let mut at_key = true;
     let mut value_started = false;
+    let mut method_modifier = false;
     let mut found = None;
     let mut pending_start = None;
     while let Some(token) = scan.next() {
@@ -400,28 +444,22 @@ fn exported_property_slice<'a>(
                 }
                 at_key = true;
                 value_started = false;
+                method_modifier = false;
                 continue;
             }
-            // A root member may begin with `get`, `set`, `async`, or `*`,
-            // before its computed key. Check until its top-level value colon,
-            // not just the first token, and never inspect nested values.
-            if strict_root
-                && !value_started
-                && (token.kind == ConfigToken::Symbol('.')
-                    || (token.kind == ConfigToken::Symbol('[')
-                        && !harmless_computed_root_key(
-                            source.get(token.end..).unwrap_or_default(),
-                        )))
-            {
-                return Err(auth_config_error(
-                    "unresolved computed root key or object spread",
-                ));
+            // Before the value colon, method modifiers and ambiguous key
+            // escapes must be examined even after the first root token.
+            if strict_root && !value_started {
+                validate_facade_root_member_token(&token, source, method_modifier)?;
             }
             if token.kind == ConfigToken::Symbol(':') {
                 value_started = true;
             }
             if at_key {
                 at_key = false;
+                method_modifier = strict_root
+                    && (token.kind == ConfigToken::Symbol('*')
+                        || matches!(&token.kind, ConfigToken::Word(word) if word == "async"));
                 let named = matches!(&token.kind, ConfigToken::Word(key) | ConfigToken::Text(key) if key == property);
                 if token.kind == ConfigToken::Symbol('[') {
                     let mut preview = SourceScan::new(source.get(token.end..).unwrap_or_default());
@@ -463,6 +501,10 @@ fn exported_property_slice<'a>(
                     value_started = true;
                     continue;
                 }
+            } else if method_modifier {
+                // Only `async *` extends the modifier prefix. Once a key is
+                // read, further words belong to signatures or type metadata.
+                method_modifier = token.kind == ConfigToken::Symbol('*');
             }
         }
         match token.kind {
