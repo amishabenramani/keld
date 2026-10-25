@@ -182,6 +182,12 @@ for await (const command of lines) {
   } else if (command === "ID_TAMPER") {
     // Independent shipping-Host negative: a second live BrowserWindow must
     // never be able to delete the first window's registered close listeners.
+    const contents = win.webContents;
+    const forgedRelease = Reflect.get(contents, "dispose");
+    if (typeof forgedRelease === "function") Reflect.apply(forgedRelease, contents, []);
+    if (contents.isDestroyed() || win.isDestroyed()) {
+      throw new Error("caller forged WebContents destroyed without a native Host fact");
+    }
     const attacker = new BrowserWindow({ width: 320, height: 240 });
     const before = BrowserWindow.getAllWindows();
     if (before.length !== 2 || before[0] !== win || before[1] !== attacker) {

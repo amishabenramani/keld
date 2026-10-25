@@ -13,6 +13,7 @@ import {
   onWindowFactApplied,
 } from "../../api/src/app.ts";
 import type {
+  Rect,
   WindowEvent,
   WindowRef,
   WindowRequest,
@@ -53,6 +54,16 @@ function diagnostic(message: string): Error {
   return new Error(
     `KELD-COMPAT-010: ${message}. Use the Keld isolated webview defaults.`,
   );
+}
+
+function reportNativeCallbackError(message: string, error: unknown): void {
+  // Application code can replace even console.error. A failed diagnostic may
+  // never stop a Host close verdict or crash the deferred Destroy lifecycle.
+  try {
+    console.error(message, error);
+  } catch {
+    // Logging has no native authority.
+  }
 }
 
 function checkOptions(options: BrowserWindowOptions): void {
@@ -110,19 +121,47 @@ function ignoredOptionDiagnostics(options: BrowserWindowOptions): void {
 }
 
 /** The first-proof content lifetime; loading and preload APIs are not faked. */
-export class BrowserWindowWebContents extends EventEmitter {
+// The user-facing WebContents must never expose a method that can forge a
+// native Host Destroyed tombstone. The sole release closure lives in this
+// module-private WeakMap, not on the returned instance or its prototype.
+const hostContentsRelease = new WeakMap<BrowserWindowWebContents, () => void>();
+
+class BrowserWindowWebContents extends EventEmitter {
   #destroyed = false;
+
+  constructor() {
+    super();
+    hostContentsRelease.set(this, () => this.#releaseAfterHostDestroyed());
+  }
 
   isDestroyed(): boolean {
     return this.#destroyed;
   }
 
-  /** Native Destroyed is the only basis for publishing this tombstone. */
-  dispose(): void {
+  /** Only the module-private Host release capability can flip this bit. */
+  #releaseAfterHostDestroyed(): void {
     if (this.#destroyed) return;
     this.#destroyed = true;
-    this.emit("destroyed");
+    try {
+      this.emit("destroyed");
+    } catch (error) {
+      // A JS listener throwing after a real native release must not swallow
+      // BrowserWindow.closed or crash a deferred Destroy microtask.
+      reportNativeCallbackError(
+        "KELD webContents destroyed listener failed:",
+        error,
+      );
+    }
   }
+}
+
+function releaseContentsAfterHostDestroyed(
+  contents: BrowserWindowWebContents,
+): void {
+  const release = hostContentsRelease.get(contents);
+  if (!release)
+    throw diagnostic("Host WebContents release capability is missing");
+  release();
 }
 
 export class BrowserWindow extends EventEmitter {
@@ -131,9 +170,9 @@ export class BrowserWindow extends EventEmitter {
   // the otherwise secret Symbol and bypass the Host Create contract.
   static #replaying: WindowRef | undefined;
   // Dispatch-order barrier only: Host/mirror still own pending-close state.
-  // A recovered Created(pending_close) must emit 'close' before any later
-  // window fact, even when public Ready and application listeners are deferred.
-  static readonly #heldReplayCloses = new Map<
+  // A recovered Created(pending_close), or an ordinary CloseRequested before
+  // Ready, must emit 'close' before any later window fact after Ready.
+  static readonly #heldBeforeReadyCloses = new Map<
     number,
     { readonly ref: WindowRef; readonly closeSeq: bigint }
   >();
@@ -144,6 +183,8 @@ export class BrowserWindow extends EventEmitter {
   #insideClosed = false;
   readonly #recovered!: boolean;
   #lastCloseSeq: bigint | undefined;
+  // Delta-only bookkeeping; public getters and CALLs use the Host mirror.
+  #lastDispatchedBounds!: Readonly<Rect>;
 
   constructor(options: BrowserWindowOptions = {}) {
     super();
@@ -197,6 +238,7 @@ export class BrowserWindow extends EventEmitter {
       configurable: false,
     });
     this.#ref = Object.freeze({ id: ref.id, incarnation: ref.incarnation });
+    this.#lastDispatchedBounds = confirmed.state.bounds;
     // An Adopted host window also predates this JS facade, even if application
     // code never called getAllWindows() to materialize its replay wrapper.
     this.#recovered = replayed !== undefined || adopted;
@@ -285,7 +327,7 @@ export class BrowserWindow extends EventEmitter {
     if (this.#destroyed)
       throw new Error("KELD-COMPAT-011: Object has been destroyed");
     void invokeWindow(request).catch((error: unknown) => {
-      console.error("KELD native window request failed:", error);
+      reportNativeCallbackError("KELD native window request failed:", error);
     });
   }
 
@@ -336,17 +378,19 @@ export class BrowserWindow extends EventEmitter {
     this.#destroyed = true;
     // The private Host pair, never a user-visible property, owns cleanup.
     if (windows.get(this.#ref.id) === this) windows.delete(this.#ref.id);
-    if (!fromDestroy) this.#contents.dispose();
+    if (!fromDestroy) releaseContentsAfterHostDestroyed(this.#contents);
     this.#insideClosed = true;
     try {
       this.emit("closed");
     } catch (error) {
       // A throwing application listener cannot interrupt physical release or
       // suppress the content tombstone; the host already destroyed the window.
-      console.error("KELD window closed callback failed:", error);
+      reportNativeCallbackError("KELD window closed callback failed:", error);
     } finally {
       this.#insideClosed = false;
-      if (fromDestroy) queueMicrotask(() => this.#contents.dispose());
+      if (fromDestroy) {
+        queueMicrotask(() => releaseContentsAfterHostDestroyed(this.#contents));
+      }
     }
   }
 
@@ -370,7 +414,10 @@ export class BrowserWindow extends EventEmitter {
     } catch (error) {
       // A throwing application callback must not cause data loss or wedge ClosePending.
       prevented = true;
-      console.error("KELD window close callback failed; vetoed:", error);
+      reportNativeCallbackError(
+        "KELD window close callback failed; vetoed:",
+        error,
+      );
     }
     void invokeWindow({
       variant: "CloseReply",
@@ -378,7 +425,7 @@ export class BrowserWindow extends EventEmitter {
       close_seq,
       verdict: prevented ? "Veto" : "Allow",
     }).catch((error: unknown) => {
-      console.error("KELD native close verdict failed:", error);
+      reportNativeCallbackError("KELD native close verdict failed:", error);
     });
   }
 
@@ -390,7 +437,7 @@ export class BrowserWindow extends EventEmitter {
     } catch (error) {
       // The role/link has ended, so a late scheduled delivery has no legal
       // successor owner and must never send an Allow on its dead generation.
-      console.error(
+      reportNativeCallbackError(
         "KELD close verdict abandoned after Host mirror failure:",
         error,
       );
@@ -411,11 +458,11 @@ export class BrowserWindow extends EventEmitter {
     window.#nativeClose(close_seq);
   }
 
-  static #flushHeldReplayClose(ref: WindowRef): void {
+  static #flushHeldBeforeReadyClose(ref: WindowRef): void {
     if (!hostApp.isReady()) return;
-    const held = BrowserWindow.#heldReplayCloses.get(ref.id);
+    const held = BrowserWindow.#heldBeforeReadyCloses.get(ref.id);
     if (!held || held.ref.incarnation !== ref.incarnation) return;
-    BrowserWindow.#heldReplayCloses.delete(ref.id);
+    BrowserWindow.#heldBeforeReadyCloses.delete(ref.id);
     BrowserWindow.#dispatchNativeClose(held.ref, held.closeSeq);
   }
 
@@ -425,14 +472,16 @@ export class BrowserWindow extends EventEmitter {
     close_seq: bigint,
     fromReplay: boolean,
   ): void {
-    if (fromReplay) {
-      BrowserWindow.#heldReplayCloses.set(ref.id, {
+    const ready = hostApp.isReady();
+    const mustHold = fromReplay || !ready;
+    if (mustHold) {
+      BrowserWindow.#heldBeforeReadyCloses.set(ref.id, {
         ref: { id: ref.id, incarnation: ref.incarnation },
         closeSeq: close_seq,
       });
     }
-    if (!fromReplay && hostApp.isReady()) {
-      BrowserWindow.#flushHeldReplayClose(ref);
+    if (!fromReplay && ready) {
+      BrowserWindow.#flushHeldBeforeReadyClose(ref);
       BrowserWindow.#dispatchNativeClose(ref, close_seq);
       return;
     }
@@ -443,22 +492,34 @@ export class BrowserWindow extends EventEmitter {
         // flushes it synchronously first, preserving the Host's fact order.
         setImmediate(() => {
           try {
-            if (fromReplay) BrowserWindow.#flushHeldReplayClose(ref);
+            if (mustHold) BrowserWindow.#flushHeldBeforeReadyClose(ref);
             else {
-              BrowserWindow.#flushHeldReplayClose(ref);
+              BrowserWindow.#flushHeldBeforeReadyClose(ref);
               BrowserWindow.#dispatchNativeClose(ref, close_seq);
             }
           } catch (error) {
             // Expected shutdowns are handled by #dispatchNativeClose; do not
             // let an independent late callback crash the event loop.
-            console.error("KELD deferred native close dispatch failed:", error);
+            reportNativeCallbackError(
+              "KELD deferred native close dispatch failed:",
+              error,
+            );
           }
         });
       },
       (error: unknown) => {
         // A dead link ends the Host's generation, so no stale Allow is sent.
-        if (fromReplay) BrowserWindow.#heldReplayCloses.delete(ref.id);
-        console.error(
+        if (mustHold) {
+          const held = BrowserWindow.#heldBeforeReadyCloses.get(ref.id);
+          if (
+            held &&
+            held.ref.incarnation === ref.incarnation &&
+            held.closeSeq === close_seq
+          ) {
+            BrowserWindow.#heldBeforeReadyCloses.delete(ref.id);
+          }
+        }
+        reportNativeCallbackError(
           "KELD recovery close lost its Host Ready barrier:",
           error,
         );
@@ -479,7 +540,7 @@ export class BrowserWindow extends EventEmitter {
       // An already-applied Bounds/Focus/FullScreen/Destroyed fact may dispatch
       // before the deferred Ready continuation for an earlier replay Created.
       // Emit that replay close first, never reverse the host's causal order.
-      BrowserWindow.#flushHeldReplayClose(fact.window);
+      BrowserWindow.#flushHeldBeforeReadyClose(fact.window);
       if (fact.variant === "CloseRequested") {
         BrowserWindow.#receiveNativeClose(fact.window, fact.close_seq, false);
         return;
@@ -489,7 +550,16 @@ export class BrowserWindow extends EventEmitter {
         return;
       switch (fact.variant) {
         case "Bounds":
-          window.emit("resize");
+          {
+            const prior = window.#lastDispatchedBounds;
+            window.#lastDispatchedBounds = fact.bounds;
+            if (
+              prior.width !== fact.bounds.width ||
+              prior.height !== fact.bounds.height
+            ) {
+              window.emit("resize");
+            }
+          }
           break;
         case "Maximized":
           window.emit(fact.maximized ? "maximize" : "unmaximize");

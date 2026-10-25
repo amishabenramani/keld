@@ -135,6 +135,156 @@ if (mode === "recovery-gap") {
   );
   await new Promise<void>((resolve) => setImmediate(resolve));
   assert.deepEqual(observed, ["close", "resize"], "no duplicate replay close");
+} else if (mode === "pre-ready-close-order") {
+  const ref = createHostWindow();
+  // A real CloseRequested can arrive after Subscribe but before the facade
+  // emits Ready. It must be ordered ahead of the next Bounds fact, not only
+  // when the first close was attached to a replayed Created frame.
+  fact({ variant: "CloseRequested", window: ref, close_seq: 11n });
+  becomeReady();
+  const win = BrowserWindow.getAllWindows()[0];
+  const observed: string[] = [];
+  win.on("close", (event: { preventDefault(): void }) => {
+    observed.push("close");
+    event.preventDefault();
+  });
+  win.on("resize", () => observed.push("resize"));
+  fact({
+    variant: "Bounds",
+    window: ref,
+    bounds: { x: 15, y: 30, width: 888, height: 480 },
+  });
+  assert.deepEqual(observed, ["close", "resize"]);
+  assert.deepEqual(
+    calls.filter((call) => call.variant === "CloseReply"),
+    [{ variant: "CloseReply", window: ref, close_seq: 11n, verdict: "Veto" }],
+  );
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.deepEqual(observed, ["close", "resize"]);
+} else if (mode === "move-only-does-not-resize") {
+  becomeReady();
+  const win = new BrowserWindow();
+  const ref = source.all()[0]?.window;
+  assert.ok(ref);
+  const resized: string[] = [];
+  win.on("resize", () => {
+    resized.push(win.getSize().join("x"));
+  });
+  fact({
+    variant: "Bounds",
+    window: ref,
+    bounds: { x: 25, y: 48, width: 640, height: 480 },
+  });
+  assert.deepEqual(resized, [], "a pure native move cannot emit resize");
+  assert.deepEqual(win.getPosition(), [25, 48]);
+  fact({
+    variant: "Bounds",
+    window: ref,
+    bounds: { x: 25, y: 48, width: 777, height: 480 },
+  });
+  assert.deepEqual(
+    resized,
+    ["777x480"],
+    "resize listener reads applied Host fact",
+  );
+  fact({
+    variant: "Bounds",
+    window: ref,
+    bounds: { x: 25, y: 48, width: 777, height: 480 },
+  });
+  assert.deepEqual(resized, ["777x480"], "no duplicate resize for same bounds");
+} else if (mode === "throwing-contents-destroyed") {
+  becomeReady();
+  const window = new BrowserWindow();
+  const ref = source.all()[0]?.window;
+  assert.ok(ref);
+  const observed: string[] = [];
+  const errors: unknown[][] = [];
+  const originalError = console.error;
+  console.error = (...args: unknown[]) => {
+    errors.push(args);
+  };
+  try {
+    window.webContents.on("destroyed", () => {
+      observed.push("webContents destroyed");
+      throw new Error("untrusted user listener");
+    });
+    window.on("closed", () => {
+      assert.equal(window.isDestroyed(), true);
+      observed.push("window closed");
+    });
+    // The Host has physically released the real window: its event cannot be
+    // lost because a JS callback throws from the contents tombstone.
+    fact({ variant: "Destroyed", window: ref });
+    assert.deepEqual(observed, ["webContents destroyed", "window closed"]);
+    assert.equal(window.isDestroyed(), true);
+    assert.equal(BrowserWindow.getAllWindows().length, 0);
+    assert.equal(errors.length, 1, "one bounded callback diagnostic");
+
+    const second = new BrowserWindow();
+    const secondContents = second.webContents;
+    secondContents.on("destroyed", () => {
+      observed.push("second contents destroyed");
+      throw new Error("deferred user listener");
+    });
+    second.on("closed", () => observed.push("second closed"));
+    second.destroy();
+    await Promise.resolve();
+    assert.equal(secondContents.isDestroyed(), true);
+    assert.deepEqual(observed.slice(-2), [
+      "second closed",
+      "second contents destroyed",
+    ]);
+    assert.equal(
+      errors.length,
+      2,
+      "deferred Destroy reports one diagnostic too",
+    );
+  } finally {
+    console.error = originalError;
+  }
+} else if (mode === "no-public-contents-dispose") {
+  becomeReady();
+  const win = new BrowserWindow();
+  const contents = win.webContents;
+  let destroyed = 0;
+  contents.on("destroyed", () => {
+    destroyed += 1;
+  });
+  // A hostile app can reflect on a returned WebContents and invoke its
+  // prototype methods. A public dispose() must never forge the Host tombstone.
+  const forged = Reflect.get(contents, "dispose") as unknown;
+  if (typeof forged === "function") Reflect.apply(forged, contents, []);
+  assert.equal(contents.isDestroyed(), false, "Host never sent Destroyed");
+  assert.equal(win.isDestroyed(), false);
+  assert.equal(destroyed, 0, "caller must not fabricate native completion");
+  assert.equal(BrowserWindow.getAllWindows()[0], win);
+} else if (mode === "throwing-close-and-logger") {
+  becomeReady();
+  const win = new BrowserWindow();
+  const ref = source.all()[0]?.window;
+  assert.ok(ref);
+  let closeEvents = 0;
+  win.on("close", () => {
+    closeEvents += 1;
+    throw new Error("untrusted application close listener");
+  });
+  const originalError = console.error;
+  console.error = () => {
+    throw new Error("untrusted logger");
+  };
+  try {
+    fact({ variant: "CloseRequested", window: ref, close_seq: 21n });
+  } finally {
+    console.error = originalError;
+  }
+  assert.equal(closeEvents, 1);
+  assert.deepEqual(
+    calls.filter((call) => call.variant === "CloseReply"),
+    [{ variant: "CloseReply", window: ref, close_seq: 21n, verdict: "Veto" }],
+    "a logging failure must never suppress the one terminal close verdict",
+  );
+  assert.equal(win.isDestroyed(), false);
 } else if (mode === "replay-link-death") {
   createHostWindow(7n);
   becomeReady();

@@ -10,12 +10,25 @@ import {
 for (const scenario of [
   "recovery-gap",
   "replay-order",
+  "pre-ready-close-order",
+  "move-only-does-not-resize",
+  "throwing-contents-destroyed",
+  "no-public-contents-dispose",
+  "throwing-close-and-logger",
   "replay-link-death",
   "adopted-without-replay-wrapper",
   "unmaterialized-close",
   "mutable-id",
 ]) {
-  test(`GH531 P1 ${scenario} dispatch and ownership`, async () => {
+  const severity = [
+    "replay-order",
+    "replay-link-death",
+    "move-only-does-not-resize",
+    "throwing-contents-destroyed",
+  ].includes(scenario)
+    ? "P2"
+    : "P1";
+  test(`GH531 ${severity} ${scenario} dispatch and ownership`, async () => {
     const child = Bun.spawn(
       [
         process.execPath,
