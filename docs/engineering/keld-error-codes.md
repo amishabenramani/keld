@@ -958,6 +958,12 @@ match the crate that already emits the code. Do not invent a third spelling.
 - message: The window belongs to another or retired role instance
 - fix: Subscribe through the current authenticated primary link and use only its replayed host-owned references.
 
+## KELD-CORE-044
+
+- crate: keld-core
+- message: The application Ready milestone came from the wrong boot kind or was delivered more than once
+- fix: Deliver only the selected boot kind's first Ready milestone; treat duplicate or foreign Ready as a terminal contract failure.
+
 ## KELD-CORE-045
 
 - crate: keld-core
