@@ -14,7 +14,7 @@ use std::os::unix::net::UnixListener;
 use std::os::unix::process::CommandExt as _;
 use std::path::Path;
 use std::process::{Command, Stdio};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 fn assert_zero_native_app_windows(host_pid: u32) {
     // The title-filtered positive-window observer cannot prove zero. Query
@@ -100,6 +100,21 @@ fn shipping_schema_two_host_emits_ready_without_an_initial_native_window() {
 
     assert_zero_native_app_windows(host_pid);
 
+    // This is a duration oracle, not a synchronization sleep: an Init that
+    // already happened disarms the entire startup deadline, even with no view.
+    std::thread::sleep(keld_wv::INITIAL_MILESTONE_DEADLINE + Duration::from_secs(1));
+    assert!(
+        cleanup
+            .cli
+            .as_mut()
+            .expect("live host")
+            .try_wait()
+            .expect("inspect live windowless host")
+            .is_none(),
+        "the already-Init windowless Host exited at the old startup deadline"
+    );
+    assert_zero_native_app_windows(host_pid);
+
     writer
         .write_all(b"QUIT\n")
         .expect("request authenticated app Quit");
@@ -112,55 +127,57 @@ fn shipping_schema_two_host_emits_ready_without_an_initial_native_window() {
         "native facade host failed: {output:?}"
     );
     await_process_gone(bun_pid);
+    assert!(
+        !stage.root().exists(),
+        "successful facade Host did not clean the stage after native release"
+    );
 }
 
-/// Native hostile first-milestone falsifier, not a mocked service. The
-/// debug-only WebKit adapter withholds its actual Tao Init observation from
-/// Core while the complete authenticated Host/Guardian/Bun tree is alive.
-/// The separately owned *shipping-binary* watchdog must terminate the process
-/// without dropping AppKit's !Send native/profile/stage handles on a worker.
-#[cfg(feature = "profile-test-hooks")]
+/// AC15/AC20: a real child stalls the main thread after the native-loop entry
+/// callback arms the deadline, before tao can deliver its Init. The coordinator
+/// must independently end the process. This fixture is absent from shipping
+/// release binaries and cannot be mistaken for a real AppKit scheduling stall.
+#[cfg(all(feature = "profile-test-hooks", debug_assertions))]
 #[test]
-fn withheld_native_init_ends_the_real_host_without_forged_ready_or_window() {
-    let fixture = ProductFixture::new("facade-init-watchdog");
+fn shipping_schema_two_stalled_init_exits_through_the_binary_terminal_once() {
+    use std::io::Read as _;
+
+    let fixture = ProductFixture::new("facade-stalled-init");
     fs::write(fixture.project.join("src/main.ts"), &fixture.entry_source)
-        .expect("authenticated full shipping-role fixture");
+        .expect("authenticated raw lifecycle source");
     fs::write(
         fixture.project.join("keld.config.ts"),
-        "export default { name: \"Keld Init absence\", entry: \"src/main.ts\", initialWindow: \"none\" } as const;\n",
+        "export default { name: 'Stalled Init', entry: 'src/main.ts', initialWindow: 'none' } as const;\n",
     )
-    .expect("explicit valid schema-two application");
+    .expect("facade boot selection");
     let stage = keld_cli::boot::stage_dev_boot(
         &fixture.project,
         Path::new(env!("CARGO_BIN_EXE_keld-host")),
     )
-    .expect("compile the actual native no-flag host stage");
-    assert!(!stage.root().join("index.html").exists());
-
-    let control_path = fixture.root.path().join("absent-init.sock");
-    let listener = UnixListener::bind(&control_path).expect("test-owned control");
-    listener.set_nonblocking(true).expect("bounded accept");
+    .expect("compile private rendererless stage");
+    let control_path = fixture.root.path().join("stalled-init.sock");
+    let listener = UnixListener::bind(&control_path).expect("bind child control");
+    listener.set_nonblocking(true).expect("nonblocking accept");
     let child = Command::new(stage.host())
         .process_group(0)
         .current_dir(stage.root())
         .env("KELD_T1B_CONTROL", &control_path)
         .env("KELD_T4_SKIP_DESCENDANT", "1")
-        .env("KELD_T2_EXIT_ON_LINK_EOF", "1")
-        .env("KELD_T1B_SUPPRESS_HOST_INIT", "1")
+        .env("KELD_T1B_STALL_BEFORE_INIT", "1")
         .env("KELD_DEV_LEASE", "stdin-v1")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .expect("launch the actual debug-profile host binary");
+        .expect("launch shipping Host debug probe");
     let mut cleanup = ShippingLaunchCleanup::new(child);
-    let host = cleanup.cli.as_mut().expect("live native Host");
+    let host = cleanup.cli.as_mut().expect("owned child host");
     let host_pid = host.id();
-    let _lease = host.stdin.take().expect("retain native dev lease");
+    let _lease = host.stdin.take().expect("hold lease through timeout");
     let control = accept_before(&listener, Instant::now() + EVENT_DEADLINE);
     control
-        .set_read_timeout(Some(EVENT_DEADLINE))
-        .expect("bound role records");
+        .set_read_timeout(Some(EVENT_DEADLINE + Duration::from_secs(10)))
+        .expect("bounded pre-Init control");
     let mut reader = BufReader::new(control);
     let hello = read_control_line(&mut reader);
     let parts: Vec<_> = hello.split_whitespace().collect();
@@ -168,35 +185,38 @@ fn withheld_native_init_ends_the_real_host_without_forged_ready_or_window() {
     let bun_pid = parse_pid(parts.get(1).copied(), &hello);
     cleanup.record_authenticated_groups(process_group(host_pid), process_group(bun_pid));
     assert_eq!(read_control_line(&mut reader), "DESCENDANT 0");
-    assert_zero_native_app_windows(host_pid);
+    // No readiness token is permitted while the genuine Tao Init is absent.
+    let mut remaining = String::new();
+    reader
+        .read_to_string(&mut remaining)
+        .expect("observe child EOF");
+    assert!(
+        !remaining.lines().any(|line| line == "READY"),
+        "{remaining}"
+    );
 
-    let child = cleanup
-        .cli
-        .take()
-        .expect("retain group cleanup while reaping");
-    let output = wait_child_output(child, EVENT_DEADLINE);
+    let output = wait_child_output(cleanup.release(), EVENT_DEADLINE + Duration::from_secs(10));
+    assert!(!output.status.success(), "stalled Init exited successfully");
+    let stderr = String::from_utf8(output.stderr).expect("host error UTF-8");
+    assert_eq!(
+        stderr.matches("KELD_T1B_TERMINAL_ENTERED").count(),
+        1,
+        "{stderr}"
+    );
+    assert_eq!(
+        stderr
+            .matches("the UI loop did not deliver its first turn within 15 s")
+            .count(),
+        1,
+        "{stderr}"
+    );
+    assert!(stderr.contains("KELD-CORE-037"), "{stderr}");
+    assert!(!stderr.contains("COORDINATOR_RETURNED"), "{stderr}");
+    assert!(!remaining.contains("READY"), "stalled Init published Ready");
     assert!(
-        !output.status.success(),
-        "unproved native Init exited as success: {output:?}"
+        stage.root().exists(),
+        "unproved native custody deleted the dev stage"
     );
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        stderr.contains("KELD-CORE-044: the real native AppKit Init/Host Ready was not accepted"),
-        "no bounded binary-owned startup terminal, or wrong failure: {stderr}"
-    );
-    // The Host must not fabricate a Ready just to satisfy an application
-    // while its actual native first milestone is still withheld.
-    let mut next = String::new();
-    use std::io::BufRead as _;
-    let _ = reader
-        .read_line(&mut next)
-        .expect("post-fatal bounded control read");
-    assert_ne!(
-        next.trim(),
-        "READY",
-        "a lost native Init became a fake Ready"
-    );
-    assert_zero_native_app_windows(host_pid);
     await_process_gone(bun_pid);
 }
 

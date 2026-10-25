@@ -315,7 +315,7 @@ impl WkWebViewEngine {
             None,
             AppReadyTrigger::NavigationReady,
             &mut |_, _, _| Ok((true, None)),
-            &mut unproved,
+            (&mut unproved, || {}),
         )
     }
 
@@ -346,7 +346,9 @@ impl WkWebViewEngine {
         anchor: Option<WebviewId>,
         ready_trigger: AppReadyTrigger,
         service: &mut F,
-        retains_main_custody: &mut bool,
+        // Keep the main-custody result paired with the loop-entry clock handoff.
+        // Neither moves its underlying AppKit/profile owner to another thread.
+        startup: (&mut bool, impl FnOnce()),
     ) -> Result<(), WvError>
     where
         F: FnMut(
@@ -355,6 +357,7 @@ impl WkWebViewEngine {
             bool,
         ) -> Result<(bool, Option<Instant>), WvError>,
     {
+        let (retains_main_custody, on_loop_entry) = startup;
         *retains_main_custody = false;
         let Some(main_thread) = MainThreadMarker::new() else {
             return Err(WvError::EventLoop(String::from(
@@ -399,13 +402,20 @@ impl WkWebViewEngine {
         let mut closing = Vec::new();
         let mut main_owner_failure = None;
         let mut host_init_emitted = false;
-        #[cfg(all(feature = "profile-test-hooks", debug_assertions))]
-        let suppress_host_init = std::env::var_os("KELD_T1B_SUPPRESS_HOST_INIT").is_some();
-        #[cfg(not(all(feature = "profile-test-hooks", debug_assertions)))]
-        let suppress_host_init = false;
         let profile = &self.profile;
         let next_id = &mut self.next_id;
         let media_seed_allow = self.profile_test_media_seed_allow;
+        // Arm the host's external Init watchdog only after loop setup has succeeded.
+        // The watchdog is independent of Tao's pre-Init proxy/waker availability.
+        on_loop_entry();
+        #[cfg(all(feature = "profile-test-hooks", debug_assertions))]
+        if ready_trigger == AppReadyTrigger::HostInitialized
+            && std::env::var_os("KELD_T1B_STALL_BEFORE_INIT").is_some()
+        {
+            // Private child-only failure control. The coordinator must terminate
+            // this process: the main thread cannot service a proxy or unwind.
+            std::thread::park();
+        }
         let code = event_loop.run_return(|event, target, control_flow| {
             // The existing bridge accepts terminal intent before its proxy event.
             // One terminal state closes renderer dispatch and Native main admission.
@@ -415,7 +425,6 @@ impl WkWebViewEngine {
             }
             if ready_trigger == AppReadyTrigger::HostInitialized
                 && !terminal_requested
-                && !suppress_host_init
                 && first_host_init_turn(&event, &mut host_init_emitted)
                 && events.send(AppWindowEvent::HostInitialized).is_err()
             {

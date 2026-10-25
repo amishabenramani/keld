@@ -21,38 +21,6 @@ use std::path::Path;
 #[cfg(any(target_os = "macos", target_os = "linux", windows))]
 use std::path::PathBuf;
 use std::process;
-
-/// Shipping macOS owns the terminal process boundary. If the real first Tao
-/// Init never reaches the authenticated Host Ready coordinator, there is no
-/// safe library-level way to unwind a hung `AppKit` loop and drop its !Send
-/// native/verified-profile/stage owners. Exit *without unwinding* instead;
-/// the OS reaps the process tree through the existing Guardian liveness pipe.
-#[cfg(target_os = "macos")]
-fn missing_native_init_terminal() -> ! {
-    let mut stderr = io::stderr().lock();
-    let _ = writeln!(
-        stderr,
-        "KELD-CORE-044: the real native AppKit Init/Host Ready was not accepted before the 15-second startup deadline; refusing to release unproved main-thread custody"
-    );
-    let _ = stderr.flush();
-    process::exit(1);
-}
-
-/// Select the native binary's only bounded startup terminal on macOS. Linux
-/// preserves its current guardian/renderer contract with no new watchdog.
-#[cfg(any(target_os = "macos", target_os = "linux"))]
-fn run_guarded_selected(
-    boot: keld_core::app_session::ValidatedBootSelection,
-) -> Result<(), keld_core::app_session::HostRunFailure> {
-    #[cfg(target_os = "macos")]
-    {
-        keld_core::app_session::run_guarded_with_init_terminal(boot, missing_native_init_terminal)
-    }
-    #[cfg(target_os = "linux")]
-    {
-        keld_core::app_session::run_guarded(boot)
-    }
-}
 #[cfg(target_os = "macos")]
 use std::process::{Command, Stdio};
 
@@ -142,9 +110,7 @@ fn main() {
 
     #[cfg(any(target_os = "macos", target_os = "linux"))]
     let dev_stage_cleanup = dev_stage_cleanup_root();
-    let result = keld_core::app_session::ValidatedBootSelection::from_current_exe_unprivileged()
-        .map_err(keld_core::app_session::HostRunFailure::from)
-        .and_then(run_guarded_selected);
+    let result = run_validated_no_flag();
     #[cfg(any(target_os = "macos", target_os = "linux"))]
     let retains_main_custody = result
         .as_ref()
@@ -175,6 +141,33 @@ fn main() {
         // This existing fatal exit is failure, never a physical-drain receipt.
         process::exit(1);
     }
+}
+
+fn run_validated_no_flag() -> Result<(), keld_core::app_session::HostRunFailure> {
+    let boot = keld_core::app_session::ValidatedBootSelection::from_current_exe_unprivileged()
+        .map_err(keld_core::app_session::HostRunFailure::from)?;
+    #[cfg(target_os = "macos")]
+    {
+        keld_core::app_session::run_guarded(boot, pre_init_terminal)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        keld_core::app_session::run_guarded(boot)
+    }
+}
+
+/// A stalled native Init cannot be unwound: its blocked main stack retains
+/// AppKit/presentation/profile custody and the live dev stage through exit.
+#[cfg(target_os = "macos")]
+fn pre_init_terminal(error: &keld_core::app_session::HostAppError) -> ! {
+    let mut stderr = std::io::stderr().lock();
+    #[cfg(all(feature = "profile-test-hooks", debug_assertions))]
+    if env::var_os("KELD_T1B_STALL_BEFORE_INIT").is_some() {
+        let _ = writeln!(stderr, "KELD_T1B_TERMINAL_ENTERED");
+    }
+    let _ = writeln!(stderr, "{error}");
+    let _ = stderr.flush();
+    process::exit(1)
 }
 
 #[cfg(windows)]
@@ -411,14 +404,24 @@ fn run_supervised_guardian(args: &[String]) -> Result<(), String> {
         },
         std::io::stdout(),
     );
-    let cleanup = cleanup_root.and_then(|cleanup_root| match fs::remove_dir_all(&cleanup_root) {
-        Ok(()) => Ok(()),
-        Err(source) if source.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(source) => Err(format!(
-            "KELD-CORE-037: dev-stage cleanup failed for `{}` — {source}. Remove that owner-private nonce directory before relaunching.",
-            cleanup_root.display()
-        )),
-    });
+    // Schema-two facade startup can exit directly from the coordinator while
+    // AppKit is still blocked before Init. Its parent Host alone can prove
+    // native release and delete the stage on ordinary return. This flag is
+    // overwritten by that Host on the authenticated Guardian spawn.
+    let cleanup = if env::var_os("KELD_HOST_OWNS_FACADE_STAGE_CLEANUP")
+        == Some(std::ffi::OsString::from("1"))
+    {
+        cleanup_root.map(|_| ())
+    } else {
+        cleanup_root.and_then(|cleanup_root| match fs::remove_dir_all(&cleanup_root) {
+            Ok(()) => Ok(()),
+            Err(source) if source.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(source) => Err(format!(
+                "KELD-CORE-037: dev-stage cleanup failed for `{}` — {source}. Remove that owner-private nonce directory before relaunching.",
+                cleanup_root.display()
+            )),
+        })
+    };
     let report = report.map_err(|error| {
         format!(
             "KELD-CORE-037: supervised Bun guardian failed — {error}. Fix the Bun app failure and relaunch the no-flag host."

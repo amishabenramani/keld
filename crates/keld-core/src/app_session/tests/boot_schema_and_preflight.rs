@@ -441,7 +441,8 @@ fn guarded_preflight_preserves_read_error_before_resources() {
         .expect("write-only retained handle");
     let before = startup_resource_snapshot();
 
-    let error = run_guarded(selection).expect_err("read failure must fail preflight");
+    let error = run_guarded(selection, |_| -> ! { unreachable!() })
+        .expect_err("read failure must fail preflight");
     assert_eq!(error.code(), "KELD-GUARD004");
     assert_eq!(error.resources, before, "preflight advanced app resources");
     let message = error.to_string();

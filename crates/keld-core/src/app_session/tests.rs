@@ -54,6 +54,63 @@ fn facade_and_renderer_ready_milestones_cannot_cross_or_repeat() {
     }
 }
 
+#[cfg(target_os = "macos")]
+#[test]
+fn facade_init_deadline_arms_only_on_loop_entry_and_ends_at_first_init() {
+    use super::{AppReadyTrigger, initial_milestone_poll};
+    use std::sync::OnceLock;
+
+    let entered = OnceLock::new();
+    assert!(
+        entered.get().is_none(),
+        "engine install has no active Init deadline"
+    );
+    let now = Instant::now();
+    entered
+        .set(now + keld_wv::INITIAL_MILESTONE_DEADLINE)
+        .expect("first native loop entry");
+    let deadline = *entered.get().expect("deadline armed once");
+    assert!(deadline > now);
+    assert_eq!(
+        initial_milestone_poll(None, now),
+        super::APP_LINK_READER_POLL
+    );
+    assert_eq!(
+        initial_milestone_poll(
+            Some(deadline),
+            deadline
+                .checked_sub(Duration::from_millis(20))
+                .expect("valid before deadline"),
+        ),
+        Duration::from_millis(20)
+    );
+    assert_eq!(
+        initial_milestone_poll(Some(deadline), deadline),
+        Duration::ZERO
+    );
+    assert_eq!(
+        initial_milestone_poll(Some(deadline), deadline + Duration::from_secs(1)),
+        Duration::ZERO
+    );
+    let mut signaled = false;
+    super::accept_boot_ready_trigger(
+        AppReadyTrigger::HostInitialized,
+        AppReadyTrigger::HostInitialized,
+        &mut signaled,
+    )
+    .expect("first Init is accepted");
+    assert!(signaled, "post-Init sessions disarm the milestone bound");
+    assert_eq!(
+        initial_milestone_poll(None, deadline + Duration::from_secs(30)),
+        super::APP_LINK_READER_POLL,
+        "a healthy Init must disarm the deadline even when still windowless"
+    );
+    assert!(
+        now + keld_wv::INITIAL_MILESTONE_DEADLINE >= deadline,
+        "a healthy windowless session must not time out after Init"
+    );
+}
+
 #[cfg(any(target_os = "linux", windows))]
 use super::{
     DirectSessionNext, FsDispatchSession, FsInFlight, HandoverClock, HandoverWait,
