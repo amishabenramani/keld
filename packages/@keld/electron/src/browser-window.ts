@@ -5,6 +5,7 @@
  */
 import { EventEmitter } from "node:events";
 import {
+  app as hostApp,
   getWindowSnapshot,
   getWindowSnapshots,
   invokeWindow,
@@ -129,17 +130,27 @@ export class BrowserWindow extends EventEmitter {
   // path. Reading a private ref from caller options would let a Proxy forge
   // the otherwise secret Symbol and bypass the Host Create contract.
   static #replaying: WindowRef | undefined;
+  // Dispatch-order barrier only: Host/mirror still own pending-close state.
+  // A recovered Created(pending_close) must emit 'close' before any later
+  // window fact, even when public Ready and application listeners are deferred.
+  static readonly #heldReplayCloses = new Map<
+    number,
+    { readonly ref: WindowRef; readonly closeSeq: bigint }
+  >();
   readonly id!: number;
   readonly #ref!: WindowRef;
   readonly #contents = new BrowserWindowWebContents();
   #destroyed = false;
   #insideClosed = false;
+  readonly #recovered!: boolean;
+  #lastCloseSeq: bigint | undefined;
 
   constructor(options: BrowserWindowOptions = {}) {
     super();
     // Replay windows are materialized from trusted WindowSource records, not
     // from another Create request or a locally invented window identity.
     const replayed = BrowserWindow.#replaying;
+    let adopted = false;
     let ref: WindowRef;
     if (replayed !== undefined) {
       ref = replayed;
@@ -158,6 +169,7 @@ export class BrowserWindow extends EventEmitter {
         );
       }
       ref = response.window;
+      adopted = response.variant === "Adopted";
       const previous = windows.get(ref.id);
       if (
         response.variant === "Adopted" &&
@@ -176,8 +188,18 @@ export class BrowserWindow extends EventEmitter {
     }
     if (windows.has(ref.id))
       throw diagnostic("Host reused an active window id unexpectedly");
-    this.id = ref.id;
-    this.#ref = ref;
+    // TypeScript readonly is compile-time only. A writable public id can
+    // redirect Map cleanup to a different Host window (including its listeners).
+    Object.defineProperty(this, "id", {
+      value: ref.id,
+      enumerable: true,
+      writable: false,
+      configurable: false,
+    });
+    this.#ref = Object.freeze({ id: ref.id, incarnation: ref.incarnation });
+    // An Adopted host window also predates this JS facade, even if application
+    // code never called getAllWindows() to materialize its replay wrapper.
+    this.#recovered = replayed !== undefined || adopted;
     windows.set(ref.id, this);
     if (replayed === undefined) {
       ignoredOptionDiagnostics(options);
@@ -312,7 +334,8 @@ export class BrowserWindow extends EventEmitter {
   #closed(fromDestroy: boolean): void {
     if (this.#destroyed) return;
     this.#destroyed = true;
-    windows.delete(this.id);
+    // The private Host pair, never a user-visible property, owns cleanup.
+    if (windows.get(this.#ref.id) === this) windows.delete(this.#ref.id);
     if (!fromDestroy) this.#contents.dispose();
     this.#insideClosed = true;
     try {
@@ -328,8 +351,12 @@ export class BrowserWindow extends EventEmitter {
   }
 
   #nativeClose(close_seq: bigint): void {
-    if (this.#destroyed) return;
-    let prevented = false;
+    if (this.#destroyed || this.#lastCloseSeq === close_seq) return;
+    this.#lastCloseSeq = close_seq;
+    // A recovered wrapper may be materialized by a native fact before app code
+    // has acquired it or registered its unsaved-document listener. Veto rather
+    // than allowing an invisible/default close through that recovery interval.
+    let prevented = this.#recovered && this.listenerCount("close") === 0;
     const event = {
       get defaultPrevented(): boolean {
         return prevented;
@@ -355,8 +382,108 @@ export class BrowserWindow extends EventEmitter {
     });
   }
 
+  /** Host facts are applied before this method; never mint a local identity. */
+  static #dispatchNativeClose(ref: WindowRef, close_seq: bigint): void {
+    let confirmed;
+    try {
+      confirmed = getWindowSnapshot(ref);
+    } catch (error) {
+      // The role/link has ended, so a late scheduled delivery has no legal
+      // successor owner and must never send an Allow on its dead generation.
+      console.error(
+        "KELD close verdict abandoned after Host mirror failure:",
+        error,
+      );
+      return;
+    }
+    if (
+      !confirmed ||
+      confirmed.host_destroyed ||
+      confirmed.pending_close !== close_seq
+    ) {
+      return;
+    }
+    const previous = windows.get(ref.id);
+    // A different incarnation is an ownership mismatch, not permission to
+    // replace the caller's JS listeners with a new, unrelated wrapper.
+    if (previous && previous.#ref.incarnation !== ref.incarnation) return;
+    const window = previous ?? BrowserWindow.#fromReplay(ref);
+    window.#nativeClose(close_seq);
+  }
+
+  static #flushHeldReplayClose(ref: WindowRef): void {
+    if (!hostApp.isReady()) return;
+    const held = BrowserWindow.#heldReplayCloses.get(ref.id);
+    if (!held || held.ref.incarnation !== ref.incarnation) return;
+    BrowserWindow.#heldReplayCloses.delete(ref.id);
+    BrowserWindow.#dispatchNativeClose(held.ref, held.closeSeq);
+  }
+
+  /** Replay can arrive before public Ready; give the successor its Ready turn. */
+  static #receiveNativeClose(
+    ref: WindowRef,
+    close_seq: bigint,
+    fromReplay: boolean,
+  ): void {
+    if (fromReplay) {
+      BrowserWindow.#heldReplayCloses.set(ref.id, {
+        ref: { id: ref.id, incarnation: ref.incarnation },
+        closeSeq: close_seq,
+      });
+    }
+    if (!fromReplay && hostApp.isReady()) {
+      BrowserWindow.#flushHeldReplayClose(ref);
+      BrowserWindow.#dispatchNativeClose(ref, close_seq);
+      return;
+    }
+    void hostApp.whenReady().then(
+      () => {
+        // Ready continuations can attach a close/veto listener to the adopted
+        // window before the gap's held close is delivered. A later native fact
+        // flushes it synchronously first, preserving the Host's fact order.
+        setImmediate(() => {
+          try {
+            if (fromReplay) BrowserWindow.#flushHeldReplayClose(ref);
+            else {
+              BrowserWindow.#flushHeldReplayClose(ref);
+              BrowserWindow.#dispatchNativeClose(ref, close_seq);
+            }
+          } catch (error) {
+            // Expected shutdowns are handled by #dispatchNativeClose; do not
+            // let an independent late callback crash the event loop.
+            console.error("KELD deferred native close dispatch failed:", error);
+          }
+        });
+      },
+      (error: unknown) => {
+        // A dead link ends the Host's generation, so no stale Allow is sent.
+        if (fromReplay) BrowserWindow.#heldReplayCloses.delete(ref.id);
+        console.error(
+          "KELD recovery close lost its Host Ready barrier:",
+          error,
+        );
+      },
+    );
+  }
+
   static {
     onWindowFactApplied((fact: WindowEvent) => {
+      if (fact.variant === "Created" && fact.pending_close !== null) {
+        BrowserWindow.#receiveNativeClose(
+          fact.window,
+          fact.pending_close,
+          true,
+        );
+        return;
+      }
+      // An already-applied Bounds/Focus/FullScreen/Destroyed fact may dispatch
+      // before the deferred Ready continuation for an earlier replay Created.
+      // Emit that replay close first, never reverse the host's causal order.
+      BrowserWindow.#flushHeldReplayClose(fact.window);
+      if (fact.variant === "CloseRequested") {
+        BrowserWindow.#receiveNativeClose(fact.window, fact.close_seq, false);
+        return;
+      }
       const window = windows.get(fact.window.id);
       if (!window || window.#ref.incarnation !== fact.window.incarnation)
         return;
@@ -366,9 +493,6 @@ export class BrowserWindow extends EventEmitter {
           break;
         case "Maximized":
           window.emit(fact.maximized ? "maximize" : "unmaximize");
-          break;
-        case "CloseRequested":
-          window.#nativeClose(fact.close_seq);
           break;
         case "Destroyed":
           window.#closed(false);

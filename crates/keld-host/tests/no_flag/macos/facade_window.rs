@@ -10,7 +10,7 @@ use crate::support::process::{await_process_gone, process_group};
 use crate::support::product::ProductFixture;
 use std::fs;
 use std::io::{BufReader, Write as _};
-use std::os::unix::net::UnixListener;
+use std::os::unix::net::{UnixListener, UnixStream};
 use std::os::unix::process::CommandExt as _;
 use std::path::Path;
 use std::process::{Command, Stdio};
@@ -179,6 +179,24 @@ for await (const command of lines) {
       variant: "CloseReply", window: ref, close_seq: 1n, verdict: "Allow",
     });
     report(`VETO_VERIFIED ${stale.variant} ${win.isDestroyed()} ${closeCount} ${closedCount}`);
+  } else if (command === "ID_TAMPER") {
+    // Independent shipping-Host negative: a second live BrowserWindow must
+    // never be able to delete the first window's registered close listeners.
+    const attacker = new BrowserWindow({ width: 320, height: 240 });
+    const before = BrowserWindow.getAllWindows();
+    if (before.length !== 2 || before[0] !== win || before[1] !== attacker) {
+      throw new Error("two-window mutation fixture was not physically created");
+    }
+    if (Reflect.set(attacker, "id", win.id) ||
+        Reflect.get(attacker, "id") === win.id) {
+      throw new Error("caller changed a Host-owned BrowserWindow id");
+    }
+    attacker.destroy();
+    if (BrowserWindow.getAllWindows().length !== 1 ||
+        BrowserWindow.getAllWindows()[0] !== win || win.isDestroyed()) {
+      throw new Error("attacker Destroy evicted the surviving window registry entry");
+    }
+    report(`ID_TAMPER_SAFE ${win.id} ${closeCount}`);
   } else if (command === "ALLOW") {
     win.off("close", veto);
     win.close();
@@ -245,21 +263,25 @@ fn visible_app_windows(pid: u32) -> Vec<serde_json::Value> {
         .collect()
 }
 
-fn await_visible_native_close(pid: u32) {
+fn await_visible_native_census(pid: u32, expected: &[serde_json::Value]) {
     let deadline = Instant::now() + EVENT_DEADLINE;
     loop {
-        let remaining = visible_app_windows(pid);
-        if remaining.is_empty() {
+        let observed = visible_app_windows(pid);
+        if observed == expected {
             return;
         }
         assert!(
             Instant::now() < deadline,
-            "native window still visible after Host Destroyed: {remaining:?}"
+            "native compositor did not reach the expected window census: expected={expected:?}, actual={observed:?}"
         );
         // Observe real CoreGraphics state, not a timer that guesses when
         // AppKit has removed the published window from the compositor.
         std::thread::yield_now();
     }
+}
+
+fn await_visible_native_close(pid: u32) {
+    await_visible_native_census(pid, &[]);
 }
 
 fn stage(fixture: &ProductFixture) -> keld_cli::boot::DevBootStage {
@@ -331,6 +353,41 @@ fn stage_electron(fixture: &ProductFixture) -> keld_cli::boot::DevBootStage {
         .expect("compile actual Electron window stage")
 }
 
+/** Separate acceptance atom: Host-minted follow-up window and Destroy tombstones. */
+fn assert_followup_create_destroy(
+    reader: &mut BufReader<UnixStream>,
+    writer: &mut UnixStream,
+    host_pid: u32,
+) {
+    writer
+        .write_all(b"SECOND\n")
+        .expect("create second host window");
+    assert_eq!(
+        read_control_line(reader),
+        "SECOND 3 320x240",
+        "the destroyed attacker consumes ID 2; Host IDs must never be recycled"
+    );
+    assert_eq!(
+        visible_app_windows(host_pid).len(),
+        1,
+        "second native window absent"
+    );
+    writer
+        .write_all(b"DESTROY\n")
+        .expect("synchronous native Destroy");
+    assert_eq!(
+        read_control_line(reader),
+        "DESTROY 0 1 refused",
+        "Destroy must skip close and synchronously emit closed after native release"
+    );
+    assert_eq!(
+        read_control_line(reader),
+        "CONTENTS_DESTROYED 1 true",
+        "webContents tombstone belongs after Destroy returns"
+    );
+    await_visible_native_close(host_pid);
+}
+
 #[test]
 fn public_electron_browser_window_uses_native_host_and_vetoes_unsaved_close() {
     let fixture = ProductFixture::new("facade-electron-window");
@@ -392,35 +449,22 @@ fn public_electron_browser_window_uses_native_host_and_vetoes_unsaved_close() {
         initial,
         "veto must retain the same native window"
     );
+    writer
+        .write_all(b"ID_TAMPER\n")
+        .expect("attempt cross-window ownership mutation");
+    assert_eq!(
+        read_control_line(&mut reader),
+        "ID_TAMPER_SAFE 1 1",
+        "one destroyed window must never evict the surviving window's close listener"
+    );
+    await_visible_native_census(host_pid, &initial);
 
     writer
         .write_all(b"ALLOW\n")
         .expect("accept next close attempt");
     assert_eq!(read_control_line(&mut reader), "CLOSED 1");
     await_visible_native_close(host_pid);
-    writer
-        .write_all(b"SECOND\n")
-        .expect("create second host window");
-    assert_eq!(read_control_line(&mut reader), "SECOND 2 320x240");
-    assert_eq!(
-        visible_app_windows(host_pid).len(),
-        1,
-        "second native window absent"
-    );
-    writer
-        .write_all(b"DESTROY\n")
-        .expect("synchronous native Destroy");
-    assert_eq!(
-        read_control_line(&mut reader),
-        "DESTROY 0 1 refused",
-        "Destroy must skip close and synchronously emit closed after native release"
-    );
-    assert_eq!(
-        read_control_line(&mut reader),
-        "CONTENTS_DESTROYED 1 true",
-        "webContents tombstone belongs after Destroy returns"
-    );
-    await_visible_native_close(host_pid);
+    assert_followup_create_destroy(&mut reader, &mut writer, host_pid);
     writer.write_all(b"QUIT\n").expect("authenticated Quit");
     assert_eq!(read_control_line(&mut reader), "QUIT_REPLY");
     drop(writer);
