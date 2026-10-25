@@ -11,6 +11,8 @@
 //! back with bounded positioned reads (KEL-19 container spec §4).
 //! This library API does not create installers, sign releases, or activate updates.
 
+#![forbid(unsafe_code)]
+
 use std::fmt;
 use std::io::{self, Read, Write};
 
