@@ -426,11 +426,19 @@ impl WkWebViewEngine {
             if ready_trigger == AppReadyTrigger::HostInitialized
                 && !terminal_requested
                 && first_host_init_turn(&event, &mut host_init_emitted)
-                && events.send(AppWindowEvent::HostInitialized).is_err()
             {
-                fatal_in_loop.store(true, Ordering::Release);
-                terminal_requested = true;
-                destroy_renderer_bridges(&mut renderer_bridges);
+                // Capture on the native UI owner before enqueueing: the Core
+                // receiver may be descheduled past the absolute first-Init
+                // deadline even when this genuine event happened on time.
+                let observed_at = Instant::now();
+                if events
+                    .send(AppWindowEvent::HostInitialized { observed_at })
+                    .is_err()
+                {
+                    fatal_in_loop.store(true, Ordering::Release);
+                    terminal_requested = true;
+                    destroy_renderer_bridges(&mut renderer_bridges);
+                }
             }
             let terminal = is_terminal_app_event(&event) || terminal_requested;
             let live_navigation = views.iter().any(|(id, view)| {

@@ -26,6 +26,8 @@
 
 use crate::WebviewId;
 use crate::error::WvError;
+#[cfg(target_os = "macos")]
+use std::time::Instant;
 
 /// Logical (DPI-independent) size in points.
 ///
@@ -142,9 +144,13 @@ pub enum AppWindowEvent {
     /// Initial renderer navigation completed on the live backend.
     NavigationReady,
     /// The macOS application loop delivered its actual first Init turn.
-    /// This is not inferred from the first callback, HELLO, or navigation.
+    /// The timestamp is sampled on the UI thread, not by the possibly delayed
+    /// coordinator. It is not inferred from HELLO, navigation or a queued reply.
     #[cfg(target_os = "macos")]
-    HostInitialized,
+    HostInitialized {
+        /// Monotonic observation time of the real first `AppKit` Init turn.
+        observed_at: Instant,
+    },
     /// The primary-window count transitioned from one to zero.
     LastWindowClosed,
     /// The native build completed; this snapshot is read from the built window.

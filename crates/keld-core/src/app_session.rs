@@ -4542,6 +4542,53 @@ fn initial_milestone_poll(until: Option<Instant>, now: Instant) -> Duration {
     })
 }
 
+/// The absolute first-Init deadline applies to successful queued receives as
+/// well as an empty queue. A genuine on-time UI first turn keeps its native
+/// timestamp even when this worker is descheduled before observing the event.
+#[cfg(target_os = "macos")]
+#[derive(Debug, PartialEq, Eq)]
+enum InitialMilestoneReceive {
+    Event(AppWindowEvent),
+    Again,
+    Expired,
+    Disconnected,
+}
+
+#[cfg(target_os = "macos")]
+fn receive_initial_milestone(
+    events: &Receiver<AppWindowEvent>,
+    watch: Option<&OnceLock<Instant>>,
+) -> InitialMilestoneReceive {
+    let before_receive = watch.and_then(|clock| clock.get().copied());
+    let poll = initial_milestone_poll(before_receive, Instant::now());
+    let received = events.recv_timeout(poll);
+    // The coordinator can begin waiting before the UI thread arms its first
+    // loop-entry deadline. Re-read after receipt; real Init is sent only after
+    // the native producer has armed this same OnceLock.
+    let deadline = watch.and_then(|clock| clock.get().copied());
+    match received {
+        Ok(AppWindowEvent::HostInitialized { observed_at })
+            if watch.is_some() && deadline.is_none_or(|at| observed_at >= at) =>
+        {
+            InitialMilestoneReceive::Expired
+        }
+        Ok(event)
+            if deadline.is_some_and(|at| {
+                !matches!(event, AppWindowEvent::HostInitialized { .. }) && Instant::now() >= at
+            }) =>
+        {
+            // A busy queue of non-Init events must not starve the watchdog.
+            InitialMilestoneReceive::Expired
+        }
+        Ok(event) => InitialMilestoneReceive::Event(event),
+        Err(mpsc::RecvTimeoutError::Timeout) if deadline.is_some_and(|at| Instant::now() >= at) => {
+            InitialMilestoneReceive::Expired
+        }
+        Err(mpsc::RecvTimeoutError::Timeout) => InitialMilestoneReceive::Again,
+        Err(mpsc::RecvTimeoutError::Disconnected) => InitialMilestoneReceive::Disconnected,
+    }
+}
+
 #[cfg(any(target_os = "macos", target_os = "linux", windows))]
 fn coordinate_window_events(
     events: &Receiver<AppWindowEvent>,
@@ -4580,7 +4627,7 @@ fn coordinate_window_events(
                 }
             }
             #[cfg(target_os = "macos")]
-            AppWindowEvent::HostInitialized => signal_once(AppReadyTrigger::HostInitialized),
+            AppWindowEvent::HostInitialized { .. } => signal_once(AppReadyTrigger::HostInitialized),
             AppWindowEvent::LastWindowClosed if router.windows.is_none() => {
                 router.signal_last_window_closed().map(drop)
             }
@@ -4601,31 +4648,31 @@ fn coordinate_window_events(
             break;
         }
         let until_init = init_watch
-            .filter(|_| ready_trigger == AppReadyTrigger::HostInitialized && !init_seen.get())
-            .and_then(|(deadline, terminal)| deadline.get().copied().map(|at| (at, terminal)));
-        let poll = initial_milestone_poll(until_init.map(|(deadline, _)| deadline), Instant::now());
-        let event = match events.recv_timeout(poll) {
-            Ok(event) => {
+            .filter(|_| ready_trigger == AppReadyTrigger::HostInitialized && !init_seen.get());
+        let event = match receive_initial_milestone(events, until_init.map(|(clock, _)| clock)) {
+            InitialMilestoneReceive::Event(event) => {
                 if router.shutdown.reader_stop.load(Ordering::Acquire) && router.windows.is_none() {
                     break;
                 }
                 event
             }
-            Err(mpsc::RecvTimeoutError::Timeout) => {
-                if let Some((deadline, terminal)) = until_init
-                    && Instant::now() >= deadline
-                {
+            InitialMilestoneReceive::Expired => {
+                if let Some((_, terminal)) = until_init {
                     terminate_stalled_init(router, terminal);
                 }
-                continue;
+                return Err(app_detail(
+                    "initial UI milestone",
+                    "expired first-Init observation without an armed deadline",
+                ));
             }
-            Err(mpsc::RecvTimeoutError::Disconnected) if until_init.is_some() => {
+            InitialMilestoneReceive::Again => continue,
+            InitialMilestoneReceive::Disconnected if until_init.is_some() => {
                 return Err(app_detail(
                     "initial UI milestone",
                     "window-module event source ended before the first Init turn",
                 ));
             }
-            Err(mpsc::RecvTimeoutError::Disconnected) => break,
+            InitialMilestoneReceive::Disconnected => break,
         };
         process_event(event)?;
     }

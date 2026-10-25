@@ -111,6 +111,116 @@ fn facade_init_deadline_arms_only_on_loop_entry_and_ends_at_first_init() {
     );
 }
 
+#[cfg(target_os = "macos")]
+#[test]
+fn queued_late_first_init_cannot_bypass_absolute_deadline() {
+    use super::{AppWindowEvent, InitialMilestoneReceive, receive_initial_milestone};
+    use std::sync::OnceLock;
+
+    // No sleeps or scheduler assumptions: even a queued event wins a zero
+    // timeout, so the receiver must decide using the genuine native timestamp.
+    let deadline = Instant::now()
+        .checked_sub(Duration::from_secs(1))
+        .expect("monotonic clock supports one-second predecessor");
+    let clock = OnceLock::new();
+    clock.set(deadline).expect("arm first-Init absolute bound");
+    let (send, events) = mpsc::channel();
+    send.send(AppWindowEvent::HostInitialized {
+        observed_at: deadline + Duration::from_millis(1),
+    })
+    .expect("queue one late UI first turn");
+    assert_eq!(
+        receive_initial_milestone(&events, Some(&clock)),
+        InitialMilestoneReceive::Expired,
+        "queued late Init must not publish Ready or disarm the terminal"
+    );
+    assert_eq!(
+        receive_initial_milestone(&events, Some(&clock)),
+        InitialMilestoneReceive::Expired,
+        "a non-terminal successful receive must not consume an invalid Init"
+    );
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn on_time_native_first_init_survives_delayed_coordinator_and_disarms_deadline() {
+    use super::{AppWindowEvent, InitialMilestoneReceive, receive_initial_milestone};
+    use std::sync::OnceLock;
+
+    let deadline = Instant::now()
+        .checked_sub(Duration::from_secs(1))
+        .expect("monotonic clock supports one-second predecessor");
+    let clock = OnceLock::new();
+    clock.set(deadline).expect("arm first-Init absolute bound");
+    let on_time = deadline
+        .checked_sub(Duration::from_millis(1))
+        .expect("monotonic clock supports preceding native event");
+    let first = AppWindowEvent::HostInitialized {
+        observed_at: on_time,
+    };
+    let (send, events) = mpsc::channel();
+    send.send(first).expect("queue genuine timely UI event");
+    assert_eq!(
+        receive_initial_milestone(&events, Some(&clock)),
+        InitialMilestoneReceive::Event(first),
+        "coordinator descheduling must not transform timely native Init into timeout"
+    );
+    send.send(AppWindowEvent::LastWindowClosed)
+        .expect("healthy windowless session may continue");
+    assert_eq!(
+        receive_initial_milestone(&events, None),
+        InitialMilestoneReceive::Event(AppWindowEvent::LastWindowClosed),
+        "once Init is accepted the expired clock is no longer armed"
+    );
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn busy_non_init_queue_and_empty_deadline_both_expire_without_ready() {
+    use super::{AppWindowEvent, InitialMilestoneReceive, receive_initial_milestone};
+    use std::sync::OnceLock;
+
+    let deadline = Instant::now()
+        .checked_sub(Duration::from_secs(1))
+        .expect("monotonic clock supports one-second predecessor");
+    let clock = OnceLock::new();
+    clock.set(deadline).expect("arm first-Init absolute bound");
+    let (send, events) = mpsc::channel();
+    send.send(AppWindowEvent::LastWindowClosed)
+        .expect("queue non-Init event after absolute expiry");
+    assert_eq!(
+        receive_initial_milestone(&events, Some(&clock)),
+        InitialMilestoneReceive::Expired,
+        "busy queue cannot perpetually avoid a timeout"
+    );
+    assert_eq!(
+        receive_initial_milestone(&events, Some(&clock)),
+        InitialMilestoneReceive::Expired,
+        "empty deadline expiry still takes bounded terminal path"
+    );
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn unarmed_first_init_timestamp_cannot_mint_ready() {
+    use super::{AppWindowEvent, InitialMilestoneReceive, receive_initial_milestone};
+    use std::sync::OnceLock;
+
+    // The native producer must arm the shared loop-entry clock before sending
+    // a genuine first Init. An unarmed / untrusted milestone cannot be accepted.
+    let clock = OnceLock::new();
+    let (send, events) = mpsc::channel();
+    send.send(AppWindowEvent::HostInitialized {
+        observed_at: Instant::now(),
+    })
+    .expect("queue a milestone with no loop-entry clock");
+    assert_eq!(
+        receive_initial_milestone(&events, Some(&clock)),
+        InitialMilestoneReceive::Expired,
+        "unarmed native clock must not authorize Ready"
+    );
+}
+
 #[cfg(any(target_os = "linux", windows))]
 use super::{
     DirectSessionNext, FsDispatchSession, FsInFlight, HandoverClock, HandoverWait,

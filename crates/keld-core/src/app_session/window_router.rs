@@ -822,7 +822,7 @@ impl PrimaryRouterHandle {
                 ));
             }
             #[cfg(target_os = "macos")]
-            AppWindowEvent::HostInitialized => {
+            AppWindowEvent::HostInitialized { .. } => {
                 return Err(app_detail(
                     "window native event",
                     "the first host Init milestone belongs only to the lifecycle coordinator",
