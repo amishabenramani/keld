@@ -68,6 +68,10 @@ function becomeReady(): void {
 // The mock is only the host transport; WindowSource's wire decode, apply and
 // dispatch remain real. The subprocess prevents mocks leaking into other tests.
 mock.module("../../api/src/app.ts", () => ({
+  // This role controls Host window facts, not lifecycle LastWindowClosed.
+  // Native E1 `closed -> all-closed -> Destroy return` is tested separately
+  // through the real shipping macOS Host and actual lifecycle applier.
+  flushAppliedLastWindowClosedAfterDestroy: () => {},
   app: { whenReady: () => readyPromise, isReady: () => ready },
   getWindowSnapshot: (window: WindowRef) =>
     ready ? source.get(window) : undefined,
@@ -646,7 +650,11 @@ if (mode === "late-import-replay") {
   assert.equal(creationEvents[1]?.value, previous);
   adoptNext = ref;
   assert.equal(new BrowserWindow(), previous);
-  assert.equal(creationEvents.length, 2, "creation is published once per wrapper");
+  assert.equal(
+    creationEvents.length,
+    2,
+    "creation is published once per wrapper",
+  );
   const fresh = new BrowserWindow();
   assert.notEqual(fresh, previous);
   assert.equal(creationEvents.length, 4, "new windows still publish creation");

@@ -6,6 +6,7 @@
 import { EventEmitter } from "node:events";
 import {
   app as hostApp,
+  flushAppliedLastWindowClosedAfterDestroy,
   getDispatchedPendingWindowCloses,
   getWindowSnapshot,
   getWindowSnapshots,
@@ -138,7 +139,6 @@ function ignoredOptionDiagnostics(options: BrowserWindowOptions): void {
 const hostContentsRelease = new WeakMap<BrowserWindowWebContents, () => void>();
 
 class BrowserWindowWebContents extends EventEmitter {
-  #creationPublished = false;
   #destroyed = false;
 
   constructor() {
@@ -203,6 +203,9 @@ export class BrowserWindow extends EventEmitter {
   #insideClosed = false;
   readonly #recovered!: boolean;
   #lastCloseSeq: bigint | undefined;
+  // Creation notifications belong to the Host-owned BrowserWindow wrapper,
+  // not its WebContents. Mark before invoking reentrant application callbacks.
+  #creationPublished = false;
   // Delta-only bookkeeping; public getters and CALLs use the Host mirror.
   #lastDispatchedBounds!: Readonly<Rect>;
 
@@ -469,6 +472,10 @@ export class BrowserWindow extends EventEmitter {
       );
     }
     this.#closed(true);
+    // One already-applied Host lifecycle milestone, after `closed` and before
+    // the synchronous Electron destroy() returns (GH531 E1). The later ring
+    // dispatch suppresses this exact consumed record without fabricating one.
+    flushAppliedLastWindowClosedAfterDestroy();
   }
 
   #closed(fromDestroy: boolean): void {

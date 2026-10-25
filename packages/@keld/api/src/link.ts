@@ -118,6 +118,10 @@ export class LifecycleLink {
   /** The error that ended the link without a local close: later quits rethrow it. */
   #dead: KeldCallError | undefined;
   #quitPromise: Promise<void> | undefined;
+  /** Authenticated lifecycle apply/dispatch ordinals across a parked CALL. */
+  #appliedLastWindowClosed = 0;
+  #dispatchedLastWindowClosed = 0;
+  #consumedLastWindowClosed = 0;
 
   private constructor(link: WorkerLink, windowSource?: WindowSource) {
     this.#link = link;
@@ -127,6 +131,26 @@ export class LifecycleLink {
   /** Only a completed, accepted replay makes the native window mirror observable. */
   get windowSource(): WindowSource | undefined {
     return this.#windowSource;
+  }
+
+  /**
+   * Consume one Host-applied LastWindowClosed after synchronous `closed`.
+   * This method invokes no listeners and mints no lifecycle fact; it only
+   * claims an already applied authenticated record pending dispatch.
+   */
+  consumeAppliedLastWindowClosed(): boolean {
+    if (this.#closed) return false;
+    // One older milestone may already have reached onEvent while a newer
+    // milestone was pre-applied during the parked native Destroy CALL. Only
+    // claim the next *undispatched* ordinal; never publish that old event twice.
+    const next =
+      Math.max(
+        this.#dispatchedLastWindowClosed,
+        this.#consumedLastWindowClosed,
+      ) + 1;
+    if (next > this.#appliedLastWindowClosed) return false;
+    this.#consumedLastWindowClosed = next;
+    return true;
   }
 
   static async connect(
@@ -162,13 +186,25 @@ export class LifecycleLink {
     // A lifecycle EVENT this role cannot decode ends the link (a throwing
     // applier, §4.6) before any listener runs; the listener then dispatches it.
     workerLink.setStateApplier(LIFECYCLE_CHANNEL, (payload) => {
-      decodeEvent(payload);
+      if (decodeEvent(payload) === "last-window-closed") {
+        session.#appliedLastWindowClosed += 1;
+      }
     });
     workerLink.onEvent(LIFECYCLE_CHANNEL, (payload) => {
       if (decodeEvent(payload) === "ready") {
         rawReady = true;
         maybePublishReady();
-      } else handlers.onLastWindowClosed();
+      } else {
+        session.#dispatchedLastWindowClosed += 1;
+        // A parked synchronous Destroy may have delivered this exact applied
+        // record after `closed`. Suppress only its later duplicate callback.
+        if (
+          session.#dispatchedLastWindowClosed >
+          session.#consumedLastWindowClosed
+        ) {
+          handlers.onLastWindowClosed();
+        }
+      }
     });
     workerLink.setCallHandler(ECHO_CHANNEL, (payload) =>
       resolveEchoCall(ECHO_CHANNEL, payload, handlers.onApplicationCall),

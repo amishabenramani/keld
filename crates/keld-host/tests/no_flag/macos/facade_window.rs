@@ -253,6 +253,20 @@ for await (const command of lines) {
     report(`DESTROY ${closeOnDestroy} ${closedOnDestroy} ${readAfterDestroy}`);
     await Promise.resolve();
     report(`CONTENTS_DESTROYED ${contentsDestroyed} ${contents.isDestroyed()}`);
+  } else if (command === "DESTROY_ORDER") {
+    const order: string[] = [];
+    // The generic fixture's normal-close listener requires both tombstones
+    // inside closed. Explicit destroy() must leave webContents live until
+    // after return, so use its separate, actual Electron E1 oracle here.
+    win.removeAllListeners("closed");
+    win.on("closed", () => { order.push("closed"); });
+    app.on("window-all-closed", () => { order.push("all"); });
+    win.destroy();
+    order.push("destroy-return");
+    report(`DESTROY_ORDER ${order.join(",")}`);
+    await app.quit();
+    report("QUIT_REPLY");
+    break;
   } else if (command === "QUIT") {
     await app.quit();
     report("QUIT_REPLY");
@@ -277,8 +291,62 @@ for await (const command of lines) {
     throw new Error(`unknown public-window request ${command}`);
   }
 }
+
 control.end();
 "#;
+#[test]
+fn public_destroy_fulfills_closed_then_all_closed_before_sync_return() {
+    let fixture = ProductFixture::new("facade-destroy-order");
+    let staged = stage_electron(&fixture);
+    let listener_path = fixture.root.path().join("destroy-order.sock");
+    let listener = UnixListener::bind(&listener_path).expect("isolated control");
+    listener
+        .set_nonblocking(true)
+        .expect("bounded control accept");
+    let child = Command::new(staged.host())
+        .process_group(0)
+        .current_dir(staged.root())
+        .env("KELD_T1B_CONTROL", &listener_path)
+        .env("KELD_DEV_LEASE", "stdin-v1")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("launch production no-flag macOS Host");
+    let mut cleanup = ShippingLaunchCleanup::new(child);
+    let host = cleanup.cli.as_mut().expect("live Host");
+    let host_pid = host.id();
+    let _lease = host.stdin.take().expect("retain dev lease");
+    let control = accept_before(&listener, Instant::now() + EVENT_DEADLINE);
+    control
+        .set_read_timeout(Some(EVENT_DEADLINE))
+        .expect("bounded replies");
+    let mut reader = BufReader::new(control.try_clone().expect("reader clone"));
+    let mut writer = control;
+    let created = read_control_line(&mut reader);
+    let fields: Vec<_> = created.split_whitespace().collect();
+    assert_eq!(fields.first().copied(), Some("PUBLIC_CREATED"), "{created}");
+    let bun_pid = parse_pid(fields.get(1).copied(), &created);
+    cleanup.record_authenticated_groups(process_group(host_pid), process_group(bun_pid));
+    assert_eq!(visible_app_windows(host_pid).len(), 1);
+    writer
+        .write_all(b"DESTROY_ORDER\n")
+        .expect("atomic native Destroy");
+    assert_eq!(
+        read_control_line(&mut reader),
+        "DESTROY_ORDER closed,all,destroy-return"
+    );
+    assert_eq!(read_control_line(&mut reader), "QUIT_REPLY");
+    drop(reader);
+    drop(writer);
+    let output = wait_child_output(cleanup.release(), EVENT_DEADLINE);
+    assert!(
+        output.status.success(),
+        "destroy/last-window order failed: {output:?}"
+    );
+    await_visible_native_close(host_pid);
+    await_process_gone(bun_pid);
+}
 
 fn census(pid: u32) -> Vec<serde_json::Value> {
     let rows = native_window_rows(pid);

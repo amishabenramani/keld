@@ -38,7 +38,30 @@ assert.equal(
   0,
   "an app may not disable the boot-scoped Quit safety gate",
 );
+let allClosedEvents = 0;
+const onAllClosed = () => {
+  allClosedEvents += 1;
+};
+app.on("window-all-closed", onAllClosed);
+notifyLastWindow();
+assert.equal(
+  allClosedEvents,
+  0,
+  "the queued zero-window event must not escape to a user listener after a replacement was created",
+);
 live = false;
+notifyLastWindow();
+assert.equal(
+  allClosedEvents,
+  1,
+  "the actual last window still emits to an enrolled listener",
+);
+assert.equal(
+  quitCalls,
+  0,
+  "an enrolled window-all-closed listener may keep the app alive",
+);
+app.off("window-all-closed", onAllClosed);
 notifyLastWindow();
 await Promise.resolve();
 assert.equal(

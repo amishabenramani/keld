@@ -399,6 +399,10 @@ impl WkWebViewEngine {
         let mut closing = Vec::new();
         let mut main_owner_failure = None;
         let mut host_init_emitted = false;
+        #[cfg(all(feature = "profile-test-hooks", debug_assertions))]
+        let suppress_host_init = std::env::var_os("KELD_T1B_SUPPRESS_HOST_INIT").is_some();
+        #[cfg(not(all(feature = "profile-test-hooks", debug_assertions)))]
+        let suppress_host_init = false;
         let profile = &self.profile;
         let next_id = &mut self.next_id;
         let media_seed_allow = self.profile_test_media_seed_allow;
@@ -411,6 +415,7 @@ impl WkWebViewEngine {
             }
             if ready_trigger == AppReadyTrigger::HostInitialized
                 && !terminal_requested
+                && !suppress_host_init
                 && first_host_init_turn(&event, &mut host_init_emitted)
                 && events.send(AppWindowEvent::HostInitialized).is_err()
             {

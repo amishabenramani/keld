@@ -21,6 +21,38 @@ use std::path::Path;
 #[cfg(any(target_os = "macos", target_os = "linux", windows))]
 use std::path::PathBuf;
 use std::process;
+
+/// Shipping macOS owns the terminal process boundary. If the real first Tao
+/// Init never reaches the authenticated Host Ready coordinator, there is no
+/// safe library-level way to unwind a hung `AppKit` loop and drop its !Send
+/// native/verified-profile/stage owners. Exit *without unwinding* instead;
+/// the OS reaps the process tree through the existing Guardian liveness pipe.
+#[cfg(target_os = "macos")]
+fn missing_native_init_terminal() -> ! {
+    let mut stderr = io::stderr().lock();
+    let _ = writeln!(
+        stderr,
+        "KELD-CORE-044: the real native AppKit Init/Host Ready was not accepted before the 15-second startup deadline; refusing to release unproved main-thread custody"
+    );
+    let _ = stderr.flush();
+    process::exit(1);
+}
+
+/// Select the native binary's only bounded startup terminal on macOS. Linux
+/// preserves its current guardian/renderer contract with no new watchdog.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+fn run_guarded_selected(
+    boot: keld_core::app_session::ValidatedBootSelection,
+) -> Result<(), keld_core::app_session::HostRunFailure> {
+    #[cfg(target_os = "macos")]
+    {
+        keld_core::app_session::run_guarded_with_init_terminal(boot, missing_native_init_terminal)
+    }
+    #[cfg(target_os = "linux")]
+    {
+        keld_core::app_session::run_guarded(boot)
+    }
+}
 #[cfg(target_os = "macos")]
 use std::process::{Command, Stdio};
 
@@ -112,7 +144,7 @@ fn main() {
     let dev_stage_cleanup = dev_stage_cleanup_root();
     let result = keld_core::app_session::ValidatedBootSelection::from_current_exe_unprivileged()
         .map_err(keld_core::app_session::HostRunFailure::from)
-        .and_then(keld_core::app_session::run_guarded);
+        .and_then(run_guarded_selected);
     #[cfg(any(target_os = "macos", target_os = "linux"))]
     let retains_main_custody = result
         .as_ref()

@@ -79,6 +79,13 @@ use std::thread::{self, JoinHandle};
 #[cfg(any(target_os = "macos", target_os = "linux", windows))]
 use std::time::{Duration, Instant};
 
+/// Starts only after the authenticated Guardian, role and native `WebView`
+/// service exist, immediately before entering the macOS application run loop.
+/// Use the same conservative 15-second cold-start budget as initial renderer
+/// navigation, but require a *native* Host Init rather than a page load.
+#[cfg(target_os = "macos")]
+const NATIVE_FIRST_INIT_DEADLINE: Duration = Duration::from_secs(15);
+
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 use nix::fcntl::{FcntlArg, FdFlag, OFlag, fcntl};
 #[cfg(any(target_os = "macos", target_os = "linux"))]
@@ -1905,7 +1912,7 @@ pub fn run_unprivileged(boot: ValidatedBootSelection) -> Result<(), HostRunFailu
         // This explicit diagnostic/test path remains incapable of registering
         // a privileged channel. It never serves as recovery from run_guarded.
         drop((permissions_file, permissions_digest));
-        run_app(app, None)
+        run_app(app, None, None)
     }
     #[cfg(windows)]
     {
@@ -1940,6 +1947,33 @@ pub fn run_unprivileged(boot: ValidatedBootSelection) -> Result<(), HostRunFailu
 /// Returns [`HostRunFailure`] preserving a typed manifest preflight failure or any
 /// existing no-flag startup, session, window, guardian, Bun, or shutdown error.
 pub fn run_guarded(boot: ValidatedBootSelection) -> Result<(), HostRunFailure> {
+    run_guarded_inner(
+        boot,
+        #[cfg(target_os = "macos")]
+        None,
+    )
+}
+
+/// Only the shipping macOS binary may install a diverging watchdog terminal.
+/// It owns the process boundary if Tao never delivers the real first Init;
+/// the worker does not unwind/drop a borrowed !Send UI/profile/stage owner.
+///
+/// # Errors
+///
+/// Returns the same validated boot, Guardian, native profile or session
+/// failures as [`run_guarded`], retaining unproved main-thread custody.
+#[cfg(target_os = "macos")]
+pub fn run_guarded_with_init_terminal(
+    boot: ValidatedBootSelection,
+    on_missing_native_init: fn() -> !,
+) -> Result<(), HostRunFailure> {
+    run_guarded_inner(boot, Some(on_missing_native_init))
+}
+
+fn run_guarded_inner(
+    boot: ValidatedBootSelection,
+    #[cfg(target_os = "macos")] on_missing_native_init: Option<fn() -> !>,
+) -> Result<(), HostRunFailure> {
     #[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
     {
         drop(boot);
@@ -1980,7 +2014,7 @@ pub fn run_guarded(boot: ValidatedBootSelection) -> Result<(), HostRunFailure> {
         // The owner stays in this frame while run_app performs every startup,
         // event-loop, and ordered-cleanup step. run_app receives only a borrow,
         // so it cannot destroy the verified session policy early.
-        let mut result = run_app(app, Some(&guard_snapshot));
+        let mut result = run_app(app, Some(&guard_snapshot), on_missing_native_init);
         if let Err(failure) = &mut result
             && let Some(retained) = &mut failure.retained
         {
@@ -2336,6 +2370,7 @@ impl SessionShutdownState {
 fn run_app(
     boot: AppBootSelection,
     guard_snapshot: Option<&GuardSnapshot>,
+    on_missing_native_init: Option<fn() -> !>,
 ) -> Result<(), HostRunFailure> {
     let mut dev_lease = DevHostLease::from_environment()?;
     let shutdown = SessionShutdownState::new();
@@ -2444,6 +2479,8 @@ fn run_app(
     )?;
     guardian_owner.attach_router(router.handle())?;
     let (window_events_tx, window_events_rx) = mpsc::channel();
+    let (native_init_ready_tx, native_init_ready_rx) = mpsc::sync_channel::<()>(1);
+    let native_init_ready_from_coordinator = native_init_ready_tx.clone();
     let router_handle = router.handle();
     let commands_for_events = window_commands_tx.clone();
     let event_coordinator = thread::Builder::new()
@@ -2454,7 +2491,15 @@ fn run_app(
                 &router_handle,
                 &commands_for_events,
                 ready_trigger,
-                |_| Ok(()),
+                move |_| {
+                    // A real Host Init becomes accepted only after the router
+                    // has durably sent its authenticated Ready. This one-shot
+                    // receipt disarms the binary-owned startup watchdog.
+                    if ready_trigger == AppReadyTrigger::HostInitialized {
+                        let _ = native_init_ready_from_coordinator.try_send(());
+                    }
+                    Ok(())
+                },
             )
         })
         .map_err(|source| app_io("window event coordinator", &source))?;
@@ -2545,6 +2590,37 @@ fn run_app(
     let presentation_router = router.handle();
     let mut presentation_unproved = None;
     let mut retains_main_custody = false;
+    let _native_init_watchdog = if ready_trigger == AppReadyTrigger::HostInitialized {
+        on_missing_native_init
+            .map(|terminal| {
+                #[cfg(all(feature = "profile-test-hooks", debug_assertions))]
+                let bound = if std::env::var_os("KELD_T1B_SUPPRESS_HOST_INIT").is_some() {
+                    Duration::from_secs(2)
+                } else {
+                    NATIVE_FIRST_INIT_DEADLINE
+                };
+                #[cfg(not(all(feature = "profile-test-hooks", debug_assertions)))]
+                let bound = NATIVE_FIRST_INIT_DEADLINE;
+                thread::Builder::new()
+                    .name(String::from("keld-native-init-terminal-watch"))
+                    .spawn(move || {
+                        // Independent of Tao callback delivery. A stalled UI
+                        // loop cannot prevent this timeout; on expiry the
+                        // binary's diverging exit reaps native resources by OS
+                        // process termination with no Rust !Send owner Drop.
+                        if matches!(
+                            native_init_ready_rx.recv_timeout(bound),
+                            Err(RecvTimeoutError::Timeout)
+                        ) {
+                            terminal();
+                        }
+                    })
+                    .map_err(|source| app_io("native Init watchdog spawn", &source))
+            })
+            .transpose()?
+    } else {
+        None
+    };
     let window_result = engine.run_app_until_quit_with_main_owner(
         window_commands_rx,
         window_events_tx,

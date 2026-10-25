@@ -92,6 +92,22 @@ function removeAppListener(event: string, listener: AppListener): void {
 // delivers this event and ends the application session 10 s later if it has not
 // requested quit by then (KEL-53 §4 "Profile handover", the quit deadline D).
 function onLastWindowClosed(): void {
+  // GH531's Host wrote LastWindowClosed when the registry reached zero, but
+  // a synchronous `closed` listener may construct a replacement BrowserWindow
+  // before that event reaches this Bun role. Electron's native window list
+  // checks the *current* membership after closed callbacks. Recheck the
+  // authenticated Host mirror before notifying user `window-all-closed`
+  // listeners as well as before the default quit. An unready/retired Source is
+  // unknown, not proof of zero windows; fail closed instead of fabricating
+  // application-wide closure while a dirty replacement may still be live.
+  if (nativeFacadeBoot) {
+    if (!apiApp.isReady()) return;
+    try {
+      if (getWindowSnapshots().some((window) => !window.host_destroyed)) return;
+    } catch {
+      return;
+    }
+  }
   if (hasListeners("window-all-closed")) {
     emit("window-all-closed");
     return;

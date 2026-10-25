@@ -265,6 +265,24 @@ fail. "Owner" is the implementing ticket.
     F06-T5 reuses the admission rule, not this window-specific replay barrier, for
     display and theme facts.
 
+    **No unbounded rendererless Init (2026-10-25 safety amendment):** A
+    schema-two macOS boot creates *zero* initial native app windows; its actual
+    first Tao `NewEvents(StartCause::Init)` must reach Core's authenticated
+    `HostInitialized` Ready coordinator within **15 seconds of entering the
+    UI loop**, after Guardian and role admission. The shipping binary installs
+    a separate one-shot watchdog callback returning `!` (never a worker-side
+    destructor). A missing, stalled or withheld Init triggers binary-owned
+    `KELD-CORE-044` terminal process exit, letting the OS reclaim the native
+    main-thread, verified profile, and dev-stage resources without unwinding a
+    hung AppKit owner. This does **not** synthesize Ready, grant page authority,
+    assume a window exists or kill an otherwise legitimate long-running app
+    after Ready. Accepted Core Ready disarms the watchdog. The debug-only
+    `profile-test-hooks` fixture withholds the actual native Init fact on a
+    real Host/Guardian/Bun child, shortens the test bound to 2 seconds, and
+    verifies a nonzero Host exit with that exact cause, zero physical windows
+    and the supervised role reaped. The watchdog and its callback are binary
+    owned and remain distinct from the 15-second renderer navigation timer.
+
 ### (e) Close state machine (the #419 rules plus PANEL-D19)
 
 21. **Fail-closed veto, no timer.** Given a window whose `'close'` listener calls

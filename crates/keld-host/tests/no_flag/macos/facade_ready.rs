@@ -114,6 +114,92 @@ fn shipping_schema_two_host_emits_ready_without_an_initial_native_window() {
     await_process_gone(bun_pid);
 }
 
+/// Native hostile first-milestone falsifier, not a mocked service. The
+/// debug-only WebKit adapter withholds its actual Tao Init observation from
+/// Core while the complete authenticated Host/Guardian/Bun tree is alive.
+/// The separately owned *shipping-binary* watchdog must terminate the process
+/// without dropping AppKit's !Send native/profile/stage handles on a worker.
+#[cfg(feature = "profile-test-hooks")]
+#[test]
+fn withheld_native_init_ends_the_real_host_without_forged_ready_or_window() {
+    let fixture = ProductFixture::new("facade-init-watchdog");
+    fs::write(fixture.project.join("src/main.ts"), &fixture.entry_source)
+        .expect("authenticated full shipping-role fixture");
+    fs::write(
+        fixture.project.join("keld.config.ts"),
+        "export default { name: \"Keld Init absence\", entry: \"src/main.ts\", initialWindow: \"none\" } as const;\n",
+    )
+    .expect("explicit valid schema-two application");
+    let stage = keld_cli::boot::stage_dev_boot(
+        &fixture.project,
+        Path::new(env!("CARGO_BIN_EXE_keld-host")),
+    )
+    .expect("compile the actual native no-flag host stage");
+    assert!(!stage.root().join("index.html").exists());
+
+    let control_path = fixture.root.path().join("absent-init.sock");
+    let listener = UnixListener::bind(&control_path).expect("test-owned control");
+    listener.set_nonblocking(true).expect("bounded accept");
+    let child = Command::new(stage.host())
+        .process_group(0)
+        .current_dir(stage.root())
+        .env("KELD_T1B_CONTROL", &control_path)
+        .env("KELD_T4_SKIP_DESCENDANT", "1")
+        .env("KELD_T2_EXIT_ON_LINK_EOF", "1")
+        .env("KELD_T1B_SUPPRESS_HOST_INIT", "1")
+        .env("KELD_DEV_LEASE", "stdin-v1")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("launch the actual debug-profile host binary");
+    let mut cleanup = ShippingLaunchCleanup::new(child);
+    let host = cleanup.cli.as_mut().expect("live native Host");
+    let host_pid = host.id();
+    let _lease = host.stdin.take().expect("retain native dev lease");
+    let control = accept_before(&listener, Instant::now() + EVENT_DEADLINE);
+    control
+        .set_read_timeout(Some(EVENT_DEADLINE))
+        .expect("bound role records");
+    let mut reader = BufReader::new(control);
+    let hello = read_control_line(&mut reader);
+    let parts: Vec<_> = hello.split_whitespace().collect();
+    assert_eq!(parts.first().copied(), Some("HELLO"), "{hello}");
+    let bun_pid = parse_pid(parts.get(1).copied(), &hello);
+    cleanup.record_authenticated_groups(process_group(host_pid), process_group(bun_pid));
+    assert_eq!(read_control_line(&mut reader), "DESCENDANT 0");
+    assert_zero_native_app_windows(host_pid);
+
+    let child = cleanup
+        .cli
+        .take()
+        .expect("retain group cleanup while reaping");
+    let output = wait_child_output(child, EVENT_DEADLINE);
+    assert!(
+        !output.status.success(),
+        "unproved native Init exited as success: {output:?}"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("KELD-CORE-044: the real native AppKit Init/Host Ready was not accepted"),
+        "no bounded binary-owned startup terminal, or wrong failure: {stderr}"
+    );
+    // The Host must not fabricate a Ready just to satisfy an application
+    // while its actual native first milestone is still withheld.
+    let mut next = String::new();
+    use std::io::BufRead as _;
+    let _ = reader
+        .read_line(&mut next)
+        .expect("post-fatal bounded control read");
+    assert_ne!(
+        next.trim(),
+        "READY",
+        "a lost native Init became a fake Ready"
+    );
+    assert_zero_native_app_windows(host_pid);
+    await_process_gone(bun_pid);
+}
+
 /// Real Bun entry follows the public Electron singleton, not raw lifecycle
 /// framing. It must remain a separate source graph from the raw-host fixture.
 const ELECTRON_FACADE_READY_ENTRY: &str = r#"

@@ -8,7 +8,10 @@ const mode = process.argv[2];
 const appliers = new Map<number, (payload: Uint8Array) => void>();
 const listeners = new Map<number, (payload: Uint8Array) => void>();
 let ended: ((error: transport.KeldCallError) => void) | undefined;
-const terminal = transport.linkError("KELD-IPC-022", "controlled terminal after drain");
+const terminal = transport.linkError(
+  "KELD-IPC-022",
+  "controlled terminal after drain",
+);
 const refusal = transport.linkError("KELD-IPC-003", "controlled Quit refusal");
 let deadNotifications = 0;
 let closeCalls = 0;
@@ -43,7 +46,9 @@ const { LifecycleLink } = await import("./link.ts");
 const session = await LifecycleLink.connect("controlled-link", {
   onReady() {},
   onLastWindowClosed() {},
-  onLinkDead() { deadNotifications += 1; },
+  onLinkDead() {
+    deadNotifications += 1;
+  },
 });
 const source = session.windowSource;
 assert.ok(source);
@@ -65,10 +70,17 @@ assert.equal(source.all().length, 1);
 if (mode === "success") await session.quit();
 else await assert.rejects(session.quit(), (error) => error === refusal);
 assert.equal(closeCalls, 1);
-assert.equal(deadNotifications, 0, "local Quit does not notify unexpected death");
+assert.equal(
+  deadNotifications,
+  0,
+  "local Quit does not notify unexpected death",
+);
 for (const read of [() => source.all(), () => source.get(ref)]) {
-  assert.throws(read, (error: unknown) =>
-    error instanceof Error && error.message === terminal.message);
+  assert.throws(
+    read,
+    (error: unknown) =>
+      error instanceof Error && error.message === terminal.message,
+  );
 }
 ended?.(terminal);
 assert.throws(() => source.all());

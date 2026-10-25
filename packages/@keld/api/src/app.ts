@@ -255,6 +255,20 @@ export function getWindowSnapshots(): readonly WindowSnapshot[] {
   return connectedLink?.windowSource?.all() ?? [];
 }
 
+/**
+ * A blocking native Destroy may return with authenticated LastWindowClosed
+ * already applied, but its user listener still parked in WorkerLink's ring.
+ * Publish that Host milestone only after the JS window emitted `closed`,
+ * never inside the transport state applier or from a guessed window count.
+ */
+export function flushAppliedLastWindowClosedAfterDestroy(): void {
+  const session = connectedLink;
+  if (!session) return;
+  while (session.consumeAppliedLastWindowClosed()) {
+    onLastWindowClosed();
+  }
+}
+
 /** Observe window facts only after their state was applied by the one WorkerLink. */
 export function onWindowFactApplied(
   listener: (fact: WindowEvent) => void,
