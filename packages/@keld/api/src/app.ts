@@ -175,14 +175,22 @@ function closedByQuit(): Error {
 }
 
 function sendQuit(): Promise<void> {
-  const done = ensureLink().then((link) =>
-    link.quit().finally(() => {
-      // The Quit closed the link, which suppresses onLinkDead: a whenReady
-      // still waiting can never see Ready, so it rejects with the close.
-      if (!hostReady && linkDead === undefined)
-        failReadyWaiters(closedByQuit());
-    }),
-  );
+  // The already-Ready role owns one connected LifecycleLink. Close its public
+  // admission *synchronously* before returning from app.quit(). Waiting on a
+  // resolved `ensureLink().then(...)` inserts a microtask in which app code
+  // can create a fresh BrowserWindow after a zero-window Quit preflight and
+  // before the role's terminal link actually closes. That discards the new
+  // window without its close/veto listener (real Mac RED oracle). Pre-Ready
+  // and not-yet-connected roles retain the existing lazy single-link path.
+  const requested =
+    hostReady && connectedLink
+      ? connectedLink.quit()
+      : ensureLink().then((link) => link.quit());
+  const done = requested.finally(() => {
+    // The Quit closed the link, which suppresses onLinkDead: a whenReady
+    // still waiting can never see Ready, so it rejects with the close.
+    if (!hostReady && linkDead === undefined) failReadyWaiters(closedByQuit());
+  });
   ignoreIfUnawaited(done);
   return done;
 }

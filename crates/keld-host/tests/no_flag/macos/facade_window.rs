@@ -256,6 +256,22 @@ for await (const command of lines) {
     await app.quit();
     report("QUIT_REPLY");
     break;
+  } else if (command === "QUIT_AND_CREATE") {
+    // The role had no live native windows at the Quit check. A second public
+    // constructor in the *same JS turn* must never sneak between that check
+    // and actual terminal link admission, bypassing its new window veto.
+    const quitting = app.quit();
+    let raced = "window-created-after-quit";
+    try {
+      new BrowserWindow({ width: 320, height: 240 });
+    } catch (error) {
+      raced = error instanceof Error &&
+        (error.message.startsWith("KELD-CORE-045:") || error.message.startsWith("KELD-IPC-"))
+        ? "window-refused" : "untyped-refusal";
+    }
+    await quitting;
+    report(`QUIT_ATOMIC ${raced}`);
+    break;
   } else {
     throw new Error(`unknown public-window request ${command}`);
   }
@@ -564,8 +580,14 @@ fn public_electron_browser_window_uses_native_host_and_vetoes_unsaved_close() {
     assert_eq!(read_control_line(&mut reader), "CLOSED 1");
     await_visible_native_close(host_pid);
     assert_followup_create_destroy(&mut reader, &mut writer, host_pid);
-    writer.write_all(b"QUIT\n").expect("authenticated Quit");
-    assert_eq!(read_control_line(&mut reader), "QUIT_REPLY");
+    writer
+        .write_all(b"QUIT_AND_CREATE\n")
+        .expect("atomic authenticated Quit");
+    assert_eq!(
+        read_control_line(&mut reader),
+        "QUIT_ATOMIC window-refused",
+        "a native Create raced into the gap between facade Quit check and actual link close"
+    );
     drop(writer);
     let output = wait_child_output(cleanup.release(), EVENT_DEADLINE);
     assert!(
