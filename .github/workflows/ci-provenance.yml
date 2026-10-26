@@ -71,7 +71,13 @@ jobs:
               // Strict first rollout: scripts and config files executed by
               // CI are also authority, not merely the workflow YAML itself.
               // Require a separate trusted-base review for their changes.
-              return p.startsWith(".github/") ||
+              // Root workspace metadata and formatter/test configs can also
+              // suppress required test discovery without changing ci.yml.
+              return p === "cargo.toml" ||
+                p === "bunfig.toml" || p.endsWith("/bunfig.toml") ||
+                p === "rustfmt.toml" || p.endsWith("/rustfmt.toml") ||
+                p === "tsconfig.json" || p.endsWith("/tsconfig.json") ||
+                p.startsWith(".github/") ||
                 p.startsWith(".cargo/") ||
                 p.startsWith(".config/") ||
                 p.startsWith("tools/") ||

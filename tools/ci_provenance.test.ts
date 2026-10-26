@@ -166,6 +166,20 @@ test.each([
   },
 );
 
+test.each([
+  "Cargo.toml",
+  "bunfig.toml",
+  "packages/@keld/kipc/bunfig.toml",
+  "rustfmt.toml",
+  "tsconfig.json",
+] as const)(
+  "root or nested test/build authority %s is refused",
+  async (filename) => {
+    const f = fixture([{ filename, status: "modified" }]);
+    await expect(f.run()).rejects.toThrow("protected CI authority");
+  },
+);
+
 test("renaming protected CI workflow to innocuous docs path is refused", async () => {
   const f = fixture([
     {
