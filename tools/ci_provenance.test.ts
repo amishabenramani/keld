@@ -168,10 +168,15 @@ test.each([
 
 test.each([
   "Cargo.toml",
+  "crates/keld-core/Cargo.toml",
+  "crates/keld-ipc/fuzz/Cargo.toml",
   "bunfig.toml",
   "packages/@keld/kipc/bunfig.toml",
   "rustfmt.toml",
   "tsconfig.json",
+  "packages/@keld/api/package.json",
+  "packages/@keld/kipc/package.json",
+  "packages/@keld/kipc/scripts/echo-codegen.ts",
 ] as const)(
   "root or nested test/build authority %s is refused",
   async (filename) => {

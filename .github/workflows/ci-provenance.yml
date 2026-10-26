@@ -73,7 +73,9 @@ jobs:
               // Require a separate trusted-base review for their changes.
               // Root workspace metadata and formatter/test configs can also
               // suppress required test discovery without changing ci.yml.
-              return p === "cargo.toml" ||
+              return p === "cargo.toml" || p.endsWith("/cargo.toml") ||
+                p === "package.json" || p.endsWith("/package.json") ||
+                p === "packages/@keld/kipc/scripts/echo-codegen.ts" ||
                 p === "bunfig.toml" || p.endsWith("/bunfig.toml") ||
                 p === "rustfmt.toml" || p.endsWith("/rustfmt.toml") ||
                 p === "tsconfig.json" || p.endsWith("/tsconfig.json") ||
