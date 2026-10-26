@@ -119,6 +119,11 @@ fn windows_first_navigation_start_is_observed_by_real_com_callback() -> Result<(
                 "the real Tao event callback was never observed: {evidence}"
             )));
         }
+        if !evidence.contains("dom_content_loaded_at_ms=Some(") {
+            return Err(failure(format!(
+                "the actual WebView2 DOMContentLoaded callback for initial HTML was not observed: {evidence}"
+            )));
+        }
         if !evidence.contains("navigation_ids_match=Some(true)") {
             return Err(failure(format!(
                 "first NavigationStarting and NavigationCompleted IDs did not correlate: {evidence}"
