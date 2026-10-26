@@ -27,7 +27,7 @@ export interface WindowSnapshot {
  * GH1149 review-only cumulative HOST-session admission proposal.
  * Must match the Rust registry's lifetime count after independent policy
  * approval; this cardinality alone is NOT a retained-heap byte budget.
- * Keep Destroyed tombstones and never interpret this as a live-window quota.
+ * Keep retired ID membership and never interpret this as a live-window quota.
  */
 export const PROPOSED_MAX_CUMULATIVE_WINDOW_IDS = 1024;
 
@@ -71,7 +71,9 @@ function snapshot(
  */
 export class WindowSource implements MirrorSource<WindowEvent> {
   readonly channel = WINDOW_CHANNEL;
-  readonly #windows = new Map<number, WindowSnapshot>();
+  // Null keeps exact observed-ID membership and the historical census without
+  // retaining the terminal snapshot's four-object graph after dispatch.
+  readonly #windows = new Map<number, WindowSnapshot | null>();
   #onFact: ((fact: WindowEvent) => void) | undefined;
   #failureCode: string | undefined;
   #failureMessage = "";
@@ -132,7 +134,7 @@ export class WindowSource implements MirrorSource<WindowEvent> {
       const previous = this.#windows.get(fact.window.id);
       if (fact.variant === "Created") {
         if (
-          previous ||
+          this.#windows.has(fact.window.id) ||
           this.#windows.size >= PROPOSED_MAX_CUMULATIVE_WINDOW_IDS
         )
           throw this.#reject();
@@ -188,7 +190,18 @@ export class WindowSource implements MirrorSource<WindowEvent> {
     // Earlier applied records still drain after a later source fact fails.
     // After terminal end the transport has already drained earlier records:
     // never revive its former application callback/closure via a stale source.
-    this.#onFact?.(fact);
+    try {
+      this.#onFact?.(fact);
+    } finally {
+      if (fact.variant === "Destroyed") {
+        const current = this.#windows.get(fact.window.id);
+        if (
+          current?.host_destroyed &&
+          current.window.incarnation === fact.window.incarnation
+        )
+          this.#windows.set(fact.window.id, null);
+      }
+    }
   }
 
   /**
@@ -197,17 +210,25 @@ export class WindowSource implements MirrorSource<WindowEvent> {
    * Host response. A newer native close sequence wins; an old acknowledgement
    * can never clear a later `CloseRequested` or a different incarnation.
    */
-  acceptHostCloseReply(window: WindowRef, closeSeq: bigint): void {
-    this.#requireLive();
+  acceptHostCloseReply(window: WindowRef, closeSeq: bigint): boolean {
+    // Bookkeeping follows an already received answer. A later Source failure
+    // must not replace it or mutate either Source or the caller's receipt map.
+    if (this.#failureCode !== undefined) return false;
     const previous = this.#windows.get(window.id);
     if (
       !previous ||
       previous.window.incarnation !== window.incarnation ||
-      previous.host_destroyed ||
-      previous.pending_close !== closeSeq
+      previous.host_destroyed
     )
-      return;
-    this.#windows.set(window.id, snapshot(window, previous.state, null, false));
+      return false;
+    if (previous.pending_close === closeSeq)
+      this.#windows.set(
+        window.id,
+        snapshot(window, previous.state, null, false),
+      );
+    // An older ack still advances the dispatched receipt watermark; only the
+    // exact pending sequence above may clear current Source state.
+    return true;
   }
 
   /** A local read only; a wrong pair never observes a different incarnation. */
@@ -217,11 +238,13 @@ export class WindowSource implements MirrorSource<WindowEvent> {
     return value?.window.incarnation === window.incarnation ? value : undefined;
   }
 
-  /** Immutable host snapshots, including host-destroyed entries, in host-id order. */
+  /** Immutable snapshots in host-id order; terminal ones remain until dispatch. */
   all(): readonly WindowSnapshot[] {
     this.#requireLive();
     return Object.freeze(
-      [...this.#windows.values()].sort((a, b) => a.window.id - b.window.id),
+      [...this.#windows.values()]
+        .filter((value): value is WindowSnapshot => value !== null)
+        .sort((a, b) => a.window.id - b.window.id),
     );
   }
 

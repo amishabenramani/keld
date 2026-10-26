@@ -320,11 +320,16 @@ function acceptHostCloseReply(
 ): void {
   if (request.variant !== "CloseReply" || response.variant !== "ReplyApplied")
     return;
-  const liveSource = session.windowSource;
-  const snapshot = liveSource?.get(request.window);
-  if (!liveSource || !snapshot || snapshot.host_destroyed) return;
-  liveSource.acceptHostCloseReply(request.window, request.close_seq);
-  deliveredWindowCloses.acceptHostCloseReply(request.window, request.close_seq);
+  if (
+    session.windowSource?.acceptHostCloseReply(
+      request.window,
+      request.close_seq,
+    )
+  )
+    deliveredWindowCloses.acceptHostCloseReply(
+      request.window,
+      request.close_seq,
+    );
 }
 
 /** Asynchronous setters and close verdicts do not block the application's event loop. */
