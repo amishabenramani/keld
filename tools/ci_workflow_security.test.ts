@@ -534,6 +534,54 @@ test("CI workflow-wide token privileges stay read-only", () => {
   }
 });
 
+test("non-CodeQL jobs cannot override workflow read-only token privileges", () => {
+  for (const jobName of [
+    "check",
+    "router-contracts",
+    "windows-media",
+    "required",
+    "deny",
+  ]) {
+    const f = fixture();
+    f.jobs[jobName]!.permissions = { contents: "write", actions: "write" };
+    expect(() => check(f), jobName).toThrow(
+      "non-CodeQL jobs must inherit read-only workflow permissions",
+    );
+  }
+});
+
+test("native Clippy and Nextest matrix must use every router-selected OS", () => {
+  const baseline = fixture();
+  expect(() => check(baseline)).not.toThrow();
+  for (const mutate of [
+    (f: Fixture) => {
+      f.jobs.check!.strategy = { matrix: { os: ["windows-latest"] } };
+    },
+    (f: Fixture) => {
+      f.jobs.check!.strategy = {
+        matrix: {
+          os: "${{ fromJSON(needs.changes.outputs.check_os) }}",
+          exclude: [{ os: "macos-latest" }],
+        },
+      };
+    },
+    (f: Fixture) => {
+      f.jobs.check!.strategy = {
+        matrix: { os: "${{ fromJSON(needs.changes.outputs.check_os) }}" },
+      };
+    },
+    (f: Fixture) => {
+      f.jobs.check!["runs-on"] = "windows-latest";
+    },
+  ]) {
+    const f = fixture();
+    mutate(f);
+    expect(() => check(f)).toThrow(
+      "native check must use the router-owned OS matrix",
+    );
+  }
+});
+
 test("CI rejects unreviewed external actions, including mutable Docker image tags", () => {
   const unreviewed = [
     "docker://alpine:latest",

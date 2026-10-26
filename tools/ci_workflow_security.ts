@@ -1042,6 +1042,15 @@ export function checkWorkflowSecurity(source: string): void {
   for (const [jobName, value] of Object.entries(jobs)) {
     const job = mapping(value, `jobs.${jobName}`);
     refuseInheritedCustomShell(job, `jobs.${jobName}`);
+    // A job-level token override replaces the read-only workflow default.
+    // CodeQL's three exact job names are the only reviewed exception; each
+    // receives its own restricted SARIF-upload permission check below.
+    if (
+      !codeqlLanguages.some((language) => jobName === `codeql-${language}`) &&
+      Object.hasOwn(job, "permissions")
+    ) {
+      fail("non-CodeQL jobs must inherit read-only workflow permissions.");
+    }
     if (
       !Array.isArray(job.steps) ||
       job.steps.length === 0 ||
@@ -1193,6 +1202,22 @@ export function checkWorkflowSecurity(source: string): void {
   // A skipped consumer, shell-init injection or altered run command could
   // otherwise produce a green job without executing any native test.
   const nativeCheck = mapping(jobs.check, "jobs.check");
+  const nativeStrategy = mapping(nativeCheck.strategy, "jobs.check.strategy");
+  const nativeMatrix = mapping(
+    nativeStrategy.matrix,
+    "jobs.check.strategy.matrix",
+  );
+  if (
+    nativeCheck["runs-on"] !== "${{ matrix.os }}" ||
+    Object.keys(nativeStrategy).length !== 2 ||
+    nativeStrategy["fail-fast"] !== false ||
+    Object.keys(nativeMatrix).length !== 1 ||
+    nativeMatrix.os !== "${{ fromJSON(needs.changes.outputs.check_os) }}"
+  ) {
+    fail(
+      "native check must use the router-owned OS matrix without exclusions.",
+    );
+  }
   inputsMatch(
     mapping(nativeCheck.env, "jobs.check.env"),
     {
