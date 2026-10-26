@@ -1037,6 +1037,45 @@ export function checkWorkflowSecurity(source: string): void {
   refuseInheritedCustomShell(workflow, "workflow");
   const jobs = mapping(workflow.jobs, "workflow.jobs");
   if (Object.keys(jobs).length === 0) fail("workflow.jobs must not be empty.");
+  // jobs.changes publishes the router's authority to select native OSes,
+  // packages, scanners, and required lanes. Freezing consumers is insufficient
+  // if a PR can replace the producer bindings with false or Windows-only.
+  const routerOutputNames = [
+    "rust",
+    "docs",
+    "mermaid",
+    "hygiene",
+    "gui",
+    "msrv",
+    "deny",
+    "ts",
+    "webkitgtk",
+    "packages",
+    "nongtk_packages",
+    "ubuntu_packages",
+    "ts_packages",
+    "codeql_rust",
+    "codeql_javascript_typescript",
+    "codeql_actions",
+    "workspace",
+    "check_os",
+    "rust_documentation_only",
+    "doctest",
+    "doctest_packages",
+  ];
+  inputsMatch(
+    mapping(
+      mapping(jobs.changes, "jobs.changes").outputs,
+      "jobs.changes.outputs",
+    ),
+    Object.fromEntries(
+      routerOutputNames.map((name) => [
+        name,
+        "${{ steps.classify.outputs." + name + " }}",
+      ]),
+    ),
+    "change router outputs must match the trusted classifier bindings",
+  );
   const stepsByJob = new Map<string, Mapping[]>();
   let checkouts = 0;
   for (const [jobName, value] of Object.entries(jobs)) {
@@ -1142,6 +1181,39 @@ export function checkWorkflowSecurity(source: string): void {
   }
   if (checkouts === 0)
     fail("workflow must contain its audited checkout steps.");
+  // The output references above are trustworthy only when their sole
+  // producer remains the real, event-bound classifier. A second step with
+  // id: classify or an echoed GITHUB_OUTPUT can forge native lane selection.
+  const classifierSteps = stepsByJob.get("changes") ?? [];
+  const classifier = namedStep(
+    classifierSteps,
+    "Classify changed-path ownership",
+  );
+  if (classifierSteps.filter((step) => step.id === "classify").length !== 1) {
+    fail("change router classifier must run the reviewed command and source.");
+  }
+  exactKeys(
+    classifier,
+    ["name", "id", "env", "run"],
+    "change router classifier must run the reviewed command and source",
+  );
+  if (
+    classifier.id !== "classify" ||
+    classifier.run !== "tools/ci_changes.sh github"
+  ) {
+    fail("change router classifier must run the reviewed command and source.");
+  }
+  inputsMatch(
+    mapping(classifier.env, "changes classifier env"),
+    {
+      KELD_CI_EVENT_NAME: "${{ github.event_name }}",
+      KELD_CI_BASE_SHA: "${{ github.event.pull_request.base.sha || '' }}",
+      KELD_CI_HEAD_SHA:
+        "${{ github.event.pull_request.head.sha || github.sha }}",
+      KELD_CI_BEFORE_SHA: "${{ github.event.before || '' }}",
+    },
+    "change router classifier must run the reviewed command and source",
+  );
   // Every selected native test runner must install its reviewed executables.
   // Inspecting only the inputs of an existing action is insufficient: deleting
   // that action could fall back to an ambient, unreviewed Nextest/just binary.

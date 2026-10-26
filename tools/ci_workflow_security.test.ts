@@ -555,15 +555,19 @@ test("native Clippy and Nextest matrix must use every router-selected OS", () =>
   expect(() => check(baseline)).not.toThrow();
   for (const mutate of [
     (f: Fixture) => {
-      f.jobs.check!.strategy = { matrix: { os: ["windows-latest"] } };
+      f.jobs.check!.strategy = {
+        "fail-fast": false,
+        matrix: { os: ["windows-latest"] },
+      } as FixtureJob["strategy"];
     },
     (f: Fixture) => {
       f.jobs.check!.strategy = {
+        "fail-fast": false,
         matrix: {
           os: "${{ fromJSON(needs.changes.outputs.check_os) }}",
           exclude: [{ os: "macos-latest" }],
         },
-      };
+      } as FixtureJob["strategy"];
     },
     (f: Fixture) => {
       f.jobs.check!.strategy = {
@@ -578,6 +582,62 @@ test("native Clippy and Nextest matrix must use every router-selected OS", () =>
     mutate(f);
     expect(() => check(f)).toThrow(
       "native check must use the router-owned OS matrix",
+    );
+  }
+});
+
+test("change router output bindings cannot forge native OS or selected test inventory", () => {
+  for (const [name, spoof] of [
+    ["check_os", '["windows-latest"]'],
+    ["rust_documentation_only", "true"],
+    ["rust", "false"],
+    ["packages", "keld-wv"],
+    ["codeql_rust", "false"],
+    ["deny", "false"],
+  ]) {
+    const f = fixture();
+    const output = (f.jobs.changes as Step).outputs as Record<string, unknown>;
+    output[name!] = spoof;
+    expect(() => check(f), name).toThrow(
+      "change router outputs must match the trusted classifier bindings",
+    );
+  }
+  const added = fixture();
+  ((added.jobs.changes as Step).outputs as Record<string, unknown>).shadow =
+    "false";
+  expect(() => check(added)).toThrow(
+    "change router outputs must match the trusted classifier bindings",
+  );
+});
+
+test("change router classifier must execute its exact authoritative script", () => {
+  for (const mutate of [
+    (f: Fixture) => {
+      step(f, "changes", "Classify changed-path ownership").run =
+        'echo \'check_os=["windows-latest"]\' >> "$GITHUB_OUTPUT"';
+    },
+    (f: Fixture) => {
+      step(f, "changes", "Classify changed-path ownership").id = "fake";
+    },
+    (f: Fixture) => {
+      step(f, "changes", "Classify changed-path ownership").env = {
+        KELD_CI_EVENT_NAME: "push",
+      };
+    },
+    (f: Fixture) => {
+      step(f, "changes", "Classify changed-path ownership").if = "false";
+    },
+    (f: Fixture) => {
+      f.jobs.changes!.steps.unshift({
+        id: "classify",
+        run: "echo 'rust=false' >> \"$GITHUB_OUTPUT\"",
+      });
+    },
+  ]) {
+    const f = fixture();
+    mutate(f);
+    expect(() => check(f)).toThrow(
+      "change router classifier must run the reviewed command and source",
     );
   }
 });
