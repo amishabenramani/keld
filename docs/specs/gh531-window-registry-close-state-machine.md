@@ -863,8 +863,34 @@ mirror may invent an Allow. This is a bounded client interpretation of the
 existing Q5/Q6 Host reply, not an additional Host authority, second transport,
 new wire event or promise of draw.io Quit compatibility.
 
-The window mirror entry keeps the host facts (`WindowState`, live or host-destroyed,
-pending `close_seq`). The Electron-facing tombstones are separate (§4.e).
+**Settled Source amendment approved — 2026-10-27:** [GH-1149's public approval
+and scoped claim receipt](https://github.com/gyldlab/keld/issues/1149#issuecomment-6426874535)
+binds the [stage-one Source amendment](gh1149-settled-source-reclamation.md),
+independently admitted technical draft SHA-256
+`b9a0e5cf186cd4435b09a4f05da74ff8e2e9305fc745ddb00d9d7b3c2927468d`
+against source `fab00474c045f5b5b303e7f8752c2004af5ea10f`. Design admission
+leaves source/consumer qualification and production acceptance gates open.
+
+The window Source keeps full host facts (`WindowState`, pending `close_seq`,
+host-destroyed state) through the matching `Destroyed` dispatch callback. The
+blocking Destroy continuation can still read the pre-applied terminal snapshot.
+After that callback, including a throw, `finally` replaces only the exact matching
+host-destroyed snapshot in the existing map with a shared scalar marker. `get`
+and `all` omit retired snapshots; caller-held immutable snapshots remain caller-owned.
+`Map.has(id)` and unchanged map size preserve exact historical ID rejection,
+sparse IDs and the cumulative1024 guard. Compact history remains history-dependent.
+The Electron-facing tombstones are separate (§4.e); no terminal-wrapper registry is added.
+
+Explicit LifecycleLink close stops calls immediately and lets WorkerLink drain
+earlier facts before the existing `onEnd` disposes Source. Subscription-failure
+cleanup uses that same close path. Source owns nonthrowing close-reply eligibility:
+failed, absent and terminal pairs do not mutate Source or receipt bookkeeping, so a
+later Source failure cannot replace an earlier correlated `ReplyApplied`. Live
+exact pairs still advance the receipt watermark when a newer close is pending;
+only the matching sequence clears Source pending state. First-cause and earlier
+answer/fact drain rules above remain unchanged. Host storage, native mapping,
+pending64 and cumulative1024 are unchanged; native and physical-byte qualification
+remain separate gates.
 
 ### 4.e Close state machine
 

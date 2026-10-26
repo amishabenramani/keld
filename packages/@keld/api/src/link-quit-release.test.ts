@@ -6,8 +6,13 @@ import {
   withIoDeadline,
 } from "../../kipc/src/transport.ts";
 
-for (const scenario of ["success", "refusal"]) {
-  test(`local Quit releases retained window source after ${scenario}`, async () => {
+for (const scenario of [
+  "success",
+  "refusal",
+  "explicit-close",
+  "subscription-failure",
+]) {
+  test(`local termination releases window source after earlier fact drain: ${scenario}`, async () => {
     const child = Bun.spawn(
       [
         process.execPath,

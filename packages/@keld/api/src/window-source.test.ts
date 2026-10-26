@@ -15,7 +15,7 @@ import {
   type WindowEvent,
   type WindowRef,
 } from "./window-codec.ts";
-import { WindowSource } from "./window-source.ts";
+import { WindowSource, type WindowSnapshot } from "./window-source.ts";
 
 const WINDOW: WindowRef = { id: 7, incarnation: 300n };
 const STATE = {
@@ -168,9 +168,91 @@ test("Host-acknowledged Veto clears only the exact pending identity and sequence
   expect(source.get(WINDOW)?.host_destroyed).toBe(true);
 
   source.end(linkError("KELD-IPC-022", "role retired"));
-  expect(() => source.acceptHostCloseReply(WINDOW, 301n)).toThrow(
-    "KELD-IPC-022",
+  expect(source.acceptHostCloseReply(WINDOW, 301n)).toBe(false);
+});
+
+test("Destroyed stays readable through its callback and retires even when it throws", () => {
+  let terminal: WindowSnapshot;
+  const source = new WindowSource((fact) => {
+    if (
+      fact.variant !== "Destroyed" ||
+      fact.window.incarnation !== WINDOW.incarnation
+    )
+      return;
+    expect(source.get(WINDOW)).toBe(terminal);
+    expect(source.all()).toEqual([terminal]);
+    throw new Error("terminal listener failed");
+  });
+  accept(source, literal("event-created"));
+  const earlier = accept(source, literal("event-focus"));
+  const destroyed = accept(source, literal("event-destroyed"));
+  terminal = source.get(WINDOW)!;
+  expect(terminal).toHaveProperty("host_destroyed", true);
+  source.dispatch(earlier);
+  expect(source.get(WINDOW)).toBe(terminal);
+  source.dispatch({ ...destroyed, window: { ...WINDOW, incarnation: 301n } });
+  expect(source.get(WINDOW)).toBe(terminal);
+  expect(() => source.dispatch(destroyed)).toThrow("terminal listener failed");
+  expect(source.get(WINDOW)).toBeUndefined();
+  expect(source.all()).toEqual([]);
+  expect(terminal).toHaveProperty("host_destroyed", true);
+});
+
+test("close receipt eligibility is nonthrowing and preserves newer pending state", () => {
+  const source = new WindowSource(() => {});
+  expect(source.acceptHostCloseReply(WINDOW, 300n)).toBe(false);
+  accept(source, literal("event-created-pending-close"));
+  const initial = source.get(WINDOW);
+  expect(
+    source.acceptHostCloseReply({ ...WINDOW, incarnation: 301n }, 300n),
+  ).toBe(false);
+  expect(source.acceptHostCloseReply(WINDOW, 299n)).toBe(true);
+  expect(source.get(WINDOW)).toBe(initial);
+  expect(source.acceptHostCloseReply(WINDOW, 300n)).toBe(true);
+  expect(source.get(WINDOW)?.pending_close).toBeNull();
+  const terminal = accept(source, literal("event-destroyed"));
+  const before = source.get(WINDOW);
+  expect(source.acceptHostCloseReply(WINDOW, 300n)).toBe(false);
+  expect(source.get(WINDOW)).toBe(before);
+  source.dispatch(terminal);
+  expect(source.acceptHostCloseReply(WINDOW, 300n)).toBe(false);
+  rejected(() =>
+    source.apply({ variant: "Focus", window: WINDOW, focused: false }),
   );
+  expect(source.acceptHostCloseReply(WINDOW, 300n)).toBe(false);
+  rejected(() => source.get(WINDOW));
+});
+
+test("nested apply during terminal dispatch preserves each window's own lifetime", () => {
+  const second = { id: 8, incarnation: 301n };
+  const order: number[] = [];
+  const terminal: WindowEvent = { variant: "Destroyed", window: second };
+  const source = new WindowSource((fact) => {
+    if (fact.variant !== "Destroyed") return;
+    order.push(fact.window.id);
+    if (fact.window.id === WINDOW.id) {
+      source.apply(terminal);
+      expect(source.get(WINDOW)?.host_destroyed).toBe(true);
+      expect(source.get(second)?.host_destroyed).toBe(true);
+    } else {
+      expect(source.get(WINDOW)).toBeUndefined();
+      expect(source.get(second)?.host_destroyed).toBe(true);
+    }
+  });
+  accept(source, literal("event-created"));
+  source.apply({
+    variant: "Created",
+    window: second,
+    state: STATE,
+    pending_close: null,
+  });
+  const first = accept(source, literal("event-destroyed"));
+  source.dispatch(first);
+  expect(source.get(WINDOW)).toBeUndefined();
+  expect(source.get(second)?.host_destroyed).toBe(true);
+  source.dispatch(terminal);
+  expect(source.all()).toEqual([]);
+  expect(order).toEqual([7, 8]);
 });
 
 test("every state fact changes only its own host-confirmed field", () => {
@@ -600,3 +682,32 @@ test(
   },
   APP_LINK_IO_DEADLINE_MS * 2,
 );
+
+for (const history of [0, 1, 1024]) {
+  for (const mode of ["retire", "retain"]) {
+    test(`settled Source history H=${history} ${mode} graph observation and independent callback control`, async () => {
+      const result = (await sourceRole("window-source-release.test-role.ts", [
+        `history:${history}:${mode}`,
+      ])) as {
+        history: number;
+        retaining: boolean;
+        settled: {
+          objectsLive: number;
+          snapshotsVisible: number;
+          sharedCallbackAlive: boolean;
+          heapSize: number;
+          objectCount: number;
+        };
+      };
+      expect(result.history).toBe(history);
+      expect(result.retaining).toBe(mode === "retain");
+      expect(result.settled.objectsLive).toBe(
+        mode === "retain" ? 4 * history : 0,
+      );
+      expect(result.settled.snapshotsVisible).toBe(0);
+      expect(result.settled.sharedCallbackAlive).toBe(true);
+      expect(result.settled.heapSize).toBeGreaterThan(0);
+      console.log(JSON.stringify(result));
+    });
+  }
+}

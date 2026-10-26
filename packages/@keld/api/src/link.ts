@@ -337,9 +337,6 @@ export class LifecycleLink {
   close(): void {
     if (this.#closed) return;
     this.#closed = true;
-    this.#windowSource?.end(
-      linkError("KELD-IPC-022", "native window session closed"),
-    );
     this.#link.close();
   }
 }

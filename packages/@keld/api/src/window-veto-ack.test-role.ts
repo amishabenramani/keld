@@ -191,6 +191,11 @@ assert.deepEqual(
   "the sent and acknowledged pair must be immutable",
 );
 source.dispatch(delayed12);
+assert.deepEqual(
+  getDispatchedPendingWindowCloses(),
+  [],
+  "old ack advances the receipt watermark even with a newer pre-applied pending seq",
+);
 source.dispatch(delayed13);
 assert.deepEqual(
   pending(),
@@ -325,3 +330,26 @@ assert.deepEqual(
   "Destroying A cannot tombstone the independently live window B",
 );
 console.log("PASS host-veto-ack-clears-only-exact-sequence");
+
+// Controlled response seam: ReplyApplied is settled first, then Source fails
+// before the API continuation. The real socket counterpart is worker_link.rs.
+postpone = true;
+const earlierAnswer = invokeWindow({
+  variant: "CloseReply",
+  window: another,
+  close_seq: 14n,
+  verdict: "Veto",
+});
+delayedReply?.({ variant: "ReplyApplied" });
+assert.throws(
+  () =>
+    source.apply({
+      variant: "Focus",
+      window: { ...another, incarnation: 999n },
+      focused: true,
+    }),
+  /KELD-IPC-005/,
+);
+assert.deepEqual(await earlierAnswer, { variant: "ReplyApplied" });
+assert.throws(getWindowSnapshots, /KELD-IPC-005/);
+console.log("PASS earlier-answer-independent-of-later-source-failure");

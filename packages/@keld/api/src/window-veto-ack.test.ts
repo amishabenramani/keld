@@ -16,7 +16,7 @@ test("actual app link Veto ack clears only Host-confirmed exact close sequence",
     assert.equal(code, 0, `${stdout}\n${stderr}`);
     assert.equal(
       stdout.trim(),
-      "PASS host-veto-ack-clears-only-exact-sequence",
+      "PASS host-veto-ack-clears-only-exact-sequence\nPASS earlier-answer-independent-of-later-source-failure",
     );
     assert.equal(stderr, "");
   } finally {
