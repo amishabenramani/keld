@@ -1,0 +1,105 @@
+# KEL-169: base-branch-owned CI admission, intentionally CodeQL-free.
+# This workflow never checks out or executes pull-request code, never accesses
+# secrets, and never writes to the repository or default-branch caches.
+name: CI provenance
+
+on:
+  pull_request_target:
+    types: [opened, reopened, synchronize, edited, ready_for_review]
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  provenance:
+    name: CI provenance
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Refuse unreviewed CI authority changes
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0, pinned
+        with:
+          script: |
+            // This script is sourced from protected default-branch bytes by
+            // pull_request_target. PR contents are read only as untrusted API
+            // metadata; never interpolate filenames into shell or run PR code.
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+            const event = context.payload.pull_request;
+            if (owner !== "gyldlab" || repo !== "keld" || !event) {
+              throw new Error("CI provenance requires the expected base repository and PR event");
+            }
+            if (!Number.isSafeInteger(event.number) || event.number < 1) {
+              throw new Error("CI provenance requires a valid pull request number");
+            }
+            const fetchPR = async () =>
+              (await github.rest.pulls.get({ owner, repo, pull_number: event.number })).data;
+            const verifyPR = (pr) => {
+              if (!pr || pr.state !== "open" || pr.number !== event.number) {
+                throw new Error("CI provenance refuses absent, closed or changed pull requests");
+              }
+              if (pr.base?.ref !== "main" || pr.base?.repo?.full_name !== "gyldlab/keld") {
+                throw new Error("CI provenance accepts only gyldlab/keld main as the base");
+              }
+              if (pr.head?.sha !== event.head?.sha || pr.base?.sha !== event.base?.sha) {
+                throw new Error("CI provenance refuses stale pull-request head/base event data");
+              }
+              if (!Number.isSafeInteger(pr.changed_files) ||
+                  pr.changed_files < 0 || pr.changed_files >= 3000) {
+                throw new Error("CI provenance cannot safely enumerate all changed files");
+              }
+              return pr;
+            };
+            const before = verifyPR(await fetchPR());
+            const files = await github.paginate(github.rest.pulls.listFiles, {
+              owner, repo, pull_number: event.number, per_page: 100,
+            });
+            if (!Array.isArray(files) || files.length !== before.changed_files ||
+                files.length >= 3000) {
+              throw new Error("CI provenance refuses an incomplete or truncated file list");
+            }
+            // The PR itself can mint the old 'CI required' status. Until a
+            // trusted job is made required, it must not be allowed to change
+            // workflow definitions, the router, or executable CI policy.
+            const protectedPath = (path) => {
+              if (typeof path !== "string" || !path || path.includes("\\") ||
+                  path.includes("\u0000")) {
+                throw new Error("CI provenance refuses malformed Git paths");
+              }
+              const p = path.toLowerCase();
+              // Strict first rollout: scripts and config files executed by
+              // CI are also authority, not merely the workflow YAML itself.
+              // Require a separate trusted-base review for their changes.
+              return p.startsWith(".github/") ||
+                p.startsWith(".cargo/") ||
+                p.startsWith(".config/") ||
+                p.startsWith("tools/") ||
+                p === "justfile" ||
+                p === "rust-toolchain.toml" ||
+                p === "deny.toml" ||
+                p.endsWith("/deny.toml") ||
+                p.startsWith(".gitleaks") ||
+                p === "clippy.toml" ||
+                p === ".clippy.toml";
+            };
+            const protectedChanges = [];
+            for (const file of files) {
+              if (!file || !["added", "removed", "modified", "renamed", "changed", "copied"].includes(file.status)) {
+                throw new Error("CI provenance refuses unknown changed-file status");
+              }
+              if (file.status === "renamed" && !file.previous_filename) {
+                throw new Error("CI provenance refuses a rename with missing source path");
+              }
+              if (protectedPath(file.filename) ||
+                  (file.previous_filename && protectedPath(file.previous_filename))) {
+                protectedChanges.push(file.filename);
+              }
+            }
+            verifyPR(await fetchPR()); // Head/base must not change during pagination.
+            if (protectedChanges.length) {
+              throw new Error("CI provenance: changes to protected CI authority require a separately reviewed trusted-base policy update: " +
+                protectedChanges.slice(0, 12).join(", "));
+            }
+            core.info("CI provenance: unchanged workflow/router/CI authority; " +
+              files.length + " PR files inspected at " + before.head.sha);
