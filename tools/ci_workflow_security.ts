@@ -1000,7 +1000,7 @@ const reviewedWorkflowActionRefs = new Set([
   "actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9",
   "actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9",
   "oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6",
-  "taiki-e/install-action@8cca0918f8471c33515202b73f56ab27f2bed283",
+  "taiki-e/install-action@1e29709c0ec63babbe8f266397a465f29a825f91",
   `github/codeql-action/init@${approvedCodeqlActionSha}`,
   `github/codeql-action/analyze@${approvedCodeqlActionSha}`,
   "actions/dependency-review-action@a1d282b36b6f3519aa1f3fc636f609c47dddb294",
@@ -1112,9 +1112,9 @@ export function checkWorkflowSecurity(source: string): void {
         // These are the only two reviewed invocations and tool selections.
         const tool =
           jobName === "check"
-            ? "nextest,just@1.58.0"
+            ? "nextest@0.9.149,just@1.58.0"
             : jobName === "windows-media"
-              ? "nextest"
+              ? "nextest@0.9.149"
               : undefined;
         if (!tool)
           fail(`${label} taiki installer is not approved in jobs.${jobName}.`);
@@ -1125,7 +1125,7 @@ export function checkWorkflowSecurity(source: string): void {
         );
         inputsMatch(
           mapping(step.with, `${label}.with`),
-          { tool },
+          { tool, fallback: "none" },
           `${label} reviewed taiki installer inputs`,
         );
       }
@@ -1160,6 +1160,84 @@ export function checkWorkflowSecurity(source: string): void {
         );
       }
     }
+    // Installed release must match the frozen source manifest on every OS.
+    // A step skipped, swallowed, moved or redirected cannot earn required-green.
+    const verifierIndices = steps.flatMap((step, index) =>
+      step.name === "Verify cargo-nextest 0.9.149" ? [index] : [],
+    );
+    if (
+      verifierIndices.length !== 1 ||
+      verifierIndices[0] !== installers[0]! + 1
+    ) {
+      fail(
+        `jobs.${jobName} must verify the pinned Nextest version immediately after installation.`,
+      );
+    }
+    const verifier = steps[verifierIndices[0]!]!;
+    exactKeys(
+      verifier,
+      ["name", "shell", "run"],
+      `jobs.${jobName} reviewed Nextest version verification step`,
+    );
+    if (
+      verifier.shell !== "bash" ||
+      verifier.run !==
+        "cargo nextest --version | grep -E '^cargo-nextest 0[.]9[.]149 [(]'"
+    ) {
+      fail(
+        `jobs.${jobName} must execute exact fail-closed Nextest version assertion.`,
+      );
+    }
+  }
+  // The required native checker must execute its actual Clippy/Nextest work.
+  // A skipped consumer, shell-init injection or altered run command could
+  // otherwise produce a green job without executing any native test.
+  const nativeCheck = mapping(jobs.check, "jobs.check");
+  inputsMatch(
+    mapping(nativeCheck.env, "jobs.check.env"),
+    {
+      KELD_WEBKITGTK_PACKAGES:
+        "libgtk-3-dev libwebkit2gtk-4.1-dev libjavascriptcoregtk-4.1-dev libsoup-3.0-dev pkg-config build-essential xvfb xauth",
+    },
+    "jobs.check reviewed native job environment",
+  );
+  const nativeSteps = stepsByJob.get("check")!;
+  for (const [name, script] of [
+    [
+      "clippy (warnings deny)",
+      'packages="$KELD_CI_PACKAGES"\nif [ "${{ matrix.os }}" = ubuntu-latest ]; then\n  packages="$KELD_CI_UBUNTU_PACKAGES"\nfi\nfor package in $packages; do\n  cargo clippy -p "$package" --all-targets -- -D warnings\ndone\n',
+    ],
+    [
+      "test",
+      'packages="$KELD_CI_PACKAGES"\nif [ "${{ matrix.os }}" = ubuntu-latest ]; then\n  packages="$KELD_CI_UBUNTU_PACKAGES"\nfi\nfor package in $packages; do\n  if [ "${{ matrix.os }}" = ubuntu-latest ] && [ "$package" = keld-host ]; then\n    xvfb-run -a cargo nextest run -p "$package" --profile ci --no-tests=pass\n  else\n    cargo nextest run -p "$package" --profile ci --no-tests=pass\n  fi\ndone\n',
+    ],
+  ] as const) {
+    const selected = namedStep(nativeSteps, name);
+    exactKeys(
+      selected,
+      ["name", "shell", "env", "run"],
+      `jobs.check ${name} unskippable gate`,
+    );
+    if (selected.shell !== "bash" || selected.run !== script) {
+      fail(
+        `jobs.check ${name} must execute the exact reviewed native commands.`,
+      );
+    }
+    inputsMatch(
+      mapping(selected.env, `jobs.check ${name}.env`),
+      {
+        KELD_CI_PACKAGES: "${{ needs.changes.outputs.packages }}",
+        KELD_CI_UBUNTU_PACKAGES: "${{ needs.changes.outputs.ubuntu_packages }}",
+      },
+      `jobs.check ${name} reviewed native environment`,
+    );
+  }
+  if (
+    Object.hasOwn(mapping(jobs["windows-media"], "jobs.windows-media"), "env")
+  ) {
+    fail(
+      "jobs.windows-media must not accept a job environment that can shadow its native tests.",
+    );
   }
   // GitHub treats a skipped step in an otherwise successful job as SUCCESS.
   // CI required sees only the job result, so the selected media oracle must

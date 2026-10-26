@@ -1257,6 +1257,92 @@ test("Windows media acceptance must execute without step-level skip or failure m
   }
 });
 
+test("both Nextest installers pin 0.9.149 and reject unpinned or downgraded releases", () => {
+  for (const [jobName, reviewed, unpinned, previous] of [
+    [
+      "check",
+      "nextest@0.9.149,just@1.58.0",
+      "nextest,just@1.58.0",
+      "nextest@0.9.148,just@1.58.0",
+    ],
+    ["windows-media", "nextest@0.9.149", "nextest", "nextest@0.9.148"],
+  ] as const) {
+    const clean = fixture();
+    const installer = clean.jobs[jobName]!.steps.find((candidate) =>
+      String(candidate.uses ?? "").startsWith("taiki-e/install-action@"),
+    );
+    expect(installer).toBeDefined();
+    expect(installer!.uses).toBe(
+      "taiki-e/install-action@1e29709c0ec63babbe8f266397a465f29a825f91",
+    );
+    expect((installer!.with as Step).tool).toBe(reviewed);
+    expect((installer!.with as Step).fallback).toBe("none");
+    expect(() => check(clean)).not.toThrow();
+
+    // v2.87.29 cannot resolve 0.9.149 from its embedded manifest.
+    const oldAction = fixture();
+    const staleInstaller = oldAction.jobs[jobName]!.steps.find((candidate) =>
+      String(candidate.uses ?? "").startsWith("taiki-e/install-action@"),
+    )!;
+    staleInstaller.uses =
+      "taiki-e/install-action@8cca0918f8471c33515202b73f56ab27f2bed283";
+    expect(() => check(oldAction)).toThrow("reviewed immutable action refs");
+
+    for (const rejected of [
+      unpinned,
+      previous,
+      jobName === "check" ? "nextest@9999.0.0,just@1.58.0" : "nextest@9999.0.0",
+    ]) {
+      const altered = fixture();
+      const downgraded = altered.jobs[jobName]!.steps.find((candidate) =>
+        String(candidate.uses ?? "").startsWith("taiki-e/install-action@"),
+      )!;
+      (downgraded.with as Step).tool = rejected;
+      expect(() => check(altered), `${jobName}: ${rejected}`).toThrow(
+        "reviewed taiki installer inputs",
+      );
+    }
+  }
+});
+
+test("Nextest version verifier is mandatory on both native runner jobs", () => {
+  const expected =
+    "cargo nextest --version | grep -E '^cargo-nextest 0[.]9[.]149 [(]'";
+  for (const jobName of ["check", "windows-media"] as const) {
+    const clean = fixture();
+    const steps = clean.jobs[jobName]!.steps;
+    const installer = steps.findIndex((step) =>
+      String(step.uses ?? "").startsWith("taiki-e/install-action@"),
+    );
+    const verifier = steps[installer + 1];
+    expect(verifier?.name).toBe("Verify cargo-nextest 0.9.149");
+    expect(verifier?.shell).toBe("bash");
+    expect(verifier?.run).toBe(expected);
+    expect(() => check(clean)).not.toThrow();
+    for (const mutation of [
+      "removed",
+      "changed",
+      "skipped",
+      "ignored",
+      "moved",
+    ] as const) {
+      const altered = fixture();
+      const mutated = altered.jobs[jobName]!.steps;
+      const index = mutated.findIndex(
+        (step) => step.name === "Verify cargo-nextest 0.9.149",
+      );
+      if (mutation === "removed") mutated.splice(index, 1);
+      if (mutation === "changed")
+        mutated[index]!.run = "echo cargo-nextest 0.9.149";
+      if (mutation === "skipped") mutated[index]!.if = false;
+      if (mutation === "ignored") mutated[index]!["continue-on-error"] = true;
+      if (mutation === "moved")
+        mutated.splice(index + 2, 0, ...mutated.splice(index, 1));
+      expect(() => check(altered), `${jobName}/${mutation}`).toThrow();
+    }
+  }
+});
+
 test("both Nextest installers refuse unreviewed tools and integrity overrides", () => {
   for (const jobName of ["check", "windows-media"] as const) {
     const clean = fixture();
@@ -1270,6 +1356,12 @@ test("both Nextest installers refuse unreviewed tools and integrity overrides", 
         "checksum disabled",
         (inputs: Record<string, unknown>) => {
           inputs.checksum = false;
+        },
+      ],
+      [
+        "fallback to cargo-binstall",
+        (inputs: Record<string, unknown>) => {
+          inputs.fallback = "cargo-binstall";
         },
       ],
       [
@@ -1294,6 +1386,91 @@ test("both Nextest installers refuse unreviewed tools and integrity overrides", 
         "reviewed taiki installer inputs",
       );
     }
+  }
+});
+
+test("required native main gates cannot skip, swallow failures or inherit unsafe environment", () => {
+  const mutations: Array<[string, (workflow: Fixture) => void]> = [
+    [
+      "native tests skipped",
+      (f) => {
+        step(f, "check", "test").if = false;
+      },
+    ],
+    [
+      "Clippy skipped",
+      (f) => {
+        step(f, "check", "clippy (warnings deny)").if = false;
+      },
+    ],
+    [
+      "native test ignores failure",
+      (f) => {
+        step(f, "check", "test")["continue-on-error"] = true;
+      },
+    ],
+    [
+      "native test shell overridden",
+      (f) => {
+        step(f, "check", "test").shell = "bash -c true {0}";
+      },
+    ],
+    [
+      "native test script swallowed",
+      (f) => {
+        step(f, "check", "test").run =
+          "echo cargo nextest run --profile ci --no-tests=pass";
+      },
+    ],
+    [
+      "Clippy script swallowed",
+      (f) => {
+        step(f, "check", "clippy (warnings deny)").run =
+          "echo cargo clippy -- -D warnings";
+      },
+    ],
+    [
+      "native step BASH_ENV",
+      (f) => {
+        (step(f, "check", "test").env as Step).BASH_ENV = "./untrusted.sh";
+      },
+    ],
+    [
+      "Clippy step BASH_ENV",
+      (f) => {
+        (step(f, "check", "clippy (warnings deny)").env as Step).BASH_ENV =
+          "./untrusted.sh";
+      },
+    ],
+    [
+      "native step PATH",
+      (f) => {
+        (step(f, "check", "test").env as Step).PATH = "/tmp/untrusted";
+      },
+    ],
+    [
+      "native job BASH_ENV",
+      (f) => {
+        (f.jobs.check!.env as Step).BASH_ENV = "./untrusted.sh";
+      },
+    ],
+    [
+      "native job PATH",
+      (f) => {
+        (f.jobs.check!.env as Step).PATH = "/tmp/untrusted";
+      },
+    ],
+    [
+      "media job PATH",
+      (f) => {
+        f.jobs["windows-media"]!.env = { PATH: "C:\\untrusted" };
+      },
+    ],
+  ];
+  for (const [label, mutate] of mutations) {
+    const f = fixture();
+    mutate(f);
+    expect(() => check(f), label).toThrow();
   }
 });
 
