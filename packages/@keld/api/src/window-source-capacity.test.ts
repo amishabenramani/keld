@@ -106,3 +106,60 @@ test("Source census is not an arbitrary limit on the Host-owned id value", () =>
   expect(source.all()).toHaveLength(1);
   expect(source.get(window)?.host_destroyed).toBe(true);
 });
+
+test("retired sparse IDs reject all later facts and either Created incarnation", () => {
+  for (const id of [7, 0xffff_ffff]) {
+    const window = { id, incarnation: 900n };
+    const later: WindowEvent[] = [
+      { variant: "Created", window, state, pending_close: null },
+      {
+        variant: "Created",
+        window: { id, incarnation: 901n },
+        state,
+        pending_close: null,
+      },
+      { variant: "Bounds", window, bounds: state.bounds },
+      { variant: "Focus", window, focused: true },
+      { variant: "Maximized", window, maximized: true },
+      { variant: "FullScreen", window, full_screen: true },
+      { variant: "CloseRequested", window, close_seq: 1n },
+      { variant: "Destroyed", window },
+    ];
+    for (const invalid of later) {
+      const source = new WindowSource(() => {});
+      source.apply({ variant: "Created", window, state, pending_close: null });
+      const terminal = source.decode(
+        encodeWindowEvent({ variant: "Destroyed", window }),
+      );
+      source.apply(terminal);
+      source.dispatch(terminal);
+      expect(source.get(window)).toBeUndefined();
+      expect(() =>
+        source.apply(source.decode(encodeWindowEvent(invalid))),
+      ).toThrow("KELD-IPC-005");
+      expect(() => source.all()).toThrow("KELD-IPC-005");
+    }
+  }
+});
+
+test("retirement keeps cumulative1024 admission and remaining snapshots in host-id order", () => {
+  const source = new WindowSource(() => {});
+  for (let id = 1024; id >= 1; id -= 1) {
+    const window = { id, incarnation: BigInt(id) };
+    source.apply({ variant: "Created", window, state, pending_close: null });
+    if (id === 3 || id === 1) continue;
+    const terminal: WindowEvent = { variant: "Destroyed", window };
+    source.apply(terminal);
+    source.dispatch(terminal);
+  }
+  expect(source.all().map((row) => row.window.id)).toEqual([1, 3]);
+  expect(Object.isFrozen(source.all())).toBe(true);
+  expect(() =>
+    source.apply({
+      variant: "Created",
+      window: { id: 1025, incarnation: 1025n },
+      state,
+      pending_close: null,
+    }),
+  ).toThrow("KELD-IPC-005");
+});
