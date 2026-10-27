@@ -166,6 +166,8 @@ jobs:
 
   fmt:
     name: rustfmt
+    # #1061 E3/E4 experiment-only control: preserve the cache-free formatter
+    # source and all original required gates, on the exact #1075 product tree.
     runs-on: ubuntu-latest
     timeout-minutes: 10
     needs: changes
