@@ -45,18 +45,30 @@ jobs:
               if (pr.head?.sha !== event.head?.sha || pr.base?.sha !== event.base?.sha) {
                 throw new Error("CI provenance refuses stale pull-request head/base event data");
               }
+              // GitHub's immutable Compare Commits API exposes at most 300
+              // changed files on its first page. Refuse the boundary itself
+              // because 300 entries cannot prove that more were not truncated.
               if (!Number.isSafeInteger(pr.changed_files) ||
-                  pr.changed_files < 0 || pr.changed_files >= 3000) {
+                  pr.changed_files < 0 || pr.changed_files >= 300) {
                 throw new Error("CI provenance cannot safely enumerate all changed files");
               }
               return pr;
             };
             const before = verifyPR(await fetchPR());
-            const files = await github.paginate(github.rest.pulls.listFiles, {
-              owner, repo, pull_number: event.number, per_page: 100,
-            });
+            // PR-number listFiles is mutable, allowing an A -> B -> A ABA
+            // force-push to hide a protected file in the middle of enumeration.
+            // Compare the event's immutable base and head commit SHAs instead.
+            // Only the first page of the comparison includes a file list.
+            const comparison = (await github.rest.repos.compareCommits({
+              owner, repo, base: before.base.sha, head: before.head.sha,
+              page: 1, per_page: 100,
+            })).data;
+            const files = comparison?.files;
+            if (comparison?.base_commit?.sha !== before.base.sha) {
+              throw new Error("CI provenance refuses a comparison for the wrong immutable base");
+            }
             if (!Array.isArray(files) || files.length !== before.changed_files ||
-                files.length >= 3000) {
+                files.length >= 300) {
               throw new Error("CI provenance refuses an incomplete or truncated file list");
             }
             // The PR itself can mint the old 'CI required' status. Until a
@@ -104,7 +116,7 @@ jobs:
                 protectedChanges.push(file.filename);
               }
             }
-            verifyPR(await fetchPR()); // Head/base must not change during pagination.
+            verifyPR(await fetchPR()); // A new head must trigger its own event.
             if (protectedChanges.length) {
               throw new Error("CI provenance: changes to protected CI authority require a separately reviewed trusted-base policy update: " +
                 protectedChanges.slice(0, 12).join(", "));

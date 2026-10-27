@@ -34,6 +34,9 @@ function fixture(
     changedOnSecondFetch?: boolean;
     apiFailure?: boolean;
     badEventNumber?: boolean;
+    mutablePrFileList?: ChangedFile[];
+    comparisonFiles?: ChangedFile[];
+    comparisonBase?: string;
   } = {},
 ) {
   const expectedHead = overrides.head ?? "head-commit-1";
@@ -51,6 +54,7 @@ function fixture(
   };
   let reads = 0;
   let paginationCalls = 0;
+  let comparisonCalls = 0;
   const github = {
     rest: {
       pulls: {
@@ -66,6 +70,28 @@ function fixture(
           throw Error("GitHub paginate must be used");
         },
       },
+      repos: {
+        compareCommits: async (args: Record<string, unknown>) => {
+          comparisonCalls += 1;
+          if (overrides.apiFailure) throw Error("GitHub API unavailable");
+          expect(args).toEqual({
+            owner: "gyldlab",
+            repo: "keld",
+            base: current.base.sha,
+            head: current.head.sha,
+            page: 1,
+            per_page: 100,
+          });
+          return {
+            data: {
+              base_commit: {
+                sha: overrides.comparisonBase ?? current.base.sha,
+              },
+              files: overrides.comparisonFiles ?? files,
+            },
+          };
+        },
+      },
     },
     paginate: async (_unused: unknown, args: Record<string, unknown>) => {
       paginationCalls += 1;
@@ -76,7 +102,7 @@ function fixture(
         pull_number: 123,
         per_page: 100,
       });
-      return files;
+      return overrides.mutablePrFileList ?? files;
     },
   };
   const context = {
@@ -95,6 +121,7 @@ function fixture(
     run: () => evaluate(github, context, core),
     getReads: () => reads,
     getPages: () => paginationCalls,
+    getComparisons: () => comparisonCalls,
     messages,
   };
 }
@@ -131,7 +158,8 @@ test("benign documentation and non-authority lockfile changes are admitted", asy
   ]);
   await expect(f.run()).resolves.toBeUndefined();
   expect(f.getReads()).toBe(2);
-  expect(f.getPages()).toBe(1);
+  expect(f.getPages()).toBe(0);
+  expect(f.getComparisons()).toBe(1);
   expect(f.messages[0]).toContain("2 PR files inspected");
 });
 
@@ -196,6 +224,59 @@ test("renaming protected CI workflow to innocuous docs path is refused", async (
   await expect(f.run()).rejects.toThrow("protected CI authority");
 });
 
+test("A-to-B-to-A mutable PR-file listing cannot hide protected commit A", async () => {
+  const f = fixture(
+    [{ filename: ".github/workflows/ci.yml", status: "modified" }],
+    {
+      // Before and after PR reads both report A. Between them, the mutable
+      // list endpoint serves B with an equal-sized innocuous change.
+      mutablePrFileList: [{ filename: "docs/ok.md", status: "modified" }],
+    },
+  );
+  await expect(f.run()).rejects.toThrow("protected CI authority");
+  expect(f.getPages()).toBe(0);
+  expect(f.getComparisons()).toBe(1);
+});
+
+test("immutable comparison checks correct commit base and complete file coverage", async () => {
+  const benignFile = [{ filename: "docs/ok.md", status: "modified" }];
+  // A response for a different base must be refused even if its file count matches.
+  await expect(
+    fixture(benignFile, {
+      comparisonBase: "wrong-base-sha",
+    }).run(),
+  ).rejects.toThrow("comparison for the wrong immutable base");
+  // The immutable comparison, not a mutable PR list, is the authority: a
+  // mismatched/truncated immutable response cannot produce admitted evidence.
+  await expect(
+    fixture(benignFile, {
+      comparisonFiles: [],
+    }).run(),
+  ).rejects.toThrow("incomplete or truncated file list");
+});
+
+test("immutable comparison returns all 101 files on first commit-list page", async () => {
+  const files = Array.from({ length: 101 }, (_, i) => ({
+    filename: `docs/benign-${i}.md`,
+    status: "modified",
+  }));
+  const f = fixture(files);
+  await expect(f.run()).resolves.toBeUndefined();
+  expect(f.getComparisons()).toBe(1);
+  expect(f.getPages()).toBe(0);
+});
+
+test("immutable compare must fail closed at GitHub's 300-file response limit", async () => {
+  const files = Array.from({ length: 300 }, (_, i) => ({
+    filename: `docs/file${i}.md`,
+    status: "modified",
+  }));
+  await expect(fixture(files).run()).rejects.toThrow(
+    "cannot safely enumerate all changed files",
+  );
+  await expect(fixture(files.slice(0, 299)).run()).resolves.toBeUndefined();
+});
+
 test("renames missing original path and unknown statuses fail closed", async () => {
   await expect(
     fixture([{ filename: "x", status: "renamed" }]).run(),
@@ -234,7 +315,7 @@ test("mismatched or changing head/base, missing files, and wrong base fail close
   );
 });
 
-test("GitHub API problems, invalid PR/repo and pagination cap refuse admission", async () => {
+test("GitHub API problems, invalid PR/repo and comparison cap refuse admission", async () => {
   await expect(fixture([], { apiFailure: true }).run()).rejects.toThrow(
     "GitHub API unavailable",
   );
