@@ -1,4 +1,5 @@
 # B3 controlled fork-main push positive receipt; no CI behavior changes.
+# Fork Actions explicitly enabled via official GH CLI before this event.
 # Keld CI — gates promised in AGENTS.md / docs/agents/workflow.md:
 #   cargo fmt --check · clippy (warnings deny) · cargo nextest · rustdoc
 #   + Mermaid/docs contracts, MSRV, cargo-deny, gitleaks, and
