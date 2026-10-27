@@ -642,6 +642,34 @@ test("change router classifier must execute its exact authoritative script", () 
   }
 });
 
+test("router executable steps cannot rewrite the classifier script before it runs", () => {
+  for (const mutate of [
+    (f: Fixture) => {
+      const prior = step(f, "changes", "Source budget tool tests");
+      prior.run =
+        String(prior.run) + '\nprintf "rust=false\\n" > tools/ci_changes.sh\n';
+    },
+    (f: Fixture) => {
+      f.jobs.changes!.steps.splice(6, 0, {
+        name: "Prepare router",
+        run: 'echo "rust=false" > tools/ci_changes.sh',
+      });
+    },
+    (f: Fixture) => {
+      (f.jobs.changes as Step)["if"] = "false";
+    },
+    (f: Fixture) => {
+      (f.jobs.changes as Step)["runs-on"] = "windows-latest";
+    },
+  ]) {
+    const f = fixture();
+    mutate(f);
+    expect(() => check(f)).toThrow(
+      "change router job must preserve its reviewed executable steps and context",
+    );
+  }
+});
+
 test("CI rejects unreviewed external actions, including mutable Docker image tags", () => {
   const unreviewed = [
     "docker://alpine:latest",

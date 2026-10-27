@@ -1037,6 +1037,9 @@ export function checkWorkflowSecurity(source: string): void {
   refuseInheritedCustomShell(workflow, "workflow");
   const jobs = mapping(workflow.jobs, "workflow.jobs");
   if (Object.keys(jobs).length === 0) fail("workflow.jobs must not be empty.");
+  const changesJob = mapping(jobs.changes, "jobs.changes");
+  const changesContract =
+    "change router job must preserve its reviewed executable steps and context";
   // jobs.changes publishes the router's authority to select native OSes,
   // packages, scanners, and required lanes. Freezing consumers is insufficient
   // if a PR can replace the producer bindings with false or Windows-only.
@@ -1064,10 +1067,7 @@ export function checkWorkflowSecurity(source: string): void {
     "doctest_packages",
   ];
   inputsMatch(
-    mapping(
-      mapping(jobs.changes, "jobs.changes").outputs,
-      "jobs.changes.outputs",
-    ),
+    mapping(changesJob.outputs, "jobs.changes.outputs"),
     Object.fromEntries(
       routerOutputNames.map((name) => [
         name,
@@ -1634,6 +1634,31 @@ export function checkWorkflowSecurity(source: string): void {
         );
       }
     }
+  }
+  // This broad safety net runs AFTER the narrower, previously reviewed
+  // executable-step checks. That keeps their deterministic negative-control
+  // diagnostics while also rejecting an otherwise permitted earlier step
+  // that would overwrite the router before its exact classifier invocation.
+  exactKeys(
+    changesJob,
+    ["name", "runs-on", "timeout-minutes", "outputs", "steps"],
+    changesContract,
+  );
+  if (
+    changesJob.name !== "change router" ||
+    changesJob["runs-on"] !== "ubuntu-latest" ||
+    scalar(changesJob["timeout-minutes"]) !== "10"
+  ) {
+    fail(changesContract);
+  }
+  const routerStepsSha256 =
+    "38cd11beea7e6a508709d8263e0ce6d8c95c0da92fd623292ca490acd8ea3cbe";
+  if (
+    createHash("sha256")
+      .update(JSON.stringify(classifierSteps))
+      .digest("hex") !== routerStepsSha256
+  ) {
+    fail(changesContract);
   }
 }
 
