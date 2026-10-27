@@ -1,0 +1,87 @@
+/** Real LifecycleLink and WindowSource; only the WorkerLink socket seam is controlled. */
+import assert from "node:assert/strict";
+import { mock } from "bun:test";
+import * as transport from "../../kipc/src/transport.ts";
+import { encodeWindowEvent } from "./window-codec.ts";
+
+const mode = process.argv[2];
+const appliers = new Map<number, (payload: Uint8Array) => void>();
+const listeners = new Map<number, (payload: Uint8Array) => void>();
+let ended: ((error: transport.KeldCallError) => void) | undefined;
+const terminal = transport.linkError(
+  "KELD-IPC-022",
+  "controlled terminal after drain",
+);
+const refusal = transport.linkError("KELD-IPC-003", "controlled Quit refusal");
+let deadNotifications = 0;
+let closeCalls = 0;
+const worker = {
+  setStateApplier(channel: number, callback: (payload: Uint8Array) => void) {
+    appliers.set(channel, callback);
+  },
+  onEvent(channel: number, callback: (payload: Uint8Array) => void) {
+    listeners.set(channel, callback);
+  },
+  setCallHandler() {},
+  onEnd(callback: (error: transport.KeldCallError) => void) {
+    ended = callback;
+  },
+  async call(_channel: number, payload: Uint8Array) {
+    if (payload[0] === 1) return Uint8Array.of(1);
+    if (mode === "refusal" || mode === "timeout") throw refusal;
+    return Uint8Array.of(0);
+  },
+  close() {
+    closeCalls += 1;
+    // Actual WorkerLink emits this only after its retained records drain.
+    ended?.(terminal);
+  },
+};
+mock.module("../../kipc/src/transport.ts", () => ({
+  ...transport,
+  WorkerLink: { open: async () => worker },
+}));
+process.env.KELD_NATIVE_WINDOW_FACADE = "1";
+const { LifecycleLink } = await import("./link.ts");
+const session = await LifecycleLink.connect("controlled-link", {
+  onReady() {},
+  onLastWindowClosed() {},
+  onLinkDead() {
+    deadNotifications += 1;
+  },
+});
+const source = session.windowSource;
+assert.ok(source);
+const ref = { id: 1, incarnation: 1n };
+const payload = encodeWindowEvent({
+  variant: "Created",
+  window: ref,
+  state: {
+    bounds: { x: 0, y: 0, width: 800, height: 600 },
+    focused: false,
+    maximized: false,
+    full_screen: false,
+  },
+  pending_close: null,
+});
+appliers.get(transport.WINDOW_CHANNEL)?.(payload);
+listeners.get(transport.WINDOW_CHANNEL)?.(payload);
+assert.equal(source.all().length, 1);
+if (mode === "success") await session.quit();
+else await assert.rejects(session.quit(), (error) => error === refusal);
+assert.equal(closeCalls, 1);
+assert.equal(
+  deadNotifications,
+  0,
+  "local Quit does not notify unexpected death",
+);
+for (const read of [() => source.all(), () => source.get(ref)]) {
+  assert.throws(
+    read,
+    (error: unknown) =>
+      error instanceof Error && error.message === terminal.message,
+  );
+}
+ended?.(terminal);
+assert.throws(() => source.all());
+console.log(`PASS ${mode}`);
