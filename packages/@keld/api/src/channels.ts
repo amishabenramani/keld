@@ -37,9 +37,9 @@ function apiError(detail: string): Error {
 
 /**
  * No Echo handler was registered when a host CALL arrived (GH-1095 §4.2,
- * S11). `dispatchApplicationCall` throws it before it decodes the request or
- * runs any app code, so `resolveEchoCall` answers it as `KELD-API-002`. Only
- * this stage throws it; every other failure stays `KELD-API-001`.
+ * S11). `dispatchApplicationCall` throws it before decoding the request or
+ * running app code. `resolveEchoCall` checks registration before invoking the
+ * dispatcher; thrown errors cannot prove that no app code ran.
  */
 export class NoApplicationHandlerError extends Error {
   constructor() {
@@ -73,6 +73,11 @@ export const echoChannel: AppChannel<EchoRequest, EchoResponse> = Object.freeze(
 });
 
 let echoHandler: AppChannelHandler<EchoRequest, EchoResponse> | undefined;
+
+/** An S11 absence proof, sampled synchronously before the dispatcher runs. */
+export function noApplicationHandlerRegistered(channel: number): boolean {
+  return channel === ECHO_CHANNEL && echoHandler === undefined;
+}
 
 export const channels: Channels = {
   handle<Request, Response>(

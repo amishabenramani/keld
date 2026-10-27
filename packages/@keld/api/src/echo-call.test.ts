@@ -9,6 +9,7 @@ import {
   encodeVarint,
 } from "../../kipc/src/transport.ts";
 import {
+  NoApplicationHandlerError,
   channels,
   dispatchApplicationCall,
   echoChannel,
@@ -145,6 +146,21 @@ describe("Echo CALL answers by stage (GH-1095)", () => {
     });
     try {
       expect(errCode(await answer())).toBe("KELD-API-001");
+      expect(census).toEqual({ entered: 1, committed: 1 });
+    } finally {
+      unsubscribe();
+    }
+  });
+
+  test("S13 exported no-handler error after a committed effect is KELD-API-001", async () => {
+    reset();
+    const unsubscribe = register(() => {
+      census.committed += 1;
+      throw new NoApplicationHandlerError();
+    });
+    try {
+      const reply = await answer();
+      expect(errCode(reply)).toBe("KELD-API-001");
       expect(census).toEqual({ entered: 1, committed: 1 });
     } finally {
       unsubscribe();

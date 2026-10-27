@@ -4,7 +4,7 @@ import {
   encodeCallError,
   type WorkerCallReply,
 } from "../../kipc/src/transport.ts";
-import { NoApplicationHandlerError } from "./channels.ts";
+import { dispatchApplicationCall, noApplicationHandlerRegistered } from "./channels.ts";
 
 export type EchoCallHandler =
   (channel: number, payload: Uint8Array) => Promise<Uint8Array>;
@@ -23,6 +23,17 @@ export async function resolveEchoCall(
   payload: Uint8Array,
   handler: EchoCallHandler | undefined,
 ): Promise<WorkerCallReply> {
+  // Only the canonical dispatcher can prove registry absence before invocation.
+  // After calling any handler, even a NoApplicationHandlerError is outcome unknown.
+  if (handler === dispatchApplicationCall && noApplicationHandlerRegistered(channel)) {
+    return {
+      kind: FrameKind.Err,
+      payload: encodeCallError(
+        "KELD-API-002",
+        "KELD-API-002: application channel has no registered handler; no application code ran",
+      ),
+    };
+  }
   try {
     if (!handler) throw new Error("Echo handler is not registered");
     const reply = await handler(channel, payload);
@@ -30,16 +41,7 @@ export async function resolveEchoCall(
       throw new Error("Echo reply exceeds MAX_FRAME_LEN");
     }
     return { kind: FrameKind.Reply, payload: reply };
-  } catch (error) {
-    if (error instanceof NoApplicationHandlerError) {
-      return {
-        kind: FrameKind.Err,
-        payload: encodeCallError(
-          "KELD-API-002",
-          "KELD-API-002: application channel has no registered handler; no application code ran",
-        ),
-      };
-    }
+  } catch {
     return {
       kind: FrameKind.Err,
       payload: encodeCallError(
