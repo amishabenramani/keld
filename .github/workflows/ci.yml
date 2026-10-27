@@ -293,6 +293,7 @@ jobs:
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
           bun-version: "1.4.4"
+          no-cache: ${{ github.event_name != 'push' || github.ref != 'refs/heads/main' }}
       - name: clippy (warnings deny)
         shell: bash
         env:
@@ -656,6 +657,7 @@ jobs:
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
           bun-version: "1.4.4"
+          no-cache: ${{ github.event_name != 'push' || github.ref != 'refs/heads/main' }}
       - name: frozen install, typecheck, and bun test
         shell: bash
         env:
@@ -890,6 +892,7 @@ jobs:
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
           bun-version: "1.4.4"
+          no-cache: ${{ github.event_name != 'push' || github.ref != 'refs/heads/main' }}
       - name: Native JavaScript formatting
         run: |
           bun packages/@keld/kipc/scripts/echo-codegen.ts check

@@ -398,6 +398,47 @@ function checkB3RustCacheWritePolicy(stepsByJob: Map<string, Mapping[]>): void {
   }
 }
 
+/** B3: the pinned setup-bun post hook must not save on PR or untrusted pushes. */
+function checkB3BunCachePolicy(stepsByJob: Map<string, Mapping[]>): void {
+  const bunOwners = new Set(["check", "bun-test", "hygiene"]);
+  const noCacheForUntrustedEvents =
+    "${{ github.event_name != 'push' || github.ref != 'refs/heads/main' }}";
+  for (const [jobName, steps] of stepsByJob) {
+    const bunActions = steps.filter(
+      (step) =>
+        typeof step.uses === "string" &&
+        actionName(step.uses) === "oven-sh/setup-bun",
+    );
+    if (!bunOwners.has(jobName) && bunActions.length > 0) {
+      fail(`B3 Bun cache action not approved in job ${jobName}.`);
+    }
+    if (!bunOwners.has(jobName)) continue;
+    if (bunActions.length !== 1) {
+      fail(`B3 Bun cache setup must appear exactly once in ${jobName}.`);
+    }
+    const bunSetup = bunActions[0]!;
+    exactKeys(
+      bunSetup,
+      ["uses", "with"],
+      "B3 Bun cache must be disabled outside protected-main pushes",
+    );
+    if (
+      bunSetup.uses !==
+      "oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6"
+    ) {
+      fail("B3 Bun cache action must use the reviewed immutable SHA.");
+    }
+    inputsMatch(
+      mapping(bunSetup.with, `jobs.${jobName} Bun setup inputs`),
+      {
+        "bun-version": "1.4.4",
+        "no-cache": noCacheForUntrustedEvents,
+      },
+      "B3 Bun cache must be disabled outside protected-main pushes",
+    );
+  }
+}
+
 /** The CodeQL languages, each analysed by its own job `codeql-<language>`. */
 export const codeqlLanguages = [
   "rust",
@@ -1690,6 +1731,9 @@ export function checkWorkflowSecurity(source: string): void {
       }
     }
   }
+  // Globally reject unknown Actions SHAs before checking approved Bun cache
+  // owners. This preserves the upstream unreviewed-action failure diagnostic.
+  checkB3BunCachePolicy(stepsByJob);
   // This broad safety net runs AFTER the narrower, previously reviewed
   // executable-step checks. That keeps their deterministic negative-control
   // diagnostics while also rejecting an otherwise permitted earlier step

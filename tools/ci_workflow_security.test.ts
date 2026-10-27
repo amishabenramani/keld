@@ -1848,6 +1848,54 @@ test("apt timeout reads the parsed run script, not names or layout", () => {
 
 const b3MainSaveIf =
   "${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}";
+const b3BunNoCache =
+  "${{ github.event_name != 'push' || github.ref != 'refs/heads/main' }}";
+const b3BunJobs = ["check", "bun-test", "hygiene"] as const;
+
+function b3BunAction(f: Fixture, jobName: string): Step {
+  const actions = f.jobs[jobName]!.steps.filter((step) =>
+    String(step.uses ?? "")
+      .toLowerCase()
+      .startsWith("oven-sh/setup-bun@"),
+  );
+  expect(actions.length, jobName).toBe(1);
+  return actions[0]!;
+}
+
+test("B3 Bun action post-cache save is disabled for every PR and non-main push", () => {
+  for (const job of b3BunJobs) {
+    const action = b3BunAction(fixture(), job);
+    expect((action.with as Step)["no-cache"], job).toBe(b3BunNoCache);
+    for (const unsafe of [
+      undefined,
+      false,
+      "false",
+      "${{ github.event_name != 'pull_request' }}",
+      "${{ github.ref != 'refs/heads/main' }}",
+      "${{ github.event_name != 'push' }}",
+    ]) {
+      const f = fixture();
+      const inputs = b3BunAction(f, job).with as Step;
+      if (unsafe === undefined) delete inputs["no-cache"];
+      else inputs["no-cache"] = unsafe;
+      expect(() => check(f), `${job} ${String(unsafe)}`).toThrow(
+        "B3 Bun cache must be disabled outside protected-main pushes",
+      );
+    }
+  }
+});
+
+test("B3 Bun setup ownership rejects duplicated and rogue post-cache savers", () => {
+  const duplicate = fixture();
+  duplicate.jobs.hygiene!.steps.push({ ...b3BunAction(duplicate, "hygiene") });
+  expect(() => check(duplicate)).toThrow(
+    "B3 Bun cache setup must appear exactly once",
+  );
+  const rogue = fixture();
+  rogue.jobs.fmt!.steps.push({ ...b3BunAction(rogue, "check") });
+  expect(() => check(rogue)).toThrow("B3 Bun cache action not approved in job");
+});
+
 const b3RustCacheJobs = [
   "check",
   "windows-media",
