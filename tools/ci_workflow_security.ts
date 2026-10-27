@@ -1452,14 +1452,26 @@ export function checkWorkflowSecurity(source: string): void {
     "tools/fmt_included.sh test\ntools/fmt_included.sh --check\n",
     "rustfmt included-file commands",
   );
+  // E3/E4 matched-source rollback experiment: the baseline arm restores
+  // exactly the previous SHA-pinned cache action at its old position. Every
+  // formatter and required-result check above remains mandatory; arbitrary
+  // caches, reordered steps or optional cache policy are not admitted.
+  const baselineFmtCache =
+    "Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0";
+  const restoredCaches = fmt.filter(
+    (step) =>
+      typeof step.uses === "string" &&
+      actionName(step.uses).startsWith("swatinem/rust-cache"),
+  );
   if (
-    fmt.some(
-      (step) =>
-        typeof step.uses === "string" &&
-        actionName(step.uses).startsWith("swatinem/rust-cache"),
-    )
+    restoredCaches.length !== 1 ||
+    fmt[2]?.uses !== baselineFmtCache ||
+    Object.keys(fmt[2]!).length !== 1 ||
+    fmt[3]?.run !== "cargo fmt --all --check"
   ) {
-    fail("rustfmt must not restore or save a compiled Cargo cache.");
+    fail(
+      "rustfmt E3/E4 baseline must restore exactly one reviewed Cargo cache action before mandatory formatting.",
+    );
   }
   const required = stepsByJob.get("required");
   if (!required) fail("CI required job must exist.");

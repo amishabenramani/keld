@@ -178,6 +178,9 @@ jobs:
         with:
           toolchain: 1.99.1
           components: rustfmt, clippy
+      # #1061 E3/E4 baseline-only arm: restore the *previously reviewed*
+      # immutable Cargo cache step, without changing formatting or required CI.
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       - run: cargo fmt --all --check
       # `cargo fmt` never visits `include!`d files, `#[path]` mods declared
       # inside macro bodies, or the `mod` files under either.

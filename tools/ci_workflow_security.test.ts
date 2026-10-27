@@ -737,14 +737,16 @@ function executableFmtLines(run: unknown): Set<string> {
   );
 }
 
-test("rustfmt avoids compiled Cargo cache without reducing format coverage", () => {
+test("E3/E4 baseline restores reviewed Cargo cache without reducing formatting coverage", () => {
   const workflow = fixture();
   const steps = workflow.jobs.fmt!.steps;
   expect(
-    steps.some((step) =>
-      String(step.uses ?? "").startsWith("Swatinem/rust-cache@"),
-    ),
-  ).toBe(false);
+    steps
+      .filter((step) =>
+        String(step.uses ?? "").startsWith("Swatinem/rust-cache@"),
+      )
+      .map((step) => step.uses),
+  ).toEqual(["Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0"]);
   expect(
     steps.some(
       (step) => String(step.run ?? "").trim() === "cargo fmt --all --check",
@@ -821,8 +823,39 @@ test("rustfmt Cargo command and changed-Rust routing preserve executable failure
     uses: "sWatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0",
   });
   expect(() => check(hiddenCache)).toThrow(
-    "rustfmt must not restore or save a compiled Cargo cache",
+    "rustfmt E3/E4 baseline must restore exactly one reviewed Cargo cache action",
   );
+});
+
+test("E3/E4 restored formatter cache remains exactly pinned, ordered and unskippable", () => {
+  for (const mutation of [
+    "removed",
+    "wrong-sha",
+    "moved",
+    "condition",
+    "tolerate-failure",
+    "extra-input",
+    "duplicate",
+  ] as const) {
+    const f = fixture();
+    const steps = f.jobs.fmt!.steps;
+    if (mutation === "removed") steps.splice(2, 1);
+    if (mutation === "wrong-sha")
+      steps[2]!.uses =
+        "Swatinem/rust-cache@0000000000000000000000000000000000000000";
+    if (mutation === "moved") {
+      const cache = steps.splice(2, 1)[0]!;
+      steps.push(cache);
+    }
+    if (mutation === "condition") steps[2]!.if = "false";
+    if (mutation === "tolerate-failure") steps[2]!["continue-on-error"] = true;
+    if (mutation === "extra-input")
+      steps[2]!.with = { "cache-on-failure": "true" };
+    if (mutation === "duplicate") steps.splice(3, 0, { ...steps[2]! });
+    expect(() => check(f), mutation).toThrow(
+      "rustfmt E3/E4 baseline must restore exactly one reviewed Cargo cache action",
+    );
+  }
 });
 
 test("inherited custom shells cannot false-green terminal required results", () => {
