@@ -49,6 +49,64 @@ export interface BrowserWindowOptions {
   readonly [unknownField: string]: unknown;
 }
 
+/** A cancellable Host close request; consumers may veto, never forge its state. */
+export interface CloseEvent {
+  preventDefault(): void;
+  readonly defaultPrevented: boolean;
+}
+
+/** The approved first-window event vocabulary (GH531 §4.f). */
+export interface BrowserWindowEventMap {
+  close: [event: CloseEvent];
+  closed: [];
+  move: [];
+  maximize: [];
+  unmaximize: [];
+  resize: [];
+  focus: [];
+  blur: [];
+  "enter-full-screen": [];
+  "leave-full-screen": [];
+}
+
+/** The single Host-created content view's first-window events. */
+export interface WebContentsEventMap {
+  destroyed: [];
+}
+
+/** Public content lifetime surface; the Host alone owns native release. */
+export interface WebContents {
+  isDestroyed(): boolean;
+  on<K extends keyof WebContentsEventMap>(
+    event: K,
+    listener: (...args: WebContentsEventMap[K]) => void,
+  ): this;
+  once<K extends keyof WebContentsEventMap>(
+    event: K,
+    listener: (...args: WebContentsEventMap[K]) => void,
+  ): this;
+  off<K extends keyof WebContentsEventMap>(
+    event: K,
+    listener: (...args: WebContentsEventMap[K]) => void,
+  ): this;
+}
+
+/** Strict public listener signatures over the existing runtime EventEmitter. */
+export interface BrowserWindow {
+  on<K extends keyof BrowserWindowEventMap>(
+    event: K,
+    listener: (...args: BrowserWindowEventMap[K]) => void,
+  ): this;
+  once<K extends keyof BrowserWindowEventMap>(
+    event: K,
+    listener: (...args: BrowserWindowEventMap[K]) => void,
+  ): this;
+  off<K extends keyof BrowserWindowEventMap>(
+    event: K,
+    listener: (...args: BrowserWindowEventMap[K]) => void,
+  ): this;
+}
+
 /** Only the Host's original identity pair can select a window. */
 const windows = new Map<number, BrowserWindow>();
 
@@ -375,7 +433,7 @@ export class BrowserWindow extends EventEmitter {
       : null;
   }
 
-  get webContents(): BrowserWindowWebContents {
+  get webContents(): WebContents {
     if (this.#destroyed && !this.#insideClosed) {
       throw new Error("KELD-COMPAT-011: Object has been destroyed");
     }
