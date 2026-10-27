@@ -488,6 +488,8 @@
         "crates/keld-host/tests/no_flag/windows/support/product.rs",
         "crates/keld-host/tests/no_flag/macos/support/product.rs",
         "crates/keld-host/tests/no_flag/macos/renderer_bridge.rs",
+        "crates/keld-host/tests/no_flag/macos/facade_ready.rs",
+        "crates/keld-host/tests/no_flag/macos/facade_window.rs",
         "crates/keld-update/src/windows_extraction/tests.rs",
         "crates/keld-update/src/windows_extraction/tests/readback_integrity.rs",
         "crates/keld-update/src/windows_extraction/tests/root_admission.rs",
@@ -505,7 +507,7 @@
         "crates/keld-core/src/app_session/window_router/authenticated_tests.rs",
         "crates/keld-core/src/app_session/window_router/fixtures/authenticated_window_role.ts"
       ],
-      "sha256": "1318a1673476b76a2783a3ca7a8351ed33668e5c8415547aa7919c9d21b77e6d"
+      "sha256": "6e0c849345f45847387329f12da8c957a3d976a4f214ac3803a2763612825c59"
     },
     "bun-readers": {
       "patterns": [
@@ -522,7 +524,7 @@
         ".githooks/*",
         "rust-toolchain.toml"
       ],
-      "sha256": "9e8f8af4fd9d0478b66d6f7e680fcbfe6b19a6bbb0d2696304093ee0c44a6ed5"
+      "sha256": "889633cf6ab6458bb8b27d314bc15896b1fdc465e41352d47172f19b104ad3f3"
     },
     "audit-readers": {
       "patterns": [
@@ -539,7 +541,7 @@
         "rust-toolchain.toml",
         ".cargo/*"
       ],
-      "sha256": "d0b48176e2a89b951257236feacef97a68bbbfa47bf0f62e59f312e6c4c37413"
+      "sha256": "36969f1177a5eee0a9e358a29f098b72bc08694feb524d1f410e9893948097f7"
     },
     "dependency-command": {
       "patterns": [
@@ -568,7 +570,7 @@
     "patterns": [
       "crates/*"
     ],
-    "membership_sha256": "c63927dc6668358160212e121db15d4708e0b746be4de3c2da4e0688c06f8eef",
+    "membership_sha256": "d86391ac110e02cb76fe479974f241f50168c6385542bb6f84e93d5555338bca",
     "contract": "Broad census binds path membership only: new/removed crate paths fail closed. Existing crate-content edits select Rust through the crates/* input edge. A new cross-tree read in an existing source must register that reader and its input edge in the same change; exact-reader content digests then guard future drift."
   },
   "rust_package_inputs": {
