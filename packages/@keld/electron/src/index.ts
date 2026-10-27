@@ -27,7 +27,14 @@ Object.defineProperty(proc, "type", {
 });
 
 export { app, BrowserWindow };
-export type { BrowserWindowOptions, WebPreferences } from "./browser-window";
+export type {
+  BrowserWindowEventMap,
+  BrowserWindowOptions,
+  CloseEvent,
+  WebContents,
+  WebContentsEventMap,
+  WebPreferences,
+} from "./browser-window";
 export { isCallError, type KeldCallError } from "./link";
 
 const electron = { app, BrowserWindow };
