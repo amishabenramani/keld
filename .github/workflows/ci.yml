@@ -214,6 +214,7 @@ jobs:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
+          save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
           cache-on-failure: true
       - name: Check keld-ipc fuzz workspace
         if: matrix.os == 'ubuntu-latest' && needs.changes.outputs.rust == 'true'
@@ -276,7 +277,7 @@ jobs:
         timeout-minutes: 15
         run: tools/ci_webkitgtk_apt.sh install ~/.cache/keld-webkitgtk-debs
       - name: Save WebKitGTK .deb cache
-        if: matrix.os == 'ubuntu-latest' && needs.changes.outputs.webkitgtk == 'true' && steps.webkitgtk-apt-cache.outputs.cache-hit != 'true'
+        if: matrix.os == 'ubuntu-latest' && needs.changes.outputs.webkitgtk == 'true' && steps.webkitgtk-apt-cache.outputs.cache-hit != 'true' && github.event_name == 'push' && github.ref == 'refs/heads/main'
         timeout-minutes: 5
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
@@ -431,6 +432,7 @@ jobs:
           components: clippy
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
+          save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
           cache-on-failure: true
       - name: Ensure cargo bin dir exists
         shell: pwsh
@@ -612,6 +614,8 @@ jobs:
         with:
           toolchain: 1.99.1
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
       - name: cargo test --doc
         shell: bash
         env:
@@ -693,6 +697,7 @@ jobs:
           toolchain: 1.99.1
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
+          save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
           cache-on-failure: true
       # The .deb set comes from a first-party cache keyed by the exact package
       # list and runner image (#645). tools/ci_webkitgtk_apt.sh still runs
@@ -718,7 +723,7 @@ jobs:
         timeout-minutes: 15
         run: tools/ci_webkitgtk_apt.sh install ~/.cache/keld-webkitgtk-debs
       - name: Save WebKitGTK .deb cache
-        if: steps.webkitgtk-apt-cache.outputs.cache-hit != 'true'
+        if: steps.webkitgtk-apt-cache.outputs.cache-hit != 'true' && github.event_name == 'push' && github.ref == 'refs/heads/main'
         timeout-minutes: 5
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
@@ -760,6 +765,8 @@ jobs:
           toolchain: 1.99.1
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
       - name: Read MSRV from workspace metadata
         id: msrv
         run: |
@@ -787,6 +794,8 @@ jobs:
           toolchain: 1.99.1
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
       # #676: the upstream release binary, checksum-verified, replaces the Docker
       # cargo-deny-action whose image build pulled anonymously from Docker Hub. The
       # advisory database still comes from cargo-deny's default GitHub URL. Bump the

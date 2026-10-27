@@ -1846,6 +1846,85 @@ test("apt timeout reads the parsed run script, not names or layout", () => {
   expect(() => check(unrelated)).not.toThrow();
 });
 
+const b3MainSaveIf =
+  "${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}";
+const b3RustCacheJobs = [
+  "check",
+  "windows-media",
+  "doctest",
+  "linux-gui-smoke",
+  "msrv",
+  "deny",
+] as const;
+
+function b3CacheStep(f: Fixture, jobName: string): Step {
+  const steps = f.jobs[jobName]!.steps.filter((candidate) =>
+    String(candidate.uses ?? "")
+      .toLowerCase()
+      .startsWith("swatinem/rust-cache@"),
+  );
+  expect(steps.length, jobName).toBe(1);
+  return steps[0]!;
+}
+
+test("B3 Cargo cache writes are restricted to trusted protected-main pushes", () => {
+  for (const job of b3RustCacheJobs) {
+    const f = fixture();
+    const cache = b3CacheStep(f, job);
+    const inputs = cache.with as Step;
+    expect(inputs["save-if"], job).toBe(b3MainSaveIf);
+    for (const unsafe of [
+      undefined,
+      "true",
+      "${{ github.event_name == 'push' }}",
+      "${{ github.ref == 'refs/heads/main' }}",
+      "${{ github.event_name != 'pull_request' }}",
+    ]) {
+      const mutated = fixture();
+      const inputs = b3CacheStep(mutated, job).with as Step;
+      if (unsafe === undefined) delete inputs["save-if"];
+      else inputs["save-if"] = unsafe;
+      expect(() => check(mutated), `${job}: ${unsafe}`).toThrow(
+        "B3 Cargo cache save must require trusted protected-main push",
+      );
+    }
+    const duplicate = fixture();
+    duplicate.jobs[job]!.steps.push({ ...b3CacheStep(duplicate, job) });
+    expect(() => check(duplicate), job).toThrow(
+      job === "deny"
+        ? "jobs.deny must run exactly"
+        : "B3 Cargo cache action must appear exactly once in its reviewed job",
+    );
+  }
+  const moved = fixture();
+  moved.jobs.fmt!.steps.push({
+    uses: b3CacheStep(moved, "check").uses,
+    with: { "save-if": b3MainSaveIf },
+  });
+  expect(() => check(moved)).toThrow(
+    "rustfmt must not restore or save a compiled Cargo cache",
+  );
+});
+
+test("B3 signed WebKitGTK caches save only on a miss during protected-main push", () => {
+  for (const job of webkitgtkAptJobs) {
+    const f = fixture();
+    const save = step(f, job, "Save WebKitGTK .deb cache");
+    expect(String(save.if), job).toContain(
+      "github.event_name == 'push' && github.ref == 'refs/heads/main'",
+    );
+    const weakened = fixture();
+    const saveStep = step(weakened, job, "Save WebKitGTK .deb cache");
+    saveStep.if = String(saveStep.if).replace(
+      " && github.event_name == 'push' && github.ref == 'refs/heads/main'",
+      "",
+    );
+    expect(() => check(weakened), job).toThrow(
+      "B3 WebKitGTK cache save must require trusted protected-main push",
+    );
+  }
+});
+
 for (const job of webkitgtkAptJobs) {
   test(`${job} WebKitGTK .deb cache keeps its key, verified install and miss-only save`, () => {
     const mutations: [string, (f: Fixture) => void, string][] = [

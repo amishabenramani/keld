@@ -191,6 +191,10 @@ export const webkitgtkDebCachePath = "~/.cache/keld-webkitgtk-debs";
 const webkitgtkKeyOutput = "${{ steps.webkitgtk-apt-key.outputs.key }}";
 const webkitgtkCacheHitGuard =
   "steps.webkitgtk-apt-cache.outputs.cache-hit != 'true'";
+const b3ProtectedMainCacheSaveCondition =
+  "github.event_name == 'push' && github.ref == 'refs/heads/main'";
+const b3ProtectedMainCacheSaveIf =
+  "${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}";
 /** Hard bound on each cache step; a stuck restore download gives up sooner and proceeds as a miss. */
 export const webkitgtkCacheStepTimeoutMinutes = 5;
 export const webkitgtkCacheSegmentTimeoutMinutes = 2;
@@ -327,13 +331,14 @@ function checkWebkitgtkAptCache(
       },
       `jobs.${jobName} Restore WebKitGTK .deb cache env (a stuck download must abort as a miss before the step bound)`,
     );
-    const saveIf =
+    const saveIf = `${
       condition === undefined
         ? webkitgtkCacheHitGuard
-        : `${String(condition)} && ${webkitgtkCacheHitGuard}`;
+        : `${String(condition)} && ${webkitgtkCacheHitGuard}`
+    } && ${b3ProtectedMainCacheSaveCondition}`;
     if (save.if !== saveIf)
       fail(
-        `jobs.${jobName} Save WebKitGTK .deb cache must run only on a miss: \`if: ${saveIf}\`.`,
+        `jobs.${jobName} Save WebKitGTK .deb cache must run only on a miss; B3 WebKitGTK cache save must require trusted protected-main push: \`if: ${saveIf}\`.`,
       );
     const order = [key, restore, install, save].map((step) =>
       steps.indexOf(step),
@@ -343,6 +348,53 @@ function checkWebkitgtkAptCache(
         `jobs.${jobName} must order the WebKitGTK cache steps key, restore, install, save.`,
       );
     }
+  }
+}
+
+/** B3: only protected-main push may save any reviewed Cargo build cache. */
+function checkB3RustCacheWritePolicy(stepsByJob: Map<string, Mapping[]>): void {
+  const owners = new Set([
+    "check",
+    "windows-media",
+    "doctest",
+    "linux-gui-smoke",
+    "msrv",
+    "deny",
+  ]);
+  const withFailureCache = new Set([
+    "check",
+    "windows-media",
+    "linux-gui-smoke",
+  ]);
+  for (const [jobName, steps] of stepsByJob) {
+    const caches = steps.filter(
+      (step) =>
+        typeof step.uses === "string" &&
+        actionName(step.uses).startsWith("swatinem/rust-cache"),
+    );
+    if (!owners.has(jobName) && caches.length > 0)
+      fail(`B3 Cargo cache action not approved in job ${jobName}.`);
+    if (owners.has(jobName) && caches.length !== 1)
+      fail(
+        `B3 Cargo cache action must appear exactly once in its reviewed job ${jobName}.`,
+      );
+    if (!owners.has(jobName)) continue;
+    const cache = caches[0]!;
+    exactKeys(
+      cache,
+      ["uses", "with"],
+      `B3 Cargo cache save must require trusted protected-main push in ${jobName}`,
+    );
+    inputsMatch(
+      mapping(cache.with, `jobs.${jobName} B3 Cargo cache inputs`),
+      withFailureCache.has(jobName)
+        ? {
+            "save-if": b3ProtectedMainCacheSaveIf,
+            "cache-on-failure": "true",
+          }
+        : { "save-if": b3ProtectedMainCacheSaveIf },
+      `B3 Cargo cache save must require trusted protected-main push in ${jobName}`,
+    );
   }
 }
 
@@ -1461,6 +1513,9 @@ export function checkWorkflowSecurity(source: string): void {
   ) {
     fail("rustfmt must not restore or save a compiled Cargo cache.");
   }
+  // Perform the B3 cache-owner/write-policy pass after the formatter-specific
+  // negative controls, preserving their established fail-closed diagnostics.
+  checkB3RustCacheWritePolicy(stepsByJob);
   const required = stepsByJob.get("required");
   if (!required) fail("CI required job must exist.");
   const requiredJob = mapping(jobs.required, "jobs.required");
